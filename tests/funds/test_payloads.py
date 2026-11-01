@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """基金结果装载层的回归：残差尺度、披露滞后、择时措辞。
 
-对应 TODO「全量功能/逻辑/设计复查（2026-11-01）」的 P0-1 / P0-2 / P0-4。
+对应 2026-11-01 全量复查发现的残差尺度、披露滞后与择时措辞问题。
 这些断言都自带最小复现输入，不依赖网络与 akshare。
 """
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -73,13 +74,19 @@ class DisclosureLagTest(unittest.TestCase):
         self.assertEqual(H.disclosure_lag_days(None), H.DISCLOSURE_LAG_DAYS)
 
 
+def _holding_panel(n=10):
+    idx = pd.bdate_range("2022-04-01", periods=n)
+    return idx, pd.DataFrame({"801120": np.full(len(idx), 1.0)}, index=idx)
+
+
 class HoldingBenchmarkCashTest(unittest.TestCase):
     def _hr(self, weight):
-        idx = pd.bdate_range("2022-04-01", periods=10)
-        panel = pd.DataFrame({"801120": np.full(len(idx), 1.0)}, index=idx)
+        idx, panel = _holding_panel()
         exposure = pd.DataFrame({"801120": [weight]},
                                 index=[pd.Timestamp("2021-12-31")])
-        return H.holding_benchmark(exposure, panel, cash_rate=0.015)
+        # 显式 0 股息：这里的断言只关心现金腿，不受 RBSA 配置影响
+        return H.holding_benchmark(exposure, panel, cash_rate=0.015,
+                                   dividend_yield=0.0)
 
     def test_cash_leg_accrues(self):
         hr = self._hr(50.0)
@@ -91,6 +98,90 @@ class HoldingBenchmarkCashTest(unittest.TestCase):
     def test_full_exposure_has_no_cash_leg(self):
         hr = self._hr(100.0)
         self.assertAlmostEqual(float(hr.iloc[0]), 0.0, places=12)
+
+
+class HoldingBenchmarkDividendTest(unittest.TestCase):
+    """行业指数不含股息，价格指数基准会系统性低估（P1-10）。"""
+
+    def _hr(self, div, weight=100.0):
+        idx, panel = _holding_panel()
+        exposure = pd.DataFrame({"801120": [weight]},
+                                index=[pd.Timestamp("2021-12-31")])
+        return H.holding_benchmark(exposure, panel, cash_rate=0.015,
+                                   dividend_yield=div)
+
+    def test_dividend_leg_scales_with_stock_weight(self):
+        daily_div = (1.02 ** (1 / 252) - 1)
+        self.assertAlmostEqual(float(self._hr(0.02).iloc[0]), daily_div, places=9)
+        daily_cash = (1.015 ** (1 / 252) - 1)
+        mixed = 0.4 * daily_div + 0.6 * daily_cash
+        self.assertAlmostEqual(float(self._hr(0.02, 40.0).iloc[0]), mixed, places=9)
+
+    def test_zero_dividend_keeps_legacy_numbers(self):
+        self.assertAlmostEqual(float(self._hr(0.0).iloc[0]), 0.0, places=12)
+
+    def test_default_follows_rbsa_config_and_is_recorded(self):
+        with patch.dict(H.C.RBSA, {"index_dividend_annual": 0.03}):
+            hr = self._hr(None)
+            self.assertAlmostEqual(float(hr.attrs["dividend_yield"]), 0.03)
+        self.assertAlmostEqual(float(hr.iloc[0]), (1.03 ** (1 / 252) - 1), places=9)
+
+    def test_negative_dividend_is_rejected(self):
+        # 负股息相当于凭空做空收益，属于参数错误而不是"情景"
+        with self.assertRaises(ValueError):
+            self._hr(-0.01)
+
+
+class ExposureCoverageTest(unittest.TestCase):
+    """未映射权重 ≠ 现金：必须能拆开（P1-11 的可离线部分）。"""
+
+    def _holdings(self, rows):
+        return pd.DataFrame(rows,
+                            columns=["季末", "股票代码", "占净值比例", "完整"])
+
+    def test_coverage_splits_unmapped_from_cash(self):
+        hd = self._holdings([
+            [pd.Timestamp("2022-12-31"), "600000", 40.0, True],
+            [pd.Timestamp("2022-12-31"), "830799", 10.0, True],    # 北交所，未映射
+            [pd.Timestamp("2022-12-31"), "600001", 30.0, False],   # 季报，应剔除
+        ])
+        cov = H.exposure_coverage(hd, pd.Series({"600000": "银行"}))
+        row = cov.loc[pd.Timestamp("2022-12-31")]
+        self.assertAlmostEqual(float(row["已映射权重"]), 40.0)
+        self.assertAlmostEqual(float(row["未映射权重"]), 10.0)
+        self.assertAlmostEqual(float(row["合计"]), 50.0)
+        self.assertAlmostEqual(float(row["覆盖率"]), 0.8)
+        # 暴露表仍只含能映射的行业（行为不变），覆盖率负责说明差额
+        exp = H.semiannual_exposure(hd, pd.Series({"600000": "银行"}))
+        self.assertAlmostEqual(float(exp.sum(axis=1).iloc[0]), 40.0)
+
+    def _weights(self):
+        return pd.DataFrame({"801120": [0.6], "801080": [0.4]},
+                            index=[pd.Timestamp("2022-12-31")])
+
+    def _exposure(self):
+        return pd.DataFrame({"801120": [40.0], "801080": [20.0]},
+                            index=[pd.Timestamp("2022-12-31")])
+
+    def _coverage(self):
+        return pd.DataFrame({"已映射权重": [60.0], "未映射权重": [15.0],
+                             "合计": [75.0], "覆盖率": [0.8]},
+                            index=[pd.Timestamp("2022-12-31")])
+
+    def test_align_reports_unmapped_and_explains_it(self):
+        al = H.align_vs_rbsa(self._weights(), self._exposure(),
+                             coverage=self._coverage())
+        self.assertTrue(al["ok"])
+        self.assertAlmostEqual(float(al["periods"]["未映射权重"].iloc[0]), 15.0)
+        self.assertAlmostEqual(float(al["periods"]["持仓合计"].iloc[0]), 75.0)
+        self.assertAlmostEqual(float(al["unmapped_mean"]), 15.0)
+        self.assertIn("未映射", al["coverage_note"])
+
+    def test_align_without_coverage_admits_it_cannot_tell(self):
+        al = H.align_vs_rbsa(self._weights(), self._exposure())
+        self.assertTrue(al["ok"])
+        self.assertTrue(np.isnan(float(al["periods"]["未映射权重"].iloc[0])))
+        self.assertIn("无法区分", al["coverage_note"])
 
 
 class TimingComparisonTest(unittest.TestCase):

@@ -70,11 +70,13 @@ wheel 检查应在独立虚拟环境安装构建产物，在源码目录之外�
 
 ## 已有验证记录
 
-P2 收尾一轮（2026-11-01）：完整238项unittest、两套脚本式回归及两套前端回归通过。新增1项断言权重 payload 不再输出 `n_zero`（"低于展示阈值"的项数由 `n - len(items)` 得到，恰好为 0 的权重不计入 `n`）；前端新增"无模型详情"空态断言，`renderSelected()` 不再静默 return，`applyResult()` 把 `best_model` 收敛到本次真实存在的模型。未重跑浏览器检查与 `uv build`，见[待办与审查记录](../TODO.md)。
+持仓口径一轮（2026-11-01）：完整245项unittest、两套脚本式回归及两套前端回归通过。新增7项覆盖持仓基准的股息腿（按股票权重缩放、默认跟随 `C.RBSA["index_dividend_annual"]` 并写入 `attrs`、负值拒绝）、`exposure_coverage()` 的已映射/未映射/合计/覆盖率拆分，以及 `align_vs_rbsa(coverage=...)` 输出未映射权重与说明、未传 coverage 时明确承认"无法区分现金与抓不到行业的股票"。`holdings` 命令的 H0/H1 增加未映射权重均值、覆盖率均值、持仓基准股息率三列。首跑曾出现 1 个 error（未复现，随后连跑两次均 245 项通过）。未重跑浏览器检查与 `uv build`；未完成项见[待办](../TODO.md)。
 
-请求线程只读一轮（2026-11-01）：完整237项unittest、两套脚本式回归（`test_p0_fixes.py`、`test_regressions.py`）及两套前端回归通过。新增9项覆盖只读模式拒抓取（`allow_fetch=False` 抛 `CacheMiss` 且不调 `fetch_universe`）、暖缓存不补取缺列、`/api/corr` 冷缓存返 409 与暖缓存正常计算、`/api/name` 不碰网络且区分 `found` 三态（命中/确认不存在/未查）、名录负缓存 TTL 过期回落"未查"、资金情景"满仓目标逐日重试补仓"与假设文本一致；`load_index_universe` 的缺列告警改走日志，避免 GBK 控制台 `UnicodeEncodeError`。未重跑浏览器检查与 `uv build`，见[待办与审查记录](../TODO.md)。
+P2 收尾一轮（2026-11-01）：完整238项unittest、两套脚本式回归及两套前端回归通过。新增1项断言权重 payload 不再输出 `n_zero`（"低于展示阈值"的项数由 `n - len(items)` 得到，恰好为 0 的权重不计入 `n`）；前端新增"无模型详情"空态断言，`renderSelected()` 不再静默 return，`applyResult()` 把 `best_model` 收敛到本次真实存在的模型。未重跑浏览器检查与 `uv build`；未完成项见[待办](../TODO.md)。
 
-P2 清理一轮（2026-11-01）：完整228项unittest、两套脚本式回归（`test_p0_fixes.py`、`test_regressions.py`）及两套前端回归通过。新增8项覆盖候选池空入参返回带列空表、池文件损坏/缺列时告警、扩展清单回落、结果缓存只删非当前版本且每进程只跑一次、指纹记录窗口与脏工作区、稳定态使用 CSS 实际存在的 `ok` 类；删除死形参 `candidates(refresh)`、死函数 `_verdict_badge`/`_read_json_cols`、`sync.start` 后签名与行为保持。`only_full`、`src/`+`webapp/` 兼容桥接经复核判定不成立、予以保留。未重跑浏览器检查与 `uv build`，见[待办与审查记录](../TODO.md)。
+请求线程只读一轮（2026-11-01）：完整237项unittest、两套脚本式回归（`test_p0_fixes.py`、`test_regressions.py`）及两套前端回归通过。新增9项覆盖只读模式拒抓取（`allow_fetch=False` 抛 `CacheMiss` 且不调 `fetch_universe`）、暖缓存不补取缺列、`/api/corr` 冷缓存返 409 与暖缓存正常计算、`/api/name` 不碰网络且区分 `found` 三态（命中/确认不存在/未查）、名录负缓存 TTL 过期回落"未查"、资金情景"满仓目标逐日重试补仓"与假设文本一致；`load_index_universe` 的缺列告警改走日志，避免 GBK 控制台 `UnicodeEncodeError`。未重跑浏览器检查与 `uv build`；未完成项见[待办](../TODO.md)。
+
+P2 清理一轮（2026-11-01）：完整228项unittest、两套脚本式回归（`test_p0_fixes.py`、`test_regressions.py`）及两套前端回归通过。新增8项覆盖候选池空入参返回带列空表、池文件损坏/缺列时告警、扩展清单回落、结果缓存只删非当前版本且每进程只跑一次、指纹记录窗口与脏工作区、稳定态使用 CSS 实际存在的 `ok` 类；删除死形参 `candidates(refresh)`、死函数 `_verdict_badge`/`_read_json_cols`、`sync.start` 后签名与行为保持。`only_full`、`src/`+`webapp/` 兼容桥接经复核判定不成立、予以保留。未重跑浏览器检查与 `uv build`；未完成项见[待办](../TODO.md)。
 
 分位修正一轮（2026-11-01）：完整200项unittest、两套前端回归及修改Python文件编译通过。新增8项覆盖前导缺失、当日缺失、已知分位、无穷与有限样本门槛、窗口/等值、前缀稳定/输入不变、ATR及带宽预热、缺失特征传递；六证券特征审计记录真实修正范围，详见[分位记录](../docs/历史分位缺失值修正_2026-11-01.md)。
 

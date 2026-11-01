@@ -35,6 +35,7 @@ RBSA 用指数收益回归推断"这只基金在赌哪些行业"，权重可解�
 """
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -44,6 +45,8 @@ import pandas as pd
 
 import market_research.config as C
 from market_research.data.files import _atomic_csv_write
+
+LOG = logging.getLogger(__name__)
 
 # 披露滞后（自然日）。★ 完整持仓（全部持仓明细）只出现在**半年报**与**年报**：
 #   半年报法定 8/31 前披露（季末 +62 天），年报次年 3/31 前（季末 +90 天）。
@@ -219,6 +222,26 @@ def _normalize_holdings(df: pd.DataFrame) -> pd.DataFrame:
     return out.dropna(subset=["季末"])
 
 
+def _map_industries(holdings: pd.DataFrame, industry_map: pd.Series,
+                    only_full: bool = True):
+    """统一过滤口径，返回 `(已映射, 未映射)` 两张持仓表。
+
+    两张表都保留，是因为"被丢弃的未映射权重"必须能被统计出来：
+    暴露表只含能映射到申万一级行业的持仓，未映射的新股/北交所/停牌股
+    同样是股票仓位，不能说成现金。
+    """
+    if holdings is None or holdings.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    h = holdings[holdings["完整"]] if only_full else holdings
+    h = h[h["占净值比例"].notna()].copy()
+    if h.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    # 防御性再规整一次：调用方可能直接传入未经 _retype_holdings 的表
+    h["股票代码"] = h["股票代码"].astype(str).str.zfill(6)
+    h["industry"] = h["股票代码"].map(industry_map)
+    return h[h["industry"].notna()], h[h["industry"].isna()]
+
+
 def semiannual_exposure(holdings: pd.DataFrame,
                         industry_map: pd.Series,
                         only_full: bool = True) -> pd.DataFrame:
@@ -227,25 +250,53 @@ def semiannual_exposure(holdings: pd.DataFrame,
 
     only_full=True 时只取 Q2/Q4（完整持仓）。这是唯一诚实的口径 ——
     Q1/Q3 只有前十大，聚合出来的小仓位行业会被系统性低估。
+
+    ★ 返回表**只含能映射的行业**，行合计因此小于 100%。差额里有现金/债券，
+      也有抓不到行业的股票 —— 两者必须靠 `exposure_coverage()` 区分，
+      否则"真实暴露合计 87~91%"会被误读成"其余都是现金"。
     """
-    if holdings is None or holdings.empty:
-        return pd.DataFrame()
-    h = holdings[holdings["完整"]] if only_full else holdings
-    h = h[h["占净值比例"].notna()].copy()
-    if h.empty:
-        return pd.DataFrame()
-    # 防御性再规整一次：调用方可能直接传入未经 _retype_holdings 的表
-    h["股票代码"] = h["股票代码"].astype(str).str.zfill(6)
-    h["industry"] = h["股票代码"].map(industry_map)
-    unmapped = h[h["industry"].isna()]
+    mapped, unmapped = _map_industries(holdings, industry_map, only_full)
     if len(unmapped):
-        print(f"[holdings] ⚠ {len(unmapped)} 条持仓未映射到申万一级行业"
-              f"（权重合计 {unmapped['占净值比例'].sum():.2f}%），"
-              f"多为新股/北交所/停牌股")
-    h = h[h["industry"].notna()]
-    exp = (h.groupby(["季末", "industry"])["占净值比例"].sum()
+        # 走日志而不是 print：这条警告含 ⚠（U+26A0），在 GBK 控制台会抛
+        # UnicodeEncodeError，把一次聚合变成崩溃。
+        LOG.warning("%d 条持仓未映射到申万一级行业（权重合计 %.2f%%），多为新股/"
+                    "北交所/停牌股；该权重不计入暴露表，用 exposure_coverage() "
+                    "查看每期覆盖率", len(unmapped),
+                    float(unmapped["占净值比例"].sum()))
+    if mapped.empty:
+        return pd.DataFrame()
+    exp = (mapped.groupby(["季末", "industry"])["占净值比例"].sum()
            .unstack("industry").sort_index())
     return exp
+
+
+def exposure_coverage(holdings: pd.DataFrame, industry_map: pd.Series,
+                      only_full: bool = True) -> pd.DataFrame:
+    """
+    每期持仓的映射覆盖率（index=季末，单位=百分点）。
+
+    列：`已映射权重` / `未映射权重` / `合计` / `覆盖率`。
+
+    ★ 为什么单独输出：`semiannual_exposure` 丢掉未映射行后，行合计（实测
+      87~91%）同时包含"现金+债券"和"抓不到行业的股票"。覆盖不足的期次，
+      结构比（`align_vs_rbsa` 把共同行业归一到 100%）会把未映射部分
+      按比例摊到其它行业上，偏差方向因此不可知 —— 有了本表就能标注。
+    """
+    mapped, unmapped = _map_industries(holdings, industry_map, only_full)
+    frames = []
+    if mapped is not None and not mapped.empty:
+        frames.append(mapped.groupby("季末")["占净值比例"].sum()
+                      .rename("已映射权重"))
+    if unmapped is not None and not unmapped.empty:
+        frames.append(unmapped.groupby("季末")["占净值比例"].sum()
+                      .rename("未映射权重"))
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, axis=1).fillna(0.0).sort_index()
+    out["合计"] = out["已映射权重"] + out["未映射权重"]
+    out["覆盖率"] = np.where(out["合计"] > 0,
+                           out["已映射权重"] / out["合计"], np.nan)
+    return out
 
 
 # ====================================================================== 对齐
@@ -273,16 +324,20 @@ def _exposure_to_codes(exposure: pd.DataFrame) -> pd.DataFrame:
 
 
 def align_vs_rbsa(weights: pd.DataFrame, exposure: pd.DataFrame,
-                  industry_map: Optional[pd.Series] = None
-                  ) -> dict:
+                  industry_map: Optional[pd.Series] = None,
+                  coverage: Optional[pd.DataFrame] = None) -> dict:
     """
     逐行业对比 RBSA 权重与真实持仓暴露。
 
     口径说明（必须看清，否则数字会被误读）：
       · RBSA 权重含 16 个宽基指数，这里**只取行业部分**（801xxx）并归一到 100%；
-      · 真实暴露同样归一到 100%（原始合计约 87~91%，差额是现金/债券）；
+      · 真实暴露同样归一到 100%（原始合计约 87~91%）；
       · 两边都归一化后比的是**结构**（"37% 的股票仓位给了食品饮料"），
-        不是绝对仓位。绝对仓位的对比另见 `exposure_raw`。
+        不是绝对仓位。
+      · ★ 那 87~91% 的差额里既有现金/债券，也有**抓不到行业的股票**。
+        传入 `coverage=exposure_coverage(...)` 后，逐期结果会多出
+        `未映射权重` / `持仓合计` 两列，汇总里给 `unmapped_mean` 与
+        `coverage_note`；不传则这两列为 NaN、`coverage_note` 明确说明无法区分。
 
     返回 dict，`ok=False` 表示样本不足以判断（不抛异常）。
     """
@@ -290,6 +345,15 @@ def align_vs_rbsa(weights: pd.DataFrame, exposure: pd.DataFrame,
     if weights is None or weights.empty or exposure is None or exposure.empty:
         return {"ok": False, "reason": "RBSA 权重或真实持仓为空"}
     exposure = _exposure_to_codes(exposure)
+    if coverage is not None and not coverage.empty:
+        coverage = coverage.reindex(exposure.index)
+    else:
+        coverage = None
+
+    def _cov(qend, column):
+        if coverage is None or column not in coverage.columns:
+            return np.nan
+        return float(coverage[column].get(qend, np.nan))
 
     rows, detail = [], []
     for qend in exposure.index:
@@ -317,6 +381,10 @@ def align_vs_rbsa(weights: pd.DataFrame, exposure: pd.DataFrame,
             "权重相关": float(ws.corr(es)) if len(common) > 2 else np.nan,
             "RBSA宽基暴露": float(w_broad.sum()),
             "真实暴露合计": float(e.sum()),
+            # 未映射权重与持仓合计来自 exposure_coverage()：用来区分
+            # "真实暴露合计 < 100%" 里的现金/债券与"抓不到行业的股票"
+            "未映射权重": _cov(qend, "未映射权重"),
+            "持仓合计": _cov(qend, "合计"),
         })
         for c in common:
             detail.append({"季末": qend, "行业": inds.get(c, c),
@@ -341,6 +409,20 @@ def align_vs_rbsa(weights: pd.DataFrame, exposure: pd.DataFrame,
         f"（宽基跨行业），对齐只覆盖行业部分。若该值很大，说明模型把一部分"
         f"行业暴露记在了宽基上，行业层面的偏差会被低估。"
     ) if broad > 1e-6 else "RBSA 未拟合出宽基暴露，行业层面可直接对比。"
+    unmapped_mean = float(df["未映射权重"].mean())
+    total_mean = float(df["持仓合计"].mean())
+    if np.isfinite(unmapped_mean) and unmapped_mean > 0:
+        share = (unmapped_mean / total_mean) if total_mean > 0 else np.nan
+        coverage_note = (
+            f"每期平均有 {unmapped_mean:.1f} 个百分点持仓未映射到申万一级行业"
+            f"（占持股合计 {share:.1%}）—— 结构比只在共同行业上归一到 100%，"
+            f"未映射越重，该期的行业偏差越可能被**低估**，不能当成现金。"
+        )
+    elif np.isfinite(unmapped_mean):
+        coverage_note = "持仓全部映射到申万一级行业，结构比不受未映射权重影响。"
+    else:
+        coverage_note = ("未传入 exposure_coverage()，无法区分现金/债券与"
+                         "抓不到行业的股票。")
     return {
         "ok": True,
         "periods": df,
@@ -351,13 +433,16 @@ def align_vs_rbsa(weights: pd.DataFrame, exposure: pd.DataFrame,
         "corr_mean": float(df["权重相关"].mean()),
         "broad_exposure": broad,
         "broad_note": broad_note,
+        "unmapped_mean": unmapped_mean,
+        "coverage_note": coverage_note,
     }
 
 
 # ====================================================================== 持仓基准
 def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
                       lag_days: Optional[int] = None,
-                      cash_rate: float = 0.015) -> pd.Series:
+                      cash_rate: float = 0.015,
+                      dividend_yield: Optional[float] = None) -> pd.Series:
     """
     只用真实持仓构造的基准组合**日收益**序列（index=交易日）。
 
@@ -366,9 +451,12 @@ def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
     比"空仓也有货币收益"的真实口径更差，会把基金经理的现金管理算成 alpha。
 
     ★ 指数口径：panel 里的行业指数是**价格指数**（不含股息），
-      而基金净值是**总回报**。因此本基准每年系统性低估约 1.5~2.5% 股息，
-      与基金对比时该部分会被误判为"选股/择时能力"。输出 meta 已标注，
-      报告中也应把这段偏差说明清楚。
+      而基金净值是**总回报**。缺的这段股息此前只能标注（每年约 1.5~2.5%），
+      会让基准系统性偏低、把股息算成基金的"选股能力"。
+      `dividend_yield` 就是这条腿：股票权重部分按该年化值逐日计息。
+      None = 跟随 `C.RBSA["index_dividend_annual"]`（默认 0，即保持历史口径）。
+      管线没有逐行业股息数据，这是一个**显式情景参数**，不是精确修正；
+      实际取值写入返回序列的 `attrs`，便于结果落盘时留痕。
     ★ **披露滞后必须处理**：Q2 完整持仓见半年报（8/31，季末 +62 天），
       Q4 见年报（次年 3/31，季末 +90 天）。因此该期暴露从
       `季末 + disclosure_lag_days(季末)` 起生效，而不是 6/30。
@@ -377,12 +465,18 @@ def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
     """
     if exposure is None or exposure.empty or panel is None or panel.empty:
         return pd.Series(dtype=float)
+    if dividend_yield is None:
+        dividend_yield = float(C.RBSA.get("index_dividend_annual", 0.0) or 0.0)
+    dividend_yield = float(dividend_yield)
+    if not np.isfinite(dividend_yield) or dividend_yield < 0:
+        raise ValueError("dividend_yield 需为有限非负数值（年化，如 0.02）")
     exposure = _exposure_to_codes(exposure)
     cols = [c for c in exposure.columns if c in panel.columns]
     if not cols:
         return pd.Series(dtype=float)
 
     rets = np.log(panel[cols].astype(float)).diff()
+    daily_div = (1.0 + dividend_yield) ** (1.0 / 252.0) - 1.0
     parts = []
     for qend in exposure.index:
         lag = int(lag_days) if lag_days is not None else disclosure_lag_days(qend)
@@ -391,26 +485,31 @@ def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
         #   而 rets 是小数日收益。不除 100 会让每日收益被放大近百倍
         #   （实测症状：年化 −95%、年化波动 1650%）。
         w = exposure.loc[qend, cols].fillna(0.0) / 100.0
-        if w.sum() <= 0:
+        stock_weight = float(w.sum())
+        if stock_weight <= 0:
             continue
         seg = rets.loc[rets.index >= start]
         if seg.empty:
             continue
         # 未覆盖部分（现金/债券/未映射行业）按年化 cash_rate 计息，
         # 否则空仓期记 0 收益，等于把货币收益白送成基金经理的 alpha。
-        cash_weight = max(0.0, 1.0 - float(w.sum()))
+        cash_weight = max(0.0, 1.0 - stock_weight)
         daily_cash = (1.0 + float(cash_rate)) ** (1.0 / 252.0) - 1.0
         # 该期暴露从披露日一直生效，直到被**更晚一期**覆盖（下方按期末顺序赋值，
         # 后者覆盖前者）—— 这正是"每半年按最新披露调仓"的行为。
         parts.append((seg.index,
-                      (seg * w).sum(axis=1) + cash_weight * daily_cash))
+                      (seg * w).sum(axis=1) + cash_weight * daily_cash
+                      + stock_weight * daily_div))
     if not parts:
         return pd.Series(dtype=float)
     idx = pd.DatetimeIndex(sorted(set().union(*[p[0] for p in parts])))
     out = pd.Series(0.0, index=idx)
     for i, v in parts:
         out.loc[i] = v
-    return out.dropna().sort_index()
+    out = out.dropna().sort_index()
+    out.attrs["dividend_yield"] = dividend_yield
+    out.attrs["cash_rate"] = float(cash_rate)
+    return out
 
 
 def compare_benchmarks(fund_nav: pd.Series, rbsa_syn_nav: pd.Series,

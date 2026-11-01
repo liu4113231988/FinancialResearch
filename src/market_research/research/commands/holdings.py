@@ -8,7 +8,7 @@
     python run.py holdings --refresh          # 强制重抓持仓与行业映射
     python run.py holdings --window-years 2   # 近 2 年窗口（下限 2 年）
 
-做两件事（对应 TODO 的"验证"与"替代"）：
+做两件事：
 
   1. **验证**：逐行业对比 RBSA 拟合权重与半年报/年报的真实持仓暴露，
      回答"RBSA 说的 37% 食品饮料，实际是不是 37%"。
@@ -25,7 +25,11 @@
   · 季报（Q1/Q3）只披露**前十大重仓**，本模块**只用半年报/年报**（完整持仓）；
   · 持仓有**披露滞后**（Q2 约 7 月、Q4 约次年 1 月），持仓基准从披露后起算，
     否则是用未来信息构造历史基准；
-  · RBSA 的宽基暴露无法与持仓对应，对齐只覆盖行业部分。
+  · RBSA 的宽基暴露无法与持仓对应，对齐只覆盖行业部分；
+  · 抓不到行业的股票（新股/北交所/停牌股）不进暴露表，但**不是现金**：
+    每期的未映射权重与覆盖率见 `exposure_coverage()`，也写进 H0/H1；
+  · 行业指数是价格指数，持仓基准缺股息这条腿，默认 0（历史口径），
+    可用 `C.RBSA["index_dividend_annual"]` 做情景修正，实际取值会打印。
 """
 import argparse
 import sys
@@ -68,7 +72,8 @@ def run_one(code: str, industry_map: pd.Series, refresh: bool = False) -> dict:
         return {"code": code, "ok": False, "reason": "无完整（半年报/年报）持仓"}
 
     fit = RBSA().fit_rolling(panel, verbose=False)
-    al = H.align_vs_rbsa(fit["weights"], exp)
+    cov = H.exposure_coverage(hd, industry_map)
+    al = H.align_vs_rbsa(fit["weights"], exp, coverage=cov)
     if not al.get("ok"):
         return {"code": code, "ok": False, "reason": al.get("reason", "对齐失败")}
 
@@ -76,6 +81,8 @@ def run_one(code: str, industry_map: pd.Series, refresh: bool = False) -> dict:
     syn_nav = np.exp(fit["syn_ret"].cumsum())
     cmp_ = H.compare_benchmarks(panel["__FUND__"], syn_nav, hr)
 
+    coverage_mean = (float(cov["覆盖率"].mean())
+                     if not cov.empty and "覆盖率" in cov.columns else np.nan)
     out = {
         "code": code,
         "ok": True,
@@ -89,6 +96,11 @@ def run_one(code: str, industry_map: pd.Series, refresh: bool = False) -> dict:
         "corr_last": float(_corr_series(al).iloc[-1]) if len(_corr_series(al)) else np.nan,
         "corr_valid": int(len(_corr_series(al))),
         "broad_exposure": al["broad_exposure"],
+        "broad_note": al["broad_note"],
+        "coverage_note": al["coverage_note"],
+        "unmapped_mean": al["unmapped_mean"],
+        "coverage_mean": coverage_mean,
+        "dividend_yield": float(hr.attrs.get("dividend_yield", 0.0)) if len(hr) else np.nan,
         "periods": al["periods"],
         "by_industry": al["by_industry"],
         "detail": al["detail"],
@@ -122,6 +134,9 @@ def main(argv=None, *, prog=None):
     print(f"[holdings] 分析窗口 {win_start} 起 · 只用半年报/年报（完整持仓）· "
           f"披露滞后按法定时限：Q2 {H.disclosure_lag_days('2024-06-30')} 天（8/31）、"
           f"Q4 {H.disclosure_lag_days('2024-12-31')} 天（次年 3/31）")
+    div = float(C.RBSA.get("index_dividend_annual", 0.0) or 0.0)
+    print(f"[holdings] 行业指数不含股息，持仓基准股息腿按年化 {div:.2%} 计"
+          f"（`C.RBSA['index_dividend_annual']`，0 = 历史口径）")
 
     industry_map = H.load_industry_map(refresh=args.refresh)
     if industry_map.empty:
@@ -152,6 +167,14 @@ def main(argv=None, *, prog=None):
             "有效相关期数": r["corr_valid"],
             "相关变化": round(r["corr_last"] - r["corr_first"], 3),
             "RBSA宽基暴露": round(r["broad_exposure"], 3),
+            # ★ 未映射权重 ≠ 现金：抓不到行业的股票同样是股票仓位。
+            #   覆盖率低于 ~90% 的期次，结构比偏差更可能被低估。
+            "未映射权重均值": (round(r["unmapped_mean"], 2)
+                              if np.isfinite(r["unmapped_mean"]) else np.nan),
+            "覆盖率均值": (round(r["coverage_mean"], 4)
+                          if np.isfinite(r["coverage_mean"]) else np.nan),
+            "持仓基准股息率": (round(r["dividend_yield"], 4)
+                              if np.isfinite(r["dividend_yield"]) else np.nan),
             "RBSA基准年化": round(s_ann, 4) if np.isfinite(s_ann) else np.nan,
             "持仓基准年化": round(h_ann, 4) if np.isfinite(h_ann) else np.nan,
             "耗时s": r["elapsed"],
@@ -169,6 +192,10 @@ def main(argv=None, *, prog=None):
         print(f"  期数 {r['n_periods']} · 平均绝对偏差 {r['mad_mean']:.4f} · "
               f"权重相关 {r['corr_first']:.3f} → {r['corr_last']:.3f}"
               f"（{'下降' if r['corr_last'] < r['corr_first'] else '上升'}）{note}")
+        if np.isfinite(r["unmapped_mean"]):
+            print(f"  未映射权重均值 {r['unmapped_mean']:.2f}pt · "
+                  f"覆盖率均值 {r['coverage_mean']:.1%} · "
+                  f"持仓基准股息率 {r['dividend_yield']:.2%}")
         if c.get("ok"):
             st = c["stats"].set_index("基准")
             print(f"  年化：基金 {st.loc['基金实际','年化收益']:+.2%} · "
@@ -191,12 +218,20 @@ def main(argv=None, *, prog=None):
         if len(d):
             print(f"  持仓基准 − RBSA基准 年化差：均值 {d.mean():+.2%}，"
                   f"持仓更优 {int((d > 0).sum())}/{len(d)} 只")
+        covs = sub["覆盖率均值"].dropna()
+        if len(covs):
+            print(f"  行业映射覆盖率 均值 {covs.mean():.1%}"
+                  f"（未映射权重均值 {sub['未映射权重均值'].mean():.2f}pt）"
+                  f"—— 这部分是抓不到行业的股票，不是现金")
     print(f"\n结果写入 {out_dir}")
     print("\n读法：")
     print("  · 平均绝对偏差 = 两边归一到 100% 后，逐行业 |RBSA权重 − 真实暴露| 的均值")
     print("  · 权重相关下降 = RBSA 与真实持仓的一致性在变差（风格漂移的直接证据）")
     print("  · 持仓基准年化更高 ≠ 持仓基准更好：它只有半年频调仓、且含现金拖累，")
     print("    两者是不同频率/不同信息集的基准，差值只说明'ML 拟合多带来了/少带来了什么'")
+    print("  · 未映射权重 ≠ 现金：抓不到行业的新股/北交所/停牌股同样是股票仓位，")
+    print("    覆盖率低的期次，结构比（归一到 100%）偏差更可能被低估；")
+    print("    持仓基准的股息腿默认 0，做情景修正时务必同时报告取值")
     return 0
 
 

@@ -187,7 +187,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_sync_task.ps
 
 任务通过 `POST /api/analyze`、`/api/refit`、`/api/backtest` 或 `/api/market/analyze` 提交，再查询 `/api/job/{jid}` 与 `/api/result/{jid}`。完成的基金计算可能直接命中结果缓存；以实际返回字段为准。取消为 `POST /api/job/{jid}/cancel`，进入错误终态并由 worker 终止对应进程；切换页面入口不会自动取消后台任务。
 
-参数错误为 400，容量不足为 429，未完成结果为 202，不存在/过期任务为 404。队列及结果在 API 重启后可继续查询，终态满 24 小时后在新任务提交时清理。持久任务不等于长期研究档案。
+参数错误为 400，容量不足为 429，未完成结果为 202，不存在/过期任务为 404。`/api/corr` 与 `/api/name` 只读本地缓存，**不会为单个请求联网取数**：缓存未预热时前者返回 409 并提示先跑一次分析，后者返回 `found: null`（`found: false` 表示名录确实拉到过、没有该代码）。队列及结果在 API 重启后可继续查询，终态满 24 小时后在新任务提交时清理。持久任务不等于长期研究档案。
 
 同步接口为 `GET /api/sync`、`POST /api/sync/assets`（`kind/code/basis`）、`POST /api/sync/retry`（`asset_key`）。股票 basis 为 `qfq`、空字符串或 `hfq`，指数为空，基金为 `total` 或 `cum`。
 
@@ -222,7 +222,7 @@ scripts/        Windows 同步任务安装脚本
 | [扩池预注册规则](docs/扩池预注册规则.md) | 冻结规则、历史执行状态与未满足条件 |
 | [合成基准与净值差距](docs/合成基准与基金净值的差距.md) | 历史诊断、股息口径和残差解释限制 |
 | [模型档案方案](docs/模型档案与算法记录_重构方案.md) | 尚未实现的产品提案及当前架构修订 |
-| [TODO](TODO.md) | 当前待办摘要和有日期的历史审查记录 |
+| [TODO](TODO.md) | 仅记录未完成项与关闭标准；已完成项的验证记录见测试说明与 git 历史 |
 | [测试说明](tests/README.md) / [兼容说明](compat/README.md) | 验证方式及旧入口边界 |
 
 ## 验证
@@ -235,7 +235,7 @@ node tests/frontend/test_refit.js
 node tests/frontend/test_ui_async.cjs
 ```
 
-最新完整回归200项unittest及两套前端回归通过；此前完整清单的真实快照浏览器检查通过，本轮分位修正同步页面说明与离线特征。快照与验证工具接入16命令注册表。wheel独立安装历史记录不代表本轮重新打包验证。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
+最新完整回归245项unittest、两套脚本式回归及两套前端回归通过；当轮改动未重跑真实浏览器渲染检查与 `uv build`，wheel 独立安装的历史记录不代表本轮重新打包验证。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
 
 依赖以 `pyproject.toml` 和 `uv.lock` 为准。`requirements.txt` 引用运行依赖兼容导出，更新命令为：
 
