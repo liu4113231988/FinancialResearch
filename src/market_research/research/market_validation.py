@@ -14,11 +14,13 @@ from market_research.market.analysis import normalize_code
 from market_research.market.context import context_features
 from market_research.market.technical import indicators, features_for, direction_forecast, compare_forecasts
 from market_research.market.uncertainty import block_intervals
+from market_research.market.execution import compare_probability_execution
+from market_research.research.calibration import calibrate_probabilities
 from market_research.serialization import _jsafe
 from market_research.validation.window import _iso
 
 VARIANTS = ('base', 'volatility', 'volume', 'relative', 'all')
-VERSION = 9
+VERSION = 10
 
 
 def validate_plan(plan):
@@ -27,6 +29,10 @@ def validate_plan(plan):
             raise ValueError(f'{key}需使用规范日期')
     if not plan['start'] < plan['development_start'] < plan['holdout_start'] < plan['end']:
         raise ValueError('需满足 start < development_start < holdout_start < end')
+    if 'calibration_start' in plan:
+        day=plan['calibration_start']
+        if _iso(day,'calibration_start')!=day or not plan['development_start']<day<plan['holdout_start']:
+            raise ValueError('需满足 development_start < calibration_start < holdout_start，且使用规范日期')
     if not plan.get('assets'):
         raise ValueError('固定样本清单不能为空')
     keys = []
@@ -99,9 +105,11 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_co
     if not np.isfinite(bars[['open','high','low','close']].to_numpy()).all() or (bars[['open','high','low','close']] <= 0).any().any():
         raise ValueError('需要有限且正的OHLC价格')
     variants, context = feature_variants(bars, reference)
-    cutoff = (pd.Timestamp(plan['holdout_start'])-pd.Timedelta(days=1)).date().isoformat()
+    cutoff = (pd.Timestamp(plan.get('calibration_start',plan['holdout_start']))-pd.Timedelta(days=1)).date().isoformat()
     output = {'training_cutoff': cutoff, 'account_mode':'capital' if capital_config is not None else 'fractional',
               'features': {k: list(v.columns) for k,v in variants.items()}, 'horizons': {}}
+    if 'calibration_start' in plan:
+        output['calibration']={}
     for horizon in (5, 20):
         forecasts = {key: direction_forecast(bars, values, horizon, bars.index[0], training_end=cutoff)
                      for key, values in variants.items()}
@@ -120,12 +128,30 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_co
                 result = compare_forecasts(window, {'series': baseline}, {'series': candidate}, horizon, start, context) if len(window) else {'n': 0, 'ok': False}
                 result['variant'] = variant
                 result['evidence'] = paired_evidence(window, baseline, candidate, horizon, family_size)
-                from market_research.market.execution import compare_probability_execution
                 result['execution'] = compare_probability_execution(window, pair['base'], pair[variant], calendar, capital_config, uncertainty=True)
                 rows.append(result)
             stages[stage] = rows
         output['horizons'][str(horizon)] = stages
+        if 'calibration_start' in plan:
+            calibration_rows=[]
+            window=bars.loc[plan['holdout_start']:]
+            for variant in VARIANTS:
+                calibrated,metadata=calibrate_probabilities(bars,probability[variant],horizon,
+                    plan['calibration_start'],plan['holdout_start'],cutoff)
+                row={'variant':variant,**metadata,'comparison':None}
+                if metadata['status']=='fitted':
+                    raw=probability[variant].reindex(window.index)
+                    corrected=calibrated.reindex(window.index)
+                    comparison=compare_forecasts(window,{'series':raw.tolist()},
+                        {'series':corrected.tolist()},horizon,plan['holdout_start'],context)
+                    comparison['evidence']=paired_evidence(window,raw,corrected,horizon,family_size)
+                    comparison['execution']=compare_probability_execution(window,raw,corrected,calendar,capital_config,uncertainty=True)
+                    row['comparison']=comparison
+                calibration_rows.append(row)
+            output['calibration'][str(horizon)]=calibration_rows
     output['note'] = '开发期滚动训练，最终测试期固定训练截止日；测试期标签及缩放统计不进入训练。各候选与基线使用各自共同成熟日期，不同候选样本可能不同，不能直接按Brier排名。'
+    if 'calibration_start' in plan:
+        output['note']+=' 启用校准时，开发评估和模型训练均截止校准开始之前；校准参数只拟合独立校准窗口，原概率/校准概率只在留出期配对，不与未启用校准的训练协议混排。'
     return output
 
 
@@ -162,18 +188,23 @@ def evaluate_execution_asset(bars, plan, calendar=None, capital_config=None):
 
 def run_plan(plan, root, progress=None, execution_only=False):
     validate_plan(plan)
-    family_size = len(plan['assets']) * 4 * 2 * 2
+    if execution_only and 'calibration_start' in plan:
+        raise ValueError('概率校准仅用于常规方向验证，不能与--execution-only合用')
+    calibration_count=len(plan['assets'])*5*2 if 'calibration_start' in plan else 0
+    family_size = len(plan['assets']) * 4 * 2 * 2+calibration_count
     report = {'version': VERSION, 'mode': 'execution_only' if execution_only else 'direction', 'manifest': plan, 'manifest_sha256': hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest(),
               'runtime': {'python': platform.python_version(), 'pandas': pd.__version__, 'numpy': np.__version__, 'sklearn': sklearn.__version__},
               'planned_comparisons': 0 if execution_only else family_size,
-              'planned_execution_scenarios': len(plan['assets'])*(2*2*3 if execution_only else 4*2*2*3*3), 'assets': [],
-              'planned_exposure_controls': sum('capital' not in a for a in plan['assets'])*(2*3 if execution_only else 4*2*2*3*2),
+              'planned_calibration_comparisons':calibration_count,
+              'planned_execution_scenarios': len(plan['assets'])*(2*2*3 if execution_only else 4*2*2*3*3)+calibration_count*3*3, 'assets': [],
+              'planned_exposure_controls': sum('capital' not in a for a in plan['assets'])*(2*3 if execution_only else 4*2*2*3*2+(5*2*3*2 if calibration_count else 0)),
               'limitations': ['当前数据版本回放，不是时点可得数据证明。', '同一测试区间反复查看后不再是未触碰的最终测试集。',
                               'HAC正态近似及Bonferroni为探索性诊断，小样本不报p值；不能证明可交易收益。',
                               '块自助区间是固定预测/账户路径的点态条件诊断，未做区间多重校正，不重训或重放订单；不能据此选模型或声称未来收益。']}
     from market_research.market import technical, context, execution, capital, uncertainty
+    from market_research.research import calibration
     report['source_sha256'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-                               for p in (Path(__file__), Path(technical.__file__), Path(context.__file__), Path(execution.__file__), Path(capital.__file__), Path(uncertainty.__file__))}
+                               for p in (Path(__file__), Path(technical.__file__), Path(context.__file__), Path(execution.__file__), Path(capital.__file__), Path(uncertainty.__file__), Path(calibration.__file__))}
     for asset in plan['assets']:
         if progress:
             progress(asset['code'])
@@ -210,6 +241,10 @@ def run_plan(plan, root, progress=None, execution_only=False):
             row.update(status='unavailable', error=str(error))
         report['assets'].append(row)
     report['complete'] = all(a['status']=='evaluated' for a in report['assets'])
+    if calibration_count:
+        report['calibration_complete']=all(a['status']=='evaluated' and all(
+            r['status']=='fitted' and r['comparison']['ok'] for rows in a['result']['calibration'].values() for r in rows)
+            for a in report['assets'])
     return _jsafe(report)
 
 
@@ -230,7 +265,9 @@ def main(argv=None, *, prog=None):
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     print(f"报告已保存：{output}；完整样本覆盖：{report['complete']}")
-    return 0 if report['complete'] else 2
+    if 'calibration_complete' in report:
+        print(f"校准拟合及留出样本完整：{report['calibration_complete']}")
+    return 0 if report['complete'] and report.get('calibration_complete',True) else 2
 
 
 if __name__ == '__main__':
