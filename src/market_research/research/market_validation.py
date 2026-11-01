@@ -14,13 +14,13 @@ from market_research.market.analysis import normalize_code
 from market_research.market.context import context_features
 from market_research.market.technical import indicators, features_for, direction_forecast, compare_forecasts
 from market_research.market.uncertainty import block_intervals
-from market_research.market.execution import compare_probability_execution
+from market_research.market.execution import compare_probability_execution, FEE_SCENARIOS
 from market_research.research.calibration import calibrate_probabilities
 from market_research.serialization import _jsafe
 from market_research.validation.window import _iso
 
 VARIANTS = ('base', 'volatility', 'volume', 'relative', 'all')
-VERSION = 10
+VERSION = 11
 
 
 def validate_plan(plan):
@@ -186,6 +186,49 @@ def evaluate_execution_asset(bars, plan, calendar=None, capital_config=None):
     return stages
 
 
+def comparison_coverage(result, calibration=False):
+    gaps=[]
+    variants=VARIANTS if calibration else VARIANTS[1:]
+    stages=('holdout',) if calibration else ('development','holdout')
+    for horizon in (5,20):
+        for stage in stages:
+            rows=(result.get('calibration',{}).get(str(horizon),[]) if calibration else
+                  result.get('horizons',{}).get(str(horizon),{}).get(stage,[]))
+            for variant in variants:
+                matches=[r for r in rows if r.get('variant')==variant]
+                reason='missing_comparison' if not matches else 'duplicate_comparison' if len(matches)>1 else None
+                row=matches[0] if len(matches)==1 else {}
+                summary=(row.get('comparison') or {}) if calibration else row
+                n=summary.get('n')
+                if reason is None:
+                    if calibration and row.get('status')!='fitted':
+                        reason=row.get('status') or 'not_fitted'
+                    elif not isinstance(n,(int,np.integer)) or isinstance(n,(bool,np.bool_)) or n<20:
+                        reason='no_paired_predictions' if n==0 else 'insufficient_samples'
+                    elif summary.get('ok') is not True:
+                        reason='invalid_summary'
+                if reason:
+                    gaps.append({'horizon':horizon,'stage':stage,'variant':variant,'n':n,'reason':reason})
+    planned=2*len(stages)*len(variants)
+    return {'unit':'paired_comparisons','planned':planned,'sufficient':planned-len(gaps),'incomplete':gaps}
+
+
+def execution_coverage(result):
+    gaps=[]
+    for stage in ('development','holdout'):
+        strategies=result.get(stage,{}).get('strategies',{})
+        for strategy in ('rules','buy_hold'):
+            for fee,slip in FEE_SCENARIOS:
+                rows=[r for r in strategies.get(strategy,[]) if r.get('fee_bps')==fee and r.get('slippage_bps')==slip]
+                n=rows[0].get('n_sessions') if len(rows)==1 else None
+                reason=('missing_scenario' if not rows else 'duplicate_scenario' if len(rows)>1 else
+                        'insufficient_sessions' if not isinstance(n,(int,np.integer)) or isinstance(n,(bool,np.bool_)) or n<2 else None)
+                if reason:
+                    gaps.append({'stage':stage,'strategy':strategy,'fee_bps':fee,'slippage_bps':slip,'n_sessions':n,'reason':reason})
+    planned=2*2*len(FEE_SCENARIOS)
+    return {'unit':'execution_scenarios','planned':planned,'sufficient':planned-len(gaps),'incomplete':gaps}
+
+
 def run_plan(plan, root, progress=None, execution_only=False):
     validate_plan(plan)
     if execution_only and 'calibration_start' in plan:
@@ -222,7 +265,6 @@ def run_plan(plan, root, progress=None, execution_only=False):
                 row.update(data_sha256=fingerprint(bars), calendar_sha256=hashlib.sha256(calendar.asi8.tobytes()).hexdigest() if calendar is not None else None,
                            actual_start=bars.index[0].date().isoformat(), actual_end=bars.index[-1].date().isoformat(),
                            result=evaluate_execution_asset(bars, plan, calendar, capital_config))
-                row['status'] = 'evaluated' if row['result']['holdout']['strategies'] else 'insufficient'
                 report['assets'].append(row)
                 continue
             benchmark = asset.get('benchmark', 'sh000300')
@@ -236,15 +278,26 @@ def run_plan(plan, root, progress=None, execution_only=False):
                        actual_start=bars.index[0].date().isoformat(), actual_end=bars.index[-1].date().isoformat(),
                        result=evaluate_asset(bars, reference.close, plan, family_size,
                                              calendar=calendar, capital_config=capital_config))
-            row['status'] = 'evaluated' if any(r['n'] for h in row['result']['horizons'].values() for r in h['holdout']) else 'insufficient'
         except (ValueError, KeyError, OSError) as error:
             row.update(status='unavailable', error=str(error))
         report['assets'].append(row)
+    for asset in report['assets']:
+        result=asset.get('result',{})
+        coverage=execution_coverage(result) if execution_only else comparison_coverage(result)
+        asset['coverage']=coverage
+        if asset.get('status')!='unavailable':
+            asset['status']='evaluated' if not coverage['incomplete'] else 'partial' if coverage['sufficient'] else 'insufficient'
+        if calibration_count:
+            asset['calibration_coverage']=comparison_coverage(result,calibration=True)
+    coverage=[a['coverage'] for a in report['assets']]
+    report['coverage']={'unit':coverage[0]['unit'],'planned':sum(c['planned'] for c in coverage),
+                        'sufficient':sum(c['sufficient'] for c in coverage),'incomplete':sum(len(c['incomplete']) for c in coverage)}
     report['complete'] = all(a['status']=='evaluated' for a in report['assets'])
     if calibration_count:
-        report['calibration_complete']=all(a['status']=='evaluated' and all(
-            r['status']=='fitted' and r['comparison']['ok'] for rows in a['result']['calibration'].values() for r in rows)
-            for a in report['assets'])
+        sufficient=sum(a['calibration_coverage']['sufficient'] for a in report['assets'])
+        report['calibration_coverage']={'unit':'paired_comparisons','planned':calibration_count,
+                                       'sufficient':sufficient,'incomplete':calibration_count-sufficient}
+        report['calibration_complete']=sufficient==calibration_count
     return _jsafe(report)
 
 
@@ -264,7 +317,10 @@ def main(argv=None, *, prog=None):
         parser.error(str(error))
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
-    print(f"报告已保存：{output}；完整样本覆盖：{report['complete']}")
+    print(f"报告已保存：{output}；预定评估完整：{report['complete']}")
+    if 'coverage' in report:
+        coverage=report['coverage']
+        print(f"满足样本门槛：{coverage['sufficient']}/{coverage['planned']}；不完整：{coverage['incomplete']}")
     if 'calibration_complete' in report:
         print(f"校准拟合及留出样本完整：{report['calibration_complete']}")
     return 0 if report['complete'] and report.get('calibration_complete',True) else 2

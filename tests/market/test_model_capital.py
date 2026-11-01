@@ -80,7 +80,8 @@ class ModelCapitalTests(unittest.TestCase):
         with patch('market_research.research.market_validation.read_bars',return_value=frame), \
              patch('market_research.research.market_validation.direction_forecast',return_value={'series':[.8]*len(frame)}) as forecast:
             out=run_plan(plan,Path('.'))
-        self.assertTrue(out['complete'])
+        self.assertFalse(out['complete'])
+        self.assertEqual(out['assets'][0]['status'],'insufficient')
         self.assertEqual(out['planned_exposure_controls'],0)
         cutoff=str((frame.index[120]-pd.Timedelta(days=1)).date())
         self.assertTrue(all(call.kwargs['training_end']==cutoff for call in forecast.call_args_list))
