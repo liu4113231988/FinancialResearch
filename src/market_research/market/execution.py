@@ -228,7 +228,7 @@ def probability_targets(probability):
     return out
 
 
-def compare_probability_execution(bars, base, candidate, calendar=None, capital_config=None):
+def compare_probability_execution(bars, base, candidate, calendar=None, capital_config=None, *, uncertainty=False):
     """Paired trading diagnostics without filtering future realized outcomes.
 
     Only current probability availability determines the common start. Missing
@@ -257,6 +257,8 @@ def compare_probability_execution(bars, base, candidate, calendar=None, capital_
     signals = {key: probability_targets(pair[key].where(common).loc[start:]) for key in ('base','candidate')}
     signals['buy_hold'] = pd.Series(1., index=window.index)
     report['strategies'] = {key:[] for key in signals}
+    if uncertainty:
+        report['return_uncertainty'] = []
     for fee, slip in FEE_SCENARIOS:
         if capital_config is not None:
             from market_research.market.capital import simulate_capital
@@ -265,6 +267,10 @@ def compare_probability_execution(bars, base, candidate, calendar=None, capital_
             results = {key:simulate_execution(window, target, fee, slip, calendar) for key,target in signals.items()}
             for key in ('base','candidate'):
                 results[key]['exposure_control'] = matched_exposure_control(results[key],results['buy_hold'])
+        if uncertainty:
+            from market_research.market.uncertainty import execution_intervals
+            report['return_uncertainty'].append({'fee_bps':fee, 'slippage_bps':slip,
+                                                **execution_intervals(results['base'],results['candidate'])})
         for key,result in results.items():
             report['strategies'][key].append(execution_summary(result))
     report['status'] = 'evaluated'

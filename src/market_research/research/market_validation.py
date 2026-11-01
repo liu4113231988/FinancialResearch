@@ -13,11 +13,12 @@ from scipy.stats import norm
 from market_research.market.analysis import normalize_code
 from market_research.market.context import context_features
 from market_research.market.technical import indicators, features_for, direction_forecast, compare_forecasts
+from market_research.market.uncertainty import block_intervals
 from market_research.serialization import _jsafe
 from market_research.validation.window import _iso
 
 VARIANTS = ('base', 'volatility', 'volume', 'relative', 'all')
-VERSION = 8
+VERSION = 9
 
 
 def validate_plan(plan):
@@ -76,9 +77,10 @@ def paired_evidence(bars, base, candidate, horizon, family_size):
     n = len(frame)
     result = {'n': n, 'family_size': family_size, 'p_one_sided_hac_approx': None,
               'p_bonferroni_approx': None, 'lags': min(5, max(0, n-1))}
+    d = ((frame.base-frame.y)**2 - (frame.candidate-frame.y)**2).to_numpy()
+    result['brier_improvement_uncertainty'] = block_intervals(d)
     if n < 20:
         return result
-    d = ((frame.base-frame.y)**2 - (frame.candidate-frame.y)**2).to_numpy()
     mean = float(d.mean()); centered = d-mean
     variance = float(centered @ centered / n)
     for lag in range(1, result['lags']+1):
@@ -119,7 +121,7 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_co
                 result['variant'] = variant
                 result['evidence'] = paired_evidence(window, baseline, candidate, horizon, family_size)
                 from market_research.market.execution import compare_probability_execution
-                result['execution'] = compare_probability_execution(window, pair['base'], pair[variant], calendar, capital_config)
+                result['execution'] = compare_probability_execution(window, pair['base'], pair[variant], calendar, capital_config, uncertainty=True)
                 rows.append(result)
             stages[stage] = rows
         output['horizons'][str(horizon)] = stages
@@ -167,10 +169,11 @@ def run_plan(plan, root, progress=None, execution_only=False):
               'planned_execution_scenarios': len(plan['assets'])*(2*2*3 if execution_only else 4*2*2*3*3), 'assets': [],
               'planned_exposure_controls': sum('capital' not in a for a in plan['assets'])*(2*3 if execution_only else 4*2*2*3*2),
               'limitations': ['当前数据版本回放，不是时点可得数据证明。', '同一测试区间反复查看后不再是未触碰的最终测试集。',
-                              'HAC正态近似及Bonferroni为探索性诊断，小样本不报p值；不能证明可交易收益。']}
-    from market_research.market import technical, context, execution, capital
+                              'HAC正态近似及Bonferroni为探索性诊断，小样本不报p值；不能证明可交易收益。',
+                              '块自助区间是固定预测/账户路径的点态条件诊断，未做区间多重校正，不重训或重放订单；不能据此选模型或声称未来收益。']}
+    from market_research.market import technical, context, execution, capital, uncertainty
     report['source_sha256'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-                               for p in (Path(__file__), Path(technical.__file__), Path(context.__file__), Path(execution.__file__), Path(capital.__file__))}
+                               for p in (Path(__file__), Path(technical.__file__), Path(context.__file__), Path(execution.__file__), Path(capital.__file__), Path(uncertainty.__file__))}
     for asset in plan['assets']:
         if progress:
             progress(asset['code'])
