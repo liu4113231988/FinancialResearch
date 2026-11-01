@@ -3,9 +3,10 @@ import numpy as np
 import pandas as pd
 from scipy.special import logit
 from sklearn.linear_model import LogisticRegression
+from market_research.market.targets import horizon_data
 
 
-def calibrate_probabilities(bars, probability, horizon, start, holdout, training_end):
+def calibrate_probabilities(bars, probability, horizon, start, holdout, training_end, *, calendar=None):
     if not pd.Timestamp(training_end) < pd.Timestamp(start) < pd.Timestamp(holdout):
         raise ValueError('模型训练截止需早于校准起点，校准起点需早于留出起点')
     if isinstance(horizon,bool) or not isinstance(horizon,int) or horizon<1:
@@ -18,11 +19,11 @@ def calibrate_probabilities(bars, probability, horizon, start, holdout, training
     close=bars.loc[start:pd.Timestamp(holdout)-pd.Timedelta(days=1),'close']
     if not np.isfinite(close).all() or (close<=0).any():
         raise ValueError('校准价格需有限且为正')
-    future=close.shift(-horizon)
+    future,clock,axis=horizon_data(close,horizon,calendar)
     frame=pd.DataFrame({'p':probability.reindex(close.index),
-                        'y':(future>close).astype(float).where(future.notna())}).dropna()
+                        'y':(future>0).astype(float).where(future.notna())}).dropna()
     keep, last=[], -horizon
-    for i,position in enumerate(close.index.get_indexer(frame.index)):
+    for i,position in enumerate(clock[close.index.get_indexer(frame.index)]):
         if position>=last+horizon:
             keep.append(i); last=position
     frame=frame.iloc[keep]
@@ -32,7 +33,8 @@ def calibrate_probabilities(bars, probability, horizon, start, holdout, training
           'minimum_n':20,'minimum_each_class':5,'model_training_cutoff':training_end,
           'start':frame.index[0].date().isoformat() if n else None,
           'end':frame.index[-1].date().isoformat() if n else None,
-          'last_label_end':close.index[close.index.get_loc(frame.index[-1])+horizon].date().isoformat() if n else None,
+          'last_label_end':axis[clock[close.index.get_loc(frame.index[-1])]+horizon].date().isoformat() if n else None,
+          'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
           'method':'logistic_on_clipped_logit','C':1.,'clip_probability':1e-6,
           'slope':None,'intercept':None,
           'note':'固定C=1的logit逻辑校准，只拟合校准窗口已成熟且按周期隔开的标签；样本/类别门槛不是校准有效性保证。非正斜率不用于反转预测排名。'}

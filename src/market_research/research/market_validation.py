@@ -14,6 +14,7 @@ from scipy.stats import norm
 
 from market_research.market.analysis import normalize_code, clean_bars
 from market_research.market.context import context_features
+from market_research.market.targets import horizon_data
 from market_research.market.technical import indicators, features_for, direction_forecast, compare_forecasts
 from market_research.market.uncertainty import block_intervals
 from market_research.market.execution import compare_probability_execution, FEE_SCENARIOS
@@ -22,7 +23,7 @@ from market_research.serialization import _jsafe
 from market_research.validation.window import _iso
 
 VARIANTS = ('base', 'volatility', 'volume', 'relative', 'all')
-VERSION = 13
+VERSION = 14
 
 
 def validate_plan(plan):
@@ -79,11 +80,12 @@ def feature_variants(bars, reference):
     return out, extra
 
 
-def paired_evidence(bars, base, candidate, horizon, family_size):
+def paired_evidence(bars, base, candidate, horizon, family_size, *, calendar=None):
     """Exploratory one-sided HAC normal approximation, with planned-family Bonferroni."""
-    target = (bars.close.shift(-horizon) > bars.close).astype(float).where(bars.close.shift(-horizon).notna())
+    future,clock,_=horizon_data(bars.close,horizon,calendar)
+    target = (future>0).astype(float).where(future.notna())
     frame = pd.DataFrame({'base': base, 'candidate': candidate, 'y': target}, index=bars.index).dropna()
-    positions = bars.index.get_indexer(frame.index)
+    positions = clock[bars.index.get_indexer(frame.index)]
     keep, last = [], -horizon
     for i, position in enumerate(positions):
         if position >= last + horizon:
@@ -91,6 +93,7 @@ def paired_evidence(bars, base, candidate, horizon, family_size):
     frame = frame.iloc[keep]
     n = len(frame)
     result = {'n': n, 'family_size': family_size, 'p_one_sided_hac_approx': None,
+              'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
               'p_bonferroni_approx': None, 'lags': min(5, max(0, n-1))}
     d = ((frame.base-frame.y)**2 - (frame.candidate-frame.y)**2).to_numpy()
     result['brier_improvement_uncertainty'] = block_intervals(d)
@@ -116,11 +119,12 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_co
     variants, context = feature_variants(bars, reference)
     cutoff = (pd.Timestamp(plan.get('calibration_start',plan['holdout_start']))-pd.Timedelta(days=1)).date().isoformat()
     output = {'training_cutoff': cutoff, 'account_mode':'capital' if capital_config is not None else 'fractional',
+              'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
               'features': {k: list(v.columns) for k,v in variants.items()}, 'horizons': {}}
     if 'calibration_start' in plan:
         output['calibration']={}
     for horizon in (5, 20):
-        forecasts = {key: direction_forecast(bars, values, horizon, bars.index[0], training_end=cutoff)
+        forecasts = {key: direction_forecast(bars, values, horizon, bars.index[0], training_end=cutoff,calendar=calendar)
                      for key, values in variants.items()}
         probability = pd.DataFrame({k:v['series'] for k,v in forecasts.items()}, index=bars.index)
         stages = {}
@@ -134,9 +138,9 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_co
                 common = pair.notna().all(axis=1)
                 baseline = pair['base'].where(common).tolist()
                 candidate = pair[variant].where(common).tolist()
-                result = compare_forecasts(window, {'series': baseline}, {'series': candidate}, horizon, start, context) if len(window) else {'n': 0, 'ok': False}
+                result = compare_forecasts(window, {'series': baseline}, {'series': candidate}, horizon, start, context,calendar=calendar) if len(window) else {'n': 0, 'ok': False}
                 result['variant'] = variant
-                result['evidence'] = paired_evidence(window, baseline, candidate, horizon, family_size)
+                result['evidence'] = paired_evidence(window, baseline, candidate, horizon, family_size,calendar=calendar)
                 result['execution'] = compare_probability_execution(window, pair['base'], pair[variant], calendar, capital_config, uncertainty=True)
                 rows.append(result)
             stages[stage] = rows
@@ -146,14 +150,14 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_co
             window=bars.loc[plan['holdout_start']:]
             for variant in VARIANTS:
                 calibrated,metadata=calibrate_probabilities(bars,probability[variant],horizon,
-                    plan['calibration_start'],plan['holdout_start'],cutoff)
+                    plan['calibration_start'],plan['holdout_start'],cutoff,calendar=calendar)
                 row={'variant':variant,**metadata,'comparison':None}
                 if metadata['status']=='fitted':
                     raw=probability[variant].reindex(window.index)
                     corrected=calibrated.reindex(window.index)
                     comparison=compare_forecasts(window,{'series':raw.tolist()},
-                        {'series':corrected.tolist()},horizon,plan['holdout_start'],context)
-                    comparison['evidence']=paired_evidence(window,raw,corrected,horizon,family_size)
+                        {'series':corrected.tolist()},horizon,plan['holdout_start'],context,calendar=calendar)
+                    comparison['evidence']=paired_evidence(window,raw,corrected,horizon,family_size,calendar=calendar)
                     comparison['execution']=compare_probability_execution(window,raw,corrected,calendar,capital_config,uncertainty=True)
                     row['comparison']=comparison
                 calibration_rows.append(row)
@@ -279,11 +283,11 @@ def run_plan(plan, root, progress=None, execution_only=False):
               'limitations': ['当前数据版本回放，不是时点可得数据证明。', '同一测试区间反复查看后不再是未触碰的最终测试集。',
                               'HAC正态近似及Bonferroni为探索性诊断，小样本不报p值；不能证明可交易收益。',
                               '块自助区间是固定预测/账户路径的点态条件诊断，未做区间多重校正，不重训或重放订单；不能据此选模型或声称未来收益。',
-                              '未配置会话日历时不核验请求末会话；内部缺日仍按原诊断处理，基准缺失日期另行披露。']}
-    from market_research.market import technical, context, execution, capital, uncertainty
+                              '方向周期有日历时按会话计数，目标缺报价不补标签；无日历时按有效日线且不核验请求末会话。成交缺日沿用原诊断，基准缺失另行披露。']}
+    from market_research.market import technical, context, execution, capital, uncertainty, targets
     from market_research.research import calibration
     report['source_sha256'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-                               for p in (Path(__file__), Path(technical.__file__), Path(context.__file__), Path(execution.__file__), Path(capital.__file__), Path(uncertainty.__file__), Path(calibration.__file__))}
+                               for p in (Path(__file__), Path(technical.__file__), Path(context.__file__), Path(execution.__file__), Path(capital.__file__), Path(uncertainty.__file__), Path(calibration.__file__), Path(targets.__file__))}
     for asset in plan['assets']:
         if progress:
             progress(asset['code'])

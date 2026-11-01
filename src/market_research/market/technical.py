@@ -9,6 +9,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+from market_research.market.targets import horizon_data
 
 MIN_TRAIN = 252
 MAX_TRAIN = 756
@@ -79,29 +80,29 @@ def features_for(bars, ind):
     return features.replace([np.inf, -np.inf], np.nan)
 
 
-def direction_forecast(bars, features, horizon, display_start, training_end=None):
+def direction_forecast(bars, features, horizon, display_start, training_end=None, *, calendar=None):
     """Fixed model; train labels must have matured by each prediction close.
 
     Scaler is fitted only on training rows. No shuffled CV or full-sample tuning.
-    Evaluation observations are spaced horizon days apart to avoid label overlap.
+    Label maturity, refits and evaluation use the same available forecast clock.
     """
-    future = bars.close.shift(-horizon) / bars.close - 1
+    future,positions,axis = horizon_data(bars.close,horizon,calendar)
     labels = (future > 0).astype(float).where(future.notna())
     probability = pd.Series(np.nan, index=bars.index)
     baseline = probability.copy()
     model, fitted_at, training_rows = None, -REFIT, 0
-    cutoff = bars.index.searchsorted(pd.Timestamp(training_end), side='right') - 1 if training_end else None
+    cutoff = axis.searchsorted(pd.Timestamp(training_end), side='right') - 1 if training_end else None
     last_train_end = None
     for i in range(len(bars)):
         if features.iloc[i].isna().any():
             continue
-        train_end = max(0, min(i, cutoff) - horizon + 1) if cutoff is not None else max(0, i - horizon + 1)
-        freeze_due = cutoff is not None and i >= cutoff and last_train_end != train_end
-        if (i - fitted_at >= REFIT or freeze_due) and train_end != last_train_end:
-            # Last eligible feature at i-h has target ending at i (known now).
-            train = features.iloc[:train_end].dropna().tail(MAX_TRAIN)
-            target = labels.reindex(train.index).dropna()
-            train = train.reindex(target.index)
+        known=min(positions[i],cutoff) if cutoff is not None else positions[i]
+        train_end=int(np.searchsorted(positions,known-horizon+1))
+        freeze_due = cutoff is not None and positions[i] >= cutoff and last_train_end != train_end
+        if (positions[i] - fitted_at >= REFIT or freeze_due) and train_end != last_train_end:
+            train = features.iloc[:train_end].dropna()
+            train = train.loc[labels.reindex(train.index).notna()].tail(MAX_TRAIN)
+            target = labels.reindex(train.index)
             if len(train) >= MIN_TRAIN:
                 training_rows = len(train)
                 if target.nunique() >= 2:
@@ -110,14 +111,14 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
                 else:
                     model = None
                 prior = float(target.mean())
-                fitted_at = i
+                fitted_at = positions[i]
                 last_train_end = train_end
         if model is not None:
             probability.iloc[i] = model.predict_proba(features.iloc[[i]])[0, 1]
             baseline.iloc[i] = prior
     valid = pd.DataFrame({"probability": probability, "baseline": baseline, "actual": labels}).loc[display_start:].dropna()
     # Use fixed, non-overlapping starting points, not selected for performance.
-    indices = bars.index.get_indexer(valid.index)
+    indices = positions[bars.index.get_indexer(valid.index)]
     keep, last = [], -horizon
     for position, original in enumerate(indices):
         if original >= last + horizon:
@@ -135,19 +136,20 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
                           start=evaluated.index[0].date().isoformat(), end=evaluated.index[-1].date().isoformat())
         evaluation["advantage"] = bool(n >= 20 and evaluation["brier"] < evaluation["baseline_brier"])
     latest = probability.iloc[-1]
-    return {"horizon": horizon, "ok": bool(pd.notna(latest)), "probability": latest,
+    return {"horizon": horizon, 'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
+            "ok": bool(pd.notna(latest)), "probability": latest,
             "training_rows": training_rows, "minimum_training_rows": MIN_TRAIN,
             "evaluation": evaluation, "series": probability.loc[display_start:].tolist(),
             "reason": "至少需要 252 个已成熟训练样本及约 65 日指标预热；单一涨跌类别无法训练。" if pd.isna(latest) else None}
 
 
-def compare_forecasts(bars, base, candidate, horizon, display_start, context=None):
+def compare_forecasts(bars, base, candidate, horizon, display_start, context=None, *, calendar=None):
     """Compare fixed candidates on identical mature non-overlapping observations."""
     prices = bars.close.loc[display_start:]
-    actual = (prices.shift(-horizon) / prices - 1).where(prices.shift(-horizon).notna())
+    actual,clock,_ = horizon_data(prices,horizon,calendar)
     frame = pd.DataFrame({'base': base['series'], 'candidate': candidate['series'],
                           'return': actual}, index=prices.index).dropna()
-    positions = bars.index.get_indexer(frame.index)
+    positions = clock[prices.index.get_indexer(frame.index)]
     keep, last = [], -horizon
     for i, position in enumerate(positions):
         if position >= last + horizon:
@@ -155,6 +157,7 @@ def compare_forecasts(bars, base, candidate, horizon, display_start, context=Non
     frame = frame.iloc[keep]
     n = len(frame)
     result = {'n': n, 'ok': n >= 20, 'start': None, 'end': None,
+              'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
               'note': '共同成熟日期比较；候选固定，未据此自动选模型。Brier改善不代表显著性或扣费收益。'}
     if not n:
         return result
@@ -233,8 +236,10 @@ def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, be
     from market_research.market.execution import execution_diagnostics, rule_targets, compare_probability_execution
     execution = execution_diagnostics(bars.loc[visible.index], rule_targets(visible), calendar)
     execution['calendar_source'] = calendar_info
+    forecast_calendar=calendar if calendar is not None and bars.index.isin(calendar).all() else None
     notices = ["日线收盘后更新，条件首次满足是观察信号，不假设能在信号日收盘价成交。",
-               "预测周期按该证券的有效日线计数，停牌或缺失日线会延长实际日期间隔。",
+               ("预测周期按供应商日历会话计数，目标会话缺报价时不生成方向标签。" if forecast_calendar is not None else
+                "方向训练历史未完整匹配会话日历，预测周期按有效日线计数，缺日会延长实际间隔。"),
                "模型估计未来收盘相对当前收盘上涨的概率；不预测精确价格，不含交易费用，未单独校准。",
                "历史验证采用当前数据版本；复权历史可能修订，未模拟停牌、涨跌停、滑点和实际成交。"]
     if truncated:
@@ -246,10 +251,10 @@ def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, be
     else:
         notices.append("价位按前复权坐标显示；历史截止日分析时尤其需核对真实报价后再考虑执行。")
     stop = close - 2 * latest.atr if pd.notna(latest.atr) else np.nan
-    forecasts = [direction_forecast(bars, features, h, display_start) for h in (5, 20)]
+    forecasts = [direction_forecast(bars, features, h, display_start,calendar=forecast_calendar) for h in (5, 20)]
     for forecast in forecasts:
-        candidate = direction_forecast(bars, expanded, forecast['horizon'], display_start) if available else None
-        forecast['comparison'] = (compare_forecasts(bars, forecast, candidate, forecast['horizon'], display_start, extra)
+        candidate = direction_forecast(bars, expanded, forecast['horizon'], display_start,calendar=forecast_calendar) if available else None
+        forecast['comparison'] = (compare_forecasts(bars, forecast, candidate, forecast['horizon'], display_start, extra,calendar=forecast_calendar)
                                   if candidate else {'n': 0, 'ok': False, 'note': '新增特征覆盖不足，保留原模型。'})
         forecast['candidate'] = ({'ok': candidate['ok'], 'probability': candidate['probability'],
                                   'features': available} if candidate else None)
