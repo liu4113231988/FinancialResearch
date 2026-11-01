@@ -22,7 +22,7 @@ from market_research.serialization import _jsafe
 from market_research.validation.window import _iso
 
 VARIANTS = ('base', 'volatility', 'volume', 'relative', 'all')
-VERSION = 12
+VERSION = 13
 
 
 def validate_plan(plan):
@@ -187,6 +187,24 @@ def fingerprint(frame):
     return hashlib.sha256(pd.util.hash_pandas_object(frame, index=True).values.tobytes() + '|'.join(frame.columns).encode()).hexdigest()
 
 
+def check_calendar_coverage(frame, calendar, plan, label='行情'):
+    if calendar is None:
+        return None
+    if calendar.empty or calendar.hasnans or calendar.tz is not None or not calendar.equals(calendar.normalize()) or not calendar.is_unique or not calendar.is_monotonic_increasing:
+        raise ValueError('会话日历需为有效、无时区、唯一且升序的日线日期')
+    if calendar[0]>pd.Timestamp(plan['start']) or calendar[-1]<pd.Timestamp(plan['end']):
+        raise ValueError('会话日历未覆盖请求起止边界，请提供包含边界外相邻会话的日历')
+    expected=calendar[(calendar>=plan['start'])&(calendar<=plan['end'])]
+    if expected.empty:
+        raise ValueError('请求区间没有日历会话')
+    if not frame.index.isin(calendar).all():
+        raise ValueError(f'{label}含日历外日期，不能用于固定日历验证')
+    if not len(frame.index) or frame.index[-1]!=expected[-1]:
+        actual=str(frame.index[-1].date()) if len(frame.index) else '无'
+        raise ValueError(f'{label}未达到请求末会话：实际{actual}，预期{expected[-1].date()}；需核对停牌或抓取缺口')
+    return expected[-1].date().isoformat()
+
+
 def evaluate_execution_asset(bars, plan, calendar=None, capital_config=None):
     from market_research.market.execution import execution_diagnostics, rule_targets
     targets = rule_targets(indicators(bars))
@@ -260,7 +278,8 @@ def run_plan(plan, root, progress=None, execution_only=False):
               'planned_exposure_controls': sum('capital' not in a for a in plan['assets'])*(2*3 if execution_only else 4*2*2*3*2+(5*2*3*2 if calibration_count else 0)),
               'limitations': ['当前数据版本回放，不是时点可得数据证明。', '同一测试区间反复查看后不再是未触碰的最终测试集。',
                               'HAC正态近似及Bonferroni为探索性诊断，小样本不报p值；不能证明可交易收益。',
-                              '块自助区间是固定预测/账户路径的点态条件诊断，未做区间多重校正，不重训或重放订单；不能据此选模型或声称未来收益。']}
+                              '块自助区间是固定预测/账户路径的点态条件诊断，未做区间多重校正，不重训或重放订单；不能据此选模型或声称未来收益。',
+                              '未配置会话日历时不核验请求末会话；内部缺日仍按原诊断处理，基准缺失日期另行披露。']}
     from market_research.market import technical, context, execution, capital, uncertainty
     from market_research.research import calibration
     report['source_sha256'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
@@ -276,11 +295,12 @@ def run_plan(plan, root, progress=None, execution_only=False):
                 raise ValueError('清单区间内没有本地行情')
             calendar = None
             if asset.get('calendar_csv'):
-                calendar = pd.DatetimeIndex(pd.read_csv(root/asset['calendar_csv'], parse_dates=['date'])['date'])
+                calendar = pd.DatetimeIndex(pd.read_csv(root/asset['calendar_csv'], parse_dates=['date'],date_format='ISO8601')['date'])
+            row.update(actual_start=bars.index[0].date().isoformat(),actual_end=bars.index[-1].date().isoformat())
+            row['expected_end']=check_calendar_coverage(bars,calendar,plan,'资产行情')
             row['calendar_sha256'] = hashlib.sha256(calendar.asi8.tobytes()).hexdigest() if calendar is not None else None
             if execution_only:
                 row.update(data_sha256=fingerprint(bars), calendar_sha256=hashlib.sha256(calendar.asi8.tobytes()).hexdigest() if calendar is not None else None,
-                           actual_start=bars.index[0].date().isoformat(), actual_end=bars.index[-1].date().isoformat(),
                            result=evaluate_execution_asset(bars, plan, calendar, capital_config))
                 report['assets'].append(row)
                 continue
@@ -291,8 +311,10 @@ def run_plan(plan, root, progress=None, execution_only=False):
             reference = read_bars(ref_asset, plan, root).loc[plan['start']:plan['end']]
             if bars.empty or reference.empty:
                 raise ValueError('清单区间内没有本地资产或基准行情')
+            row['benchmark_actual_end']=reference.index[-1].date().isoformat()
+            check_calendar_coverage(reference,calendar,plan,'基准行情')
+            row['benchmark_missing_dates']=bars.index.difference(reference.index).strftime('%Y-%m-%d').tolist()
             row.update(data_sha256=fingerprint(bars), benchmark_sha256=fingerprint(reference),
-                       actual_start=bars.index[0].date().isoformat(), actual_end=bars.index[-1].date().isoformat(),
                        result=evaluate_asset(bars, reference.close, plan, family_size,
                                              calendar=calendar, capital_config=capital_config))
         except (ValueError, KeyError, OSError) as error:

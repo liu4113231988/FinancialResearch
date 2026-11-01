@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from market_research.market.analysis import load_bars, clean_bars
-from market_research.research.market_validation import validate_plan, read_bars, fingerprint
+from market_research.research.market_validation import validate_plan, read_bars, fingerprint, check_calendar_coverage
 from market_research.data.providers.calendar import bundled_calendar
 
 
@@ -31,7 +31,13 @@ def prepare_snapshot(plan, root, output, fetch_missing=False, with_calendar=Fals
 
     def save(asset):
         key = (asset['kind'],asset['code'],asset.get('adjust','qfq') if asset['kind']=='stock' else '')
+        effective_calendar=calendar
+        if asset.get('calendar_csv'):
+            effective_calendar=pd.DatetimeIndex(pd.read_csv(root/asset['calendar_csv'],parse_dates=['date'],date_format='ISO8601')['date'])
         if key in saved:
+            if effective_calendar is not None:
+                dates=pd.DatetimeIndex(pd.read_csv(output/saved[key][0],parse_dates=['date'],date_format='ISO8601')['date'])
+                check_calendar_coverage(pd.DataFrame(index=dates),effective_calendar,plan)
             return saved[key]
         if progress:
             progress(asset['code'])
@@ -51,33 +57,28 @@ def prepare_snapshot(plan, root, output, fetch_missing=False, with_calendar=Fals
         clean_bars(frame.rename_axis('date').reset_index(),plan['start'],plan['end'])
         if frame.empty or frame.index[-1] < pd.Timestamp(plan['holdout_start']):
             raise ValueError('行情未覆盖留出区间')
-        calendar_ok = calendar is not None and frame.index.isin(calendar).all()
-        if calendar_ok:
-            expected = calendar[(calendar >= plan['start']) & (calendar <= plan['end'])]
-            if len(expected) and frame.index[-1] < expected[-1]:
-                raise ValueError('行情未达到请求区间最后一个供应商交易日')
-        if calendar is not None and not calendar_ok:
-            receipt['errors'].append({'kind':key[0],'code':key[1],'calendar':'行情包含供应商日历外日期，未附加该日历'})
+        check_calendar_coverage(frame,effective_calendar,plan)
+        calendar_ok=calendar is not None
         filename = f'{key[0]}-{key[1]}-{key[2] or "raw"}.csv'
         frame.rename_axis('date').to_csv(output/filename)
         receipt['files'].append({'kind':key[0],'code':key[1],'basis':key[2],'file':filename,'source':source,
                                  'provider_info':info,'data_sha256':fingerprint(frame),
                                  'csv_sha256':hashlib.sha256((output/filename).read_bytes()).hexdigest(),
                                  'start':str(frame.index[0].date()),'end':str(frame.index[-1].date()),
-                                 'rows':len(frame),'calendar_attached':calendar_ok})
+                                 'rows':len(frame),'calendar_attached':effective_calendar is not None})
         saved[key] = filename, calendar_ok
         return saved[key]
 
     for asset in prepared['assets']:
         try:
+            explicit_calendar=asset.get('calendar_csv')
             filename, calendar_ok = save(asset)
             asset['csv'] = filename
-            if asset.get('calendar_csv'):
-                source_calendar = root/asset['calendar_csv']
-                sessions = pd.DatetimeIndex(pd.read_csv(source_calendar,parse_dates=['date'])['date'])
-                dates = pd.DatetimeIndex(pd.read_csv(output/filename,parse_dates=['date'])['date'])
-                if sessions.hasnans or not sessions.is_unique or not sessions.is_monotonic_increasing or not dates.isin(sessions).all():
-                    raise ValueError('显式日历无效或未包含快照的全部行情日期')
+            if explicit_calendar:
+                source_calendar = root/explicit_calendar
+                sessions = pd.DatetimeIndex(pd.read_csv(source_calendar,parse_dates=['date'],date_format='ISO8601')['date'])
+                dates = pd.DatetimeIndex(pd.read_csv(output/filename,parse_dates=['date'],date_format='ISO8601')['date'])
+                check_calendar_coverage(pd.DataFrame(index=dates),sessions,plan)
                 cal_name=f'calendar-{asset["kind"]}-{asset["code"]}.csv'
                 pd.DataFrame({'date':sessions}).to_csv(output/cal_name,index=False)
                 receipt['explicit_calendars'].append({'file':cal_name,'source':str(source_calendar),
@@ -88,6 +89,8 @@ def prepare_snapshot(plan, root, output, fetch_missing=False, with_calendar=Fals
             elif with_calendar:
                 asset.pop('calendar_csv',None)
             benchmark = {'kind':'index','code':asset.get('benchmark','sh000300')}
+            if explicit_calendar:
+                benchmark['calendar_csv']=explicit_calendar
             if asset.get('benchmark_csv'):
                 benchmark['csv'] = asset['benchmark_csv']
             asset['benchmark_csv'] = save(benchmark)[0]
