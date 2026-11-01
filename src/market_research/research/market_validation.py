@@ -2,15 +2,17 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
+import tempfile
 
 import numpy as np
 import pandas as pd
 import sklearn
 from scipy.stats import norm
 
-from market_research.market.analysis import normalize_code
+from market_research.market.analysis import normalize_code, clean_bars
 from market_research.market.context import context_features
 from market_research.market.technical import indicators, features_for, direction_forecast, compare_forecasts
 from market_research.market.uncertainty import block_intervals
@@ -20,10 +22,12 @@ from market_research.serialization import _jsafe
 from market_research.validation.window import _iso
 
 VARIANTS = ('base', 'volatility', 'volume', 'relative', 'all')
-VERSION = 11
+VERSION = 12
 
 
 def validate_plan(plan):
+    if not isinstance(plan,dict):
+        raise ValueError('验证清单需为JSON对象')
     for key in ('start', 'development_start', 'holdout_start', 'end'):
         if _iso(plan[key], key) != plan[key]:
             raise ValueError(f'{key}需使用规范日期')
@@ -33,10 +37,15 @@ def validate_plan(plan):
         day=plan['calibration_start']
         if _iso(day,'calibration_start')!=day or not plan['development_start']<day<plan['holdout_start']:
             raise ValueError('需满足 development_start < calibration_start < holdout_start，且使用规范日期')
-    if not plan.get('assets'):
+    if not isinstance(plan.get('assets'),list) or not plan['assets']:
         raise ValueError('固定样本清单不能为空')
     keys = []
     for asset in plan['assets']:
+        if not isinstance(asset,dict):
+            raise ValueError('assets每项需为证券配置对象')
+        for field in ('csv','benchmark_csv','calendar_csv'):
+            if field in asset and (not isinstance(asset[field],str) or not asset[field].strip()):
+                raise ValueError(f'{field}需为非空文件路径字符串')
         code = normalize_code(asset['kind'], asset['code'])
         if asset.get('adjust','qfq') not in ('qfq','hfq',''):
             raise ValueError('adjust需为qfq、hfq或空字符串')
@@ -157,12 +166,20 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_co
 
 def read_bars(asset, plan, root):
     if asset.get('csv'):
-        frame = pd.read_csv(root / asset['csv'], parse_dates=['date']).set_index('date')
+        frame = pd.read_csv(root / asset['csv'], parse_dates=['date'],date_format='ISO8601').set_index('date')
     else:
         from market_research.tasks.sync import cached
         frame = cached(asset['kind'], asset['code'], asset.get('adjust', 'qfq') if asset['kind']=='stock' else '', plan['start'], plan['end'])
     if frame is None or frame.empty:
         raise ValueError('本地行情缺失或缓存未覆盖清单截止日；请先同步或提供CSV快照')
+    if not isinstance(frame.index,pd.DatetimeIndex) or frame.index.hasnans or frame.index.tz is not None or not frame.index.equals(frame.index.normalize()):
+        raise ValueError('日线日期需有效、无时区且不含日内时间')
+    if not frame.index.is_unique or not frame.index.is_monotonic_increasing:
+        raise ValueError('日线日期需唯一且升序，不能自动排序或去重')
+    frame=frame.loc[plan['start']:plan['end']].copy()
+    columns=[c for c in ('open','close','high','low','volume','amount','turnover') if c in frame]
+    frame[columns]=frame[columns].apply(pd.to_numeric,errors='raise')
+    clean_bars(frame.rename_axis('date').reset_index(),plan['start'],plan['end'])
     return frame
 
 
@@ -301,6 +318,25 @@ def run_plan(plan, root, progress=None, execution_only=False):
     return _jsafe(report)
 
 
+def save_report(report, output):
+    payload=json.dumps(report,ensure_ascii=False,indent=2,allow_nan=False)
+    output.parent.mkdir(parents=True,exist_ok=True)
+    temporary=None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=output.parent,
+                prefix=f'.{output.name}.',suffix='.tmp',delete=False) as stream:
+            temporary=Path(stream.name)
+            stream.write(payload)
+        # Windows rename refuses replacement; POSIX needs an exclusive link.
+        if os.name=='nt':
+            os.rename(temporary,output)
+        else:
+            os.link(temporary,output)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def main(argv=None, *, prog=None):
     parser = argparse.ArgumentParser(description=__doc__, prog=prog)
     parser.add_argument('--manifest', required=True)
@@ -310,13 +346,13 @@ def main(argv=None, *, prog=None):
     path = Path(args.manifest)
     if Path(args.output).exists():
         parser.error('输出已存在，请使用新的报告文件名以保留既有试验记录')
-    plan = json.loads(path.read_text(encoding='utf-8'))
     try:
+        plan = json.loads(path.read_text(encoding='utf-8-sig'))
         report = run_plan(plan, path.parent, progress=lambda code: print(f'评估 {code}…', flush=True), execution_only=args.execution_only)
-    except (ValueError, KeyError) as error:
+        output=Path(args.output)
+        save_report(report,output)
+    except (ValueError, KeyError, OSError) as error:
         parser.error(str(error))
-    output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     print(f"报告已保存：{output}；预定评估完整：{report['complete']}")
     if 'coverage' in report:
         coverage=report['coverage']

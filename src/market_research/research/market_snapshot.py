@@ -111,7 +111,7 @@ def main(argv=None, *, prog=None):
     args=parser.parse_args(argv)
     source=Path(args.manifest)
     try:
-        receipt=prepare_snapshot(json.loads(source.read_text(encoding='utf-8')),source.parent,Path(args.output_dir),
+        receipt=prepare_snapshot(json.loads(source.read_text(encoding='utf-8-sig')),source.parent,Path(args.output_dir),
                                  args.fetch_missing,args.calendar,progress=lambda code:print(f'快照 {code}…',flush=True))
     except (ValueError,KeyError,OSError) as error:
         parser.error(str(error))
