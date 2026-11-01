@@ -58,16 +58,16 @@ def _fetch_csindex(symbol_code: str, column: str,
 def fetch_pe_panel(symbols: Iterable[str], lookback_years: int = 8,
                    verbose: bool = True) -> pd.DataFrame:
     """
-    拉取宽基指数的滚动市盈率历史（csindex 官方**日频**），并转为
-    **滚动历史分位**（0~1）。
+    拉取宽基指数的**原始市盈率**（csindex 官方**日频** `市盈率2`）。
 
-    用途：判断风格基准的"绝对估值水位"。分位=1 表示处于历史最贵档。
     返回列名为指数中文名（与 `PE_SYMBOL` 的值一致，信号引擎按它取列）。
 
-    ★ 口径说明：旧乐咕通道是月度，滚动分位窗口按 12*lookback_years 期算；
-      csindex 是日频，分位窗口按 250*lookback_years 个交易日算 —— 两者
-      语义相同（约 8 年），粒度更细。`DATA_CACHE_VERSION` 已 +1 使旧缓存
-      失效。估值通道的发布滞后（pe_lag_days，默认 10 日）对日频数据偏保守，
+    ★ 为什么返回**原始 PE**而不是分位：csindex 每次只返最近约一个月数据，
+      若在抓取片段上直接算 8 年滚动分位（min_periods≈250 > 片段长度），
+      得到的会是**全 NaN**，再被 `_accumulate_panel` 永久冻结进缓存 ——
+      估值通道因此永久失效。分位改由 `load_pe_panel` 在累积出完整历史后
+      对整块重算（`_percentile`），历史不足时按 `min_periods` 输出 NaN。
+      估值通道的发布滞后（pe_lag_days，默认 10 日）对日频数据偏保守，
       保持默认不动；要收紧应在显式配置里调，不在此处隐式变更。
     """
     out = {}
@@ -77,7 +77,7 @@ def fetch_pe_panel(symbols: Iterable[str], lookback_years: int = 8,
             s = _fetch_csindex(code, "市盈率2", verbose, sym, lookback_years)
             if s is None:
                 continue
-            out[sym] = _percentile(s, lookback_years)
+            out[sym] = s                     # 原始 PE，分位在 load_pe_panel 计算
         except Exception as e:      # noqa: BLE001
             if verbose:
                 print(f"  [csindex] {sym:8s} 失败 {type(e).__name__} {str(e)[:40]}")

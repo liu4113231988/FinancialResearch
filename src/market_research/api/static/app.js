@@ -23,6 +23,15 @@ const fmtSign = (v, d = 3) => (v === null || v === undefined || Number.isNaN(v))
 const fmtPctSign = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v))
   ? '—' : (v >= 0 ? '+' : '') + (v * 100).toFixed(d) + '%';
 
+// 把纯文本插进 innerHTML 前必须转义，防止后端字段里混入 < > & " ' 时被当成 HTML。
+// 数字、已格式化字符串和服务端刻意生成的富文本（如 insights.text）不走这里。
+function escapeHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 // A股习惯：涨红跌绿
 const UP = '#ef4a4a', DOWN = '#12b886', FLAT = '#8b98ab';
 const colOf = (v) => v > 0 ? UP : v < 0 ? DOWN : FLAT;
@@ -517,10 +526,41 @@ const LS = {
 };
 const WATCH_KEY = 'fil_watchlist', LAST_KEY = 'fil_last_run';
 
+// 自选按资产种类隔离：基金用旧 key（兼容已存数据），股票/指数各自独立。
+// 否则在股票页加入的代码会混进基金下拉，反之亦然。
+function currentKind() {
+  return (window.MarketApp && MarketApp.kind) || 'fund';
+}
+function watchKey() {
+  const k = currentKind();
+  return k === 'fund' ? WATCH_KEY : `fil_watchlist_${k}`;
+}
+function validWatchCode(code, kind) {
+  if (typeof code !== 'string') return false;
+  return kind === 'fund'
+    ? /^\d{6}$/.test(code)
+    : /^(sh|sz|bj)?\d{6}$/i.test(code);
+}
+// 归一化：localStorage 可能因旧版本/手动写入存成非数组或含非法代码，
+// 一律清洗成合法字符串数组，避免 forEach/includes 在脏数据上抛错。
+function getWatchlist() {
+  const kind = currentKind();
+  const raw = LS.get(watchKey(), []);
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(c => validWatchCode(c, kind));
+}
+function setWatchlist(codes) { LS.set(watchKey(), codes); }
+
 function renderWatchlist() {
   const sel = $('watchSel');
   if (!sel || !$('btnWatch')) return;          // 兼容旧缓存页面缺控件
-  const codes = LS.get(WATCH_KEY, []);
+  const kind = currentKind();
+  const codes = getWatchlist();
+  // 非基金种类下，自选控件对基金无意义，隐藏即可（基金页才显示）
+  const isFund = kind === 'fund';
+  sel.hidden = !isFund;
+  if ($('btnWatch')) $('btnWatch').hidden = !isFund;
+  if (!isFund) return;
   const names = Object.fromEntries((S.cat?.known_funds || []).map(f => [f.code, f.name]));
   sel.innerHTML = '';
   const head = document.createElement('option');
@@ -537,13 +577,15 @@ function renderWatchlist() {
   $('btnWatch').textContent = codes.includes(current) ? '★' : '☆';
 }
 function toggleWatchlist() {
+  const kind = currentKind();
+  if (kind !== 'fund') { showAlert('当前不是基金页面，自选仅对基金可用。'); return; }
   const code = S.result?.code || $('codeInput').value.trim();
   if (!/^\d{6}$/.test(code)) { showAlert('请先输入有效的 6 位基金代码'); return; }
-  const codes = LS.get(WATCH_KEY, []);
+  const codes = getWatchlist();
   const i = codes.indexOf(code);
   if (i >= 0) { codes.splice(i, 1); showAlert(`已把 ${code} 移出自选。`); }
   else { codes.push(code); showAlert(`已把 ${code} 加入自选。`); }
-  LS.set(WATCH_KEY, codes);
+  setWatchlist(codes);
   renderWatchlist();
 }
 function saveLastRun(state) { LS.set(LAST_KEY, state); }
@@ -837,6 +879,10 @@ async function updateCorrelation(win) {
 async function run(code, opts = {}) {
   opts = opts || {};
   showAlert(null);
+  // 重入保护：按钮虽被 setFundBusy 禁用，但 run() 还会被示例 chip / 下拉
+  // onchange / 自选 onchange 等程序化路径调用；任务在跑时直接拒绝，避免
+  // 同一基金被提交两次、后者覆盖前者的进度条。
+  if (activeJob) { showAlert('已有分析任务在运行，请稍候或先取消。'); return; }
   if (!/^\d{6}$/.test(code)) { showAlert('请输入 6 位数字基金代码，例如 110022'); return; }
   const models = selectedModels();
   if (!models.length) { showAlert('请至少勾选一个模型'); return; }
@@ -910,8 +956,18 @@ async function poll(jid, token = fundGeneration) {
       return;
     }
     let j;
-    try { j = await api('/api/job/' + jid); }
-    catch (e) { if (token !== fundGeneration) return; showAlert('任务查询失败：' + e.message); $('progressWrap').hidden = true; return; }
+    // 单次查询失败不直接放弃：网络抖动/后端重启时重试几次，避免长任务跑到
+    // 一半因为一次 502 就前功尽弃。连续失败超 3 次才报错退出。
+    let qerr = null;
+    for (let t = 0; t < 3; t++) {
+      try { j = await api('/api/job/' + jid); qerr = null; break; }
+      catch (e) { qerr = e; await new Promise(r => setTimeout(r, 1500)); }
+    }
+    if (qerr) {
+      if (token !== fundGeneration) return;
+      showAlert('任务查询失败：' + qerr.message);
+      $('progressWrap').hidden = true; return;
+    }
     if (token !== fundGeneration) return;
     setProgress(j.stage, j.progress, j.detail);
     if (j.status === 'done') {
@@ -1115,7 +1171,7 @@ function renderModelStrip() {
     const err = m.metrics.oos_r2 === null;
     return `<div class="mcard ${k === S.sel ? 'sel' : ''}" data-k="${k}">
       ${k === S.best ? '<span class="best">区间最优</span>' : ''}
-      <div class="nm">${m.name}</div>
+      <div class="nm">${escapeHtml(m.name)}</div>
       <div class="r2" style="color:${err ? 'var(--bad)' : 'var(--fg)'}">
         ${err ? '失败' : fmtNum(m.metrics.oos_r2, 3)}</div>
       <div class="sub">TE ${err ? '—' : fmtPct(m.metrics.oos_te, 1)} · ${
@@ -1161,9 +1217,9 @@ function renderRank() {
                    && (bt < eq * 0.7 || bt < 0);
       const r2col = noR2 ? 'var(--fg3)' : (neg ? 'var(--bad)' : 'var(--fg)');
       return `<tr class="clickable ${k === S.sel ? 'sel' : ''}" data-k="${k}">
-        <td class="l">${x['模型']} ${k === S.best ? '<span class="tag">区间最优</span>' : ''}</td>
-        <td class="l">${x['流派']}</td>
-        <td class="l">${x['可解释']}</td>
+        <td class="l">${escapeHtml(x['模型'])} ${k === S.best ? '<span class="tag">区间最优</span>' : ''}</td>
+        <td class="l">${escapeHtml(x['流派'])}</td>
+        <td class="l">${escapeHtml(x['可解释'])}</td>
         <td class="bar-cell" ${noR2 ? 'title="R² 未定义（窗口内目标无变异）"' :
           neg ? 'title="负 R²：模型连常数基准都不如"' : ''}>${noR2 ? '—' :
           `<div class="bg" style="right:14px;width:${w}%;` +

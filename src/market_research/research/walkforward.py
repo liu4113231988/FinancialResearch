@@ -31,6 +31,7 @@ E3 已经给出警示信号：108 组参数网格里 **37% 天然为正**。
 """
 from __future__ import annotations
 
+import logging
 from itertools import product
 from typing import Callable, Dict, List, Optional
 
@@ -38,6 +39,8 @@ import numpy as np
 import pandas as pd
 
 import market_research.config as C
+
+LOG = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------ 候选配置
@@ -60,7 +63,9 @@ def default_grid() -> List[dict]:
 def eval_config(nav: pd.Series, syn_nav: pd.Series,
                 weights: pd.DataFrame, pe: Optional[pd.DataFrame],
                 cfg: dict, reb: int,
-                bt_cfg: Optional[dict] = None) -> Optional[dict]:
+                bt_cfg: Optional[dict] = None,
+                diag: Optional[dict] = None,
+                diag_key: Optional[str] = None) -> Optional[dict]:
     """
     在一只基金上跑一个配置，返回超额序列与其年化/IR。
 
@@ -69,6 +74,9 @@ def eval_config(nav: pd.Series, syn_nav: pd.Series,
     bt_cfg 可覆盖回测层配置（如 `warmup`）。做**时间切片**时必须传：
     默认 warmup=252 天，而一个测试折只有两三百天，预热就把它吃光了，
     结果是该折所有配置都返回 None（时间向前验证会静默地"没有结论"）。
+
+    diag/diag_key：异常时把错误信息写入 diag[diag_key]，便于排查"所有配置
+    都失败"时到底是哪只基金/哪个环节抛了什么错，而不是只得到一堆 None。
     """
     from market_research.modeling.backtest import run_backtest
     from market_research.modeling.signals import SignalEngine
@@ -88,7 +96,13 @@ def eval_config(nav: pd.Series, syn_nav: pd.Series,
                              "score": pd.Series(0.5, index=pos.index)})
         bt = run_backtest(nav, sig2, cfg={**dict(cfg), **(bt_cfg or {})},
                           main_name="候选")
-    except Exception:                                      # noqa: BLE001
+    except Exception as e:                                    # noqa: BLE001
+        # ★ 旧实现 `except Exception: return None` 把所有异常静默吞掉，
+        #   调用方只看到一堆 None，无法定位"为什么全部失败"。
+        LOG.exception("eval_config 失败%s",
+                      f"（{diag_key}）" if diag_key else "")
+        if diag is not None and diag_key is not None:
+            diag[diag_key] = f"{type(e).__name__}: {e}"
         return None
     cn = bt["control_name"]
     ex = (bt["series"]["候选"] - bt["series"][cn])
@@ -150,19 +164,22 @@ def walk_forward(per_fund: Dict[str, dict], grid: Optional[List[dict]] = None
 
     # ---- 一次算完 (基金 × 配置) 的全表，避免重复拟合
     table: Dict[str, Dict[tuple, dict]] = {}
+    diag: Dict[str, str] = {}
     for c in codes:
         d = per_fund[c]
         table[c] = {}
         for g in grid:
             key = (g["win"], g["reb"])
             r = eval_config(d["nav"], d["syn_nav"], d["weights"], d["pe"],
-                            g["cfg"], g["reb"])
+                            g["cfg"], g["reb"], diag=diag, diag_key=f"{c}/{key}")
             if r is not None:
                 table[c][key] = r
 
     keys = sorted({k for c in codes for k in table[c]})
     if not keys:
-        raise ValueError("所有 (基金 × 配置) 组合都失败了")
+        raise ValueError(
+            "所有 (基金 × 配置) 组合都失败了；错误明细："
+            + ("; ".join(f"{k}={v}" for k, v in diag.items()) if diag else "无"))
 
     def ir_panel(codes_: List[str]) -> pd.DataFrame:
         """
@@ -334,7 +351,8 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
     if not folds:
         return {"ok": False, "reason": "可用交易日不足以做时间切分"}
 
-    def _table(slice_range) -> Dict[str, Dict[tuple, dict]]:
+    def _table(slice_range, diag: dict, tag: str
+               ) -> Dict[str, Dict[tuple, dict]]:
         s0, s1 = slice_range
         tb: Dict[str, Dict[tuple, dict]] = {}
         for c in codes:
@@ -350,7 +368,8 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
             tb[c] = {}
             for g in grid:
                 r = eval_config(sub["nav"], sub["syn_nav"], sub["weights"],
-                                sub["pe"], g["cfg"], g["reb"], bt_cfg=bt_cfg)
+                                sub["pe"], g["cfg"], g["reb"], bt_cfg=bt_cfg,
+                                diag=diag, diag_key=f"{tag}|{c}/{(g['win'], g['reb'])}")
                 if r is not None:
                     tb[c][(g["win"], g["reb"])] = r
         return tb
@@ -371,9 +390,10 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
         return float(col.mean()) if len(col) else float("nan")
 
     rows, oos_parts, cand_rows, fund_rows = [], [], [], []
+    diag: Dict[str, str] = {}
     for fi, (s0, s1, t0, t1) in enumerate(folds, 1):
-        tr = _table((s0, s1))
-        te = _table((t0, t1))
+        tr = _table((s0, s1), diag, f"折{fi}训")
+        te = _table((t0, t1), diag, f"折{fi}测")
         keys = sorted({k for c in tr for k in tr[c]})
         if not keys or not te:
             # ★ 必须说清"为什么没结论"。旧文案只有"样本过短"，看不出是

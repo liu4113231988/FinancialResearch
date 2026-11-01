@@ -33,6 +33,87 @@
 - ~~Web 重估点抽稀的前缀稳定性~~ **已关闭（2026-11-01）**：`rebal_mode` 切换为 `calendar`（锚点只由日期决定），限流改为保留最新锚点、从头部丢弃 —— 已选历史点不位移；`CACHE_VERSION` 连同 +1，回归见 `tests/modeling/test_rebal_calendar.py`。研究路径本就不抽稀，不受影响。
 - 页面恢复、自选及带数据口径的研究导出**已实现（2026-11-01）**：localStorage 持久化上次分析状态（只回填表单、不自动触发分析）与自选基金清单（顶栏 ☆），结果页支持导出 JSON（含窗口/模型/超参/重估模式等口径）。仍缺：长期模型档案，为[待评估提案](docs/模型档案与算法记录_重构方案.md)，未实现。
 
+## 本轮代码审查发现（2026-11-01 补记，尚未修复）
+
+由一次覆盖基金/建模、市场/研究、API/任务/数据层、前端的全链路只读审查发现。每条含 位置、触发条件、后果、修复方向。P1 影响默认路径计算结果，P2 特定条件下错误或口径被持久化，P3 健壮性/一致性/打磨。已知数据缺口（P1-10/P1-11 及「股票与指数」六项）不重复列在此处。
+
+### P1（默认主路径，影响每只基金分析结果）
+
+- **P1-A：PE 估值分位面板永久全 NaN，「日积月累」设计不生效**
+  位置：`data/providers/valuation.py:80`（`fetch_pe_panel` 在每次抓取的 ~20 行片段上立即算 `rolling(2000, min_periods=250)` → 全 NaN）+ `data/panels.py:55-89`（`_accumulate_panel` 逐日合并的全是 NaN 帧，无论积累多久都不可能出现有效分位）。
+  触发：任意走估值通道的基金分析（`pipeline.py:52` → `signals.py:valuation_channel`）。
+  后果：`val_score` 全 NaN，`signals.py:238-240` 用 `fillna(0)` 后分母仍含 `w_val_pe=0.15`，融合分被静默压向中性、仓位被系统性压向 0.5；界面无任何降级提示，与文档口径不符。`tests/data/test_valuation.py` 的累积测试直接注入「原始值帧」，从未用真实 `fetch_pe_panel` 串过累积链路，故漏测。
+  修复方向：`pe_panel` 改为累积**原始市盈率**（与 `div_panel` 同构），合并出完整历史后再对整块重算分位；`DATA_CACHE_VERSION` +1；补「短片段多轮累积→后期分位有效」的回归。
+
+- **P1-B：自适应仓位的锚点 E 从不按自身 R² 参评**
+  位置：`modeling/estimators.py:676-684`（`estimate_equity`）。
+  触发：默认配置 `auto_equity=True`、`equity_method="local"`（`config.py:239-243`），beta 不动点落在 `(0.20, 1.00)` 内部——即默认路径下几乎每个窗口（grid 法同构）。
+  机理：阶段一在不动点 E 拟合得到 `fr`；local 候选 `[E−0.1, E, E+0.1]` 升序遍历，第一个候选走 else 把 `fr` 重绑成 E−0.1 的拟合；到 `Ec==E` 时「复用阶段一结果」实际复用了邻域拟合，其 R² 与刚写入 best 的值相等、严格 `>` 失败，锚点永远落选，选出的仓位只能是 ±0.10 邻域值。违背「窗口内自适应估仓位」设计。
+  修复方向：阶段一结束单独保存 `fr0`，复用分支用 `fr0`（或在复用命中后不再让 else 覆盖该引用）。
+
+### P2（特定条件下错误 / 错误口径被持久化）
+
+- **E1 短周期 ICIR 恒为 NaN**：`research/experiments.py:54-60`，分块长度恰为 `block=max(h,20)`，过滤却写 `len(b) > 20`——h=5/20 时所有块恰 20 长被全丢，研究最关心的短周期 ICIR 永远缺失且与「样本不足」不可区分。改 `>= 20`。
+- **walk-forward 配置失败被伪装成样本不足**：`research/walkforward.py:91-92` `except Exception: return None` 丢弃异常信息，失败格静默消失并触发不等样本回退，结论失真。应参照 `research/robustness.py:338` 把 `{type}: {msg}` 写入 diag，并在汇总中显式披露失败配置数。
+- **lasso/ridge/krr 内层 CV 标准化泄漏（P1-02 同类漏改）**：`modeling/estimators.py:249/282/472` 未传 `_fold_standardize`，全窗口 mu/sd 进入验证折，α/γ 选择偏乐观且与 enet（`estimators.py:207` 已修）口径不一致。三处以同样方式传折内变换。
+- **失效窗口健康度还原只覆盖 1 天**：`modeling/signals.py:285-297`，坏窗口权重实际生效的 `[i_k, i_{k+1})` 整段（约 20+ 交易日）仍填上一窗口 R²，停牌后本应停用的健康门控照常「可信」。应按重估段整体置 NaN。
+- **未校准总回报被当 total 口径永久缓存**：`data/providers/funds.py:204-208`，锚点 ≥2 但有效 `scale<2` 时只 print 警告、返回的 F **没有 `attrs["degraded"]`**，绕过 `data/panels.py:211-224` 的防线写入 `_total` 缓存并进入同步正史。年轻基金可触发。修复：该分支给 F 打 `degraded=True`（或返回空让调用方走既有降级）。
+- **GBK 控制台 ⚠ 打印把降级变崩溃**：`data/providers/funds.py:207/230/235/246` 与 `data/panels.py:231` 仍有 5 处 `print("⚠")` 漏网（仓库自己在 `panels.py:173-178` 已记录过该坑），直跑 CLI 在 cp936 控制台上降级路径先抛 `UnicodeEncodeError`。改为 `LOG.warning`（ASCII 或让 logging 兜底编码）。worker 子进程注入 `PYTHONUTF8=1` 不受影响。
+- **前端：自选存储形状错误打断工作台初始化**：`api/static/app.js:530` 对 localStorage 中「合法 JSON 但非数组」的值直接 `forEach`，异常发生在 init 中途（`app.js:662`），其后刷新/取消/重学/回测/MarketApp 的绑定全部失效。读取时做数组归一化（`Array.isArray(v) ? [...new Set(v.filter(/^\d{6}$/))] : []`）。当前版本自身只写数组，触发需存储被旧版/手动污染。
+- **前端：任务重入 / 取消 / 轮询健壮性**
+  - 基金分析 busy 期间下拉框（presetSel/watchSel）未禁用，可重复提交挤占队列；旧轮询 `finally` 无条件 `activeJob = null`，秒回的新任务 job_id 会被旧轮询清空（`app.js:837-890`）。
+  - POST 返回前点取消，任务随后被创建但不会被真正取消（`app.js:963-974`）。
+  - 轮询单次网络抖动即整体判失败，长任务等待作废（`app.js:913-914/1933-1934`、`market.js:86`），应有限退避重试。
+  - 市场页 `market.js:82-103` 轮询无次数上限、无 AbortController 超时、无取消入口。
+  - 相关性轮询覆写分析任务的 `activeJob`、窗口值不做 `[30,500]` 范围校验（`app.js:684/936-961`）。
+  修复方向：入口加 busy 判断/提交令牌；finally 用 `if (activeJob === 本次jid) activeJob = null`；设 `cancelRequested` 标志在 analyze 响应落地后补 cancel；轮询退避；市场接入取消按钮；相关性用独立任务槽位。
+- **前端：自选跨入口污染**：`app.js:664-669` 自选下拉在股票/指数页无条件走基金 `run()`；`toggleWatchlist` 只校验 6 位数字不区分 kind，股票代码会混入「基金自选」。非基金入口隐藏/禁用 `#btnWatch` 与 `#watchSel`，或 watchSel 走与 presetSel 相同的 kind 分支。
+- **前端：存储型 XSS 面**：`app.js` 约 24 处 `innerHTML` 拼接指数名/模型名/insight 文本（如 tooltip `app.js:1808`、超参属性值 `app.js:1592-1607`），文本来自第三方名录并落本地缓存。市场页与数据中心全用 `textContent` 是干净的。增加统一 `esc()` 工具，所有 interpolate 进 innerHTML 的外部字符串转义；ECharts tooltip 改用 textContent 或对名称转义。
+
+### P3（健壮性 / 一致性 / 打磨，择机处理）
+
+**逻辑与口径**
+- beta 自由度 ddof 混用（`np.cov` ddof=1 / `np.var` ddof=0）：`modeling/engine.py:320-322`、`modeling/estimators.py:656-659`、`research/experiments.py:374-378`，β/γ 被系统放大 n/(n−1)。统一 ddof。
+- lasso 空支撑集兜底未 `nan_to_num`，常数列可拖垮整模型（`modeling/estimators.py:254-256`，对比 enet `214-216` 已修）。
+- 平局闭合交易（|pnl|≤阈值）进 `closed_trades` 分母但不计胜，win_rate 被低估（`market/capital.py:118-123`、`market/execution.py:127-135`）。分母改 wins+losses 或单列持平数。
+- Newey-West t 在零方差序列得 ±inf（`research/robustness.py:149-164`），LRV≤阈值时应返回 NaN（参照 `research/market_validation.py:106-107`）。
+- E1 块内常数信号使整块 ICIR  NaN，应用 `np.nanmean` 并剔除/计数 NaN 块（`research/experiments.py:57-60`）。
+- 资金账户「每日重试补仓」假设对规则脉冲信号不成立（`market/capital.py:139-143` vs `market/execution.py:154-158`）：脉冲遇涨跌停/容量不足后订单永久失效、残余现金不再投入；卖出部分成交后脉冲过期则残留持仓无法再清。至少按目标类型改写文案；更严格做法是脉冲订单挂单直到成交或反向信号。
+- 分位含当日自身（`market/context.py:8-9`：`a <= a[-1]`），最低分位为 1/N 而非 0，note 未披露。
+- 行情双源失败时只保留两个异常类名（`market/analysis.py:88-93`），网络/空数据/代码错误无法区分；截断保留 `str(primary)`。
+
+**边界与防御**
+- `_normalize_holdings` 对异常季度标签直接崩溃（`funds/holdings.py:369-377`），向量化构造或先过滤匹配行。
+- `_run_one` 全部窗口被 `len(yw) < min_obs` 跳过时 `rows=[]`，`pd.DataFrame([]).set_index("date")` 抛 KeyError（`modeling/engine.py:326-329`）；空结果走 `_failed_report` 一致路径。
+- meta 的 `n_rebal` 取插入顺序第一个模型的 `weights_hist`，若首个为 failed report 显示 0（`funds/analysis.py:191-192`）；取任一非空 `weights_hist` 的长度。
+- `holding_benchmark` 隐含依赖 exposure 已按季末升序（`funds/holdings.py:649-676`）；公开入口应显式 `sort_index()`。
+- `build_pool` 全部排除记录为空时 `pd.concat` 空列表抛异常（`funds/universe.py:270`）。
+
+**任务 / 数据层**
+- 终态任务持久店保留 24h（`tasks/store.py:51`）与内存店 30 分钟不一致；`queued` 任务永不过期，worker 久停后队列永久 429。明确口径并给 queued 加 TTL。
+- 取消/超时后名额瞬时释放，可致 `max_jobs+1` 个并发写进程（`tasks/store.py:138-145`）。
+- `/api/result` 对用户取消（status=error，文案「任务已取消」）返 500，无法与真实失败区分；建议 409/499 或带 reason。
+- `end` 无未来日期上界（`validation/window.py:62-86`），2099 会触发 47 指数全量抓取；超过今天直接 400。
+- `--once` 绕过 `FIL_SYNC_ENABLED=0`（`tasks/sync.py:347-349`），而计划任务恰好用 `--once`，与 `serve()` 注释承诺相反。
+- 结果缓存按 mtime 30 天淘汰（`services/analysis.py:103-108`），热点缓存每天读也被删；应按 atime 或命中时 utime。
+- 请求线程内 `/api/corr`（`allow_fetch=False`）仍有 DuckDB 写副作用（`data/panels.py:196-199` 的 `register`、`168-171` 的 `_cache_info_write`），只读模式应跳过，避免与 sync 大事务抢锁。
+- supervisor 对杀不掉的僵尸子进程 `wait` 超时会炸整个监督循环（`tasks/worker.py:81-114`）；超时则记录并跳过本轮，不要让单个失控进程拖垮队列。
+- 损坏缓存无自愈（`data/storage.py:54-60`、`data/cache.py:75-80`），可能把冷缓存 202 打成 500。
+- `_retry` 对 ValueError/KeyError 等编程错误也重试 4 次且末次多睡一轮（`data/http.py:42-47`）。
+- 候选池 ≤200 行被静默丢弃（`data/providers/indices.py:60-67`），真实原因不可见。
+- `meta.through` 固定写当天，即便 `data_end` 更早（源站滞后），`cached()` 凭 through 判新鲜会静默用旧数据（`tasks/sync.py:189-211`）。
+
+**UI 打磨**
+- ≤1150px 顶栏「自选」下拉整体隐藏，手机端无自选入口（`api/static/style.css:481`）；移到基金工具栏/空状态区或允许换行。
+- 模型卡片/排名行用 div/tr + onclick，键盘不可达、无 ARIA（`app.js:1125-1127/1182-1184`）；加 `tabindex`、`role="button"`、Enter/Space 处理。
+- 日期输入无 `max=今天`；回测 60 交易日预热无前端预检（`index.html:98-99/165-166`）。
+- 结果缺字段时渲染中途抛错，留下「新头部+旧图表」混合页（`app.js:976-1006/1744-1747` 等）；渲染函数对可选集合做存在性兜底。
+- 429/409/404 提示无差别、409 不接续已有任务（`app.js:475-483`）。
+- 标签页隐藏后基金/市场/相关性轮询不停（数据中心已跳过，`data-center.js:104`）。
+- 市场页 resize 无防抖（`market.js:284`，基金侧有 140ms debounce）。
+- 图表容器缺 `role="img"`/`aria-label`、分段按钮缺 `aria-pressed`；`document.title` 不随入口变化。
+- 自选不清理失效代码；catalog 初始加载无 loading 态、失败无重试按钮。
+
 ## 本轮复核范围与证据
 
 - 原“股票与指数”六项仍保留为研究/数据缺口：已有方向模型、概率校准、规则/模型成交和资金账户诊断，以及配对不确定性估计；它们不等于独立未来样本有效性、完整策略不确定性、真实 ETF 成交、历史时点成分或财报可得时间。这些缺口不是本轮通过合成数据即可关闭的缺陷。

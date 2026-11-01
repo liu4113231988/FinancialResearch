@@ -20,6 +20,17 @@ try:
 except Exception:                                             # noqa: BLE001
     pass
 
+# ★ V8 预初始化：py_mini_racer（akshare 的 JS 解密依赖）内部用单例保护
+#   mr_init_v8，但在 Windows 上偶发 partition_address_space.cc(243)
+#   Check failed: !IsConfigurablePoolInitialized() —— 本质是 V8 的 PartitionAlloc
+#   被二次初始化。在进程最早期 init_mini_racer() 一次，把单例先占住，
+#   后续任何 MiniRacer() 都复用现有 handle，杜绝二次 init。
+try:
+    from py_mini_racer import init_mini_racer
+    init_mini_racer()
+except Exception:                                             # noqa: BLE001
+    pass
+
 import numpy as np
 import pandas as pd
 
@@ -372,8 +383,10 @@ def r12():
     # 3) 面板确实按窗口裁剪（需要本地缓存；没有缓存则跳过而不是误报失败）
     try:
         from market_research.data.marketdata import load_panel
-        p2 = load_panel("110022", start=C._rolling_start(2), verbose=False)
-        p5 = load_panel("110022", start=C._rolling_start(5), verbose=False)
+        p2 = load_panel("110022", start=C._rolling_start(2), verbose=False,
+                        allow_fetch=False)
+        p5 = load_panel("110022", start=C._rolling_start(5), verbose=False,
+                        allow_fetch=False)
         chk(len(p2) < len(p5),
             f"近2年 {len(p2)} 行 < 近5年 {len(p5)} 行（确实裁剪了）")
         chk(len(p2) >= 400,
@@ -461,9 +474,9 @@ def r13():
     # 运行时覆盖 C.START_DATE 必须对 load_panel 生效（惰性解析的前提）
     try:
         from market_research.data.marketdata import load_panel
-        p5 = load_panel("110022", verbose=False)
+        p5 = load_panel("110022", verbose=False, allow_fetch=False)
         C.START_DATE = C._rolling_start(2)
-        p2 = load_panel("110022", verbose=False)
+        p2 = load_panel("110022", verbose=False, allow_fetch=False)
         C.START_DATE = C._rolling_start(C.DEFAULT_WINDOW_YEARS)
         chk(len(p2) < len(p5),
             f"覆盖 C.START_DATE 后 load_panel 跟随：{len(p2)} < {len(p5)} 行")
@@ -471,11 +484,34 @@ def r13():
         print(f"  （跳过 load_panel 覆盖检查：{type(ex).__name__}）")
 
 
+# ============================================================ R14 自适应仓位锚点参评
+def r14():
+    print("\nR14 · 自适应仓位：beta 不动点锚点必须按自身 R² 参评")
+    from market_research.modeling.models import estimate_equity, fit_window
+    rng = np.random.default_rng(7)
+    n, k = 500, 4
+    cols = [f"a{i}" for i in range(k)]
+    # 单一主导因子：y = 0.6 * X[:,0] + 微噪声。真实仓位 γ=0.6。
+    X = rng.normal(0, 0.01, (n, k))
+    y = 0.6 * X[:, 0] + rng.normal(0, 1e-6, n)
+    # equity_ratio 默认 0.9，beta 不动点会收敛到 0.6；local 候选 [0.5,0.6,0.7]。
+    E, fr = estimate_equity(
+        lambda EE: fit_window("enet_slsqp", X, y, cols, equity_ratio=EE),
+        X, y, cols, bounds=(0.2, 1.0), method="local")
+    # 锚点 0.6 的拟合 R²=1（完美解释），必须胜出；修复前锚点从不参评，
+    # 返回的是 0.5 或 0.7（邻域）。邻域距 0.6 为 0.1，锚点收敛到 0.6±噪声，
+    # 用 0.05 阈值可清晰区分「锚点胜出」与「邻域胜出」。
+    chk(abs(float(E) - 0.6) < 0.05,
+        f"不动点锚点 0.6 被选中（实际 E={E}，修复前只会落到 ±0.10 邻域）")
+    chk(fr is not None and np.all(np.isfinite(fr.weights.values)),
+        "返回的 FitResult 权重全为有限值")
+
+
 def main():
     print("=" * 78)
     print("行为回归（2026-10-11 轮次修复）")
     print("=" * 78)
-    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13):
+    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14):
         try:
             fn()
         except Exception as e:                                # noqa: BLE001

@@ -171,9 +171,8 @@ def load_industry_map(refresh: bool = False,
                 frames.append(_fetch_industry_constituents(code, inds[code]))
             except Exception as e:                            # noqa: BLE001
                 failed.append(code)
-                if verbose:
-                    print(f"[holdings] ⚠ 行业 {code} {inds.get(code, code)} "
-                          f"成分股获取失败：{type(e).__name__}")
+                LOG.warning("行业 %s %s 成分股获取失败：%s",
+                            code, inds.get(code, code), type(e).__name__)
             time.sleep(0.15)                  # 轻微限速，避免被限流
         if verbose:
             print(f"[holdings] 行业映射补取 {len(to_fetch)} 个行业"
@@ -299,9 +298,7 @@ def load_fund_holdings(code: str, refresh: bool = False,
                 fetched.add(yr)
             except Exception as e:                            # noqa: BLE001
                 newly_failed.append(yr)
-                if verbose:
-                    print(f"[holdings] ⚠ {code} {yr} 年持仓获取失败："
-                          f"{type(e).__name__}")
+                LOG.warning("%s %s 年持仓获取失败：%s", code, yr, type(e).__name__)
             time.sleep(0.15)                  # 轻微限速，避免被限流
 
     failed = ((set(meta.get("failed_years", [])) - set(to_fetch))

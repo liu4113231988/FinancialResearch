@@ -43,7 +43,9 @@ CACHE_VERSION = 10
 # 4 = 估值面板取数源从乐咕（stock_index_pe_lg，当前 akshare 版本已缺失）切换为
 #     中证官网 csindex（stock_zh_index_value_csindex，日频市盈率2/股息率2）。
 #     pe_panel 数值口径整体变化（月→日），旧缓存必须失效；新增 div_panel。
-DATA_CACHE_VERSION = 4
+# 5 = pe_panel 缓存口径从「抓取片段上算好的分位」改为「原始 PE」，分位改由
+#     load_pe_panel 在累积出完整历史后重算。旧版缓存是全 NaN 分位，必须失效。
+DATA_CACHE_VERSION = 5
 
 # ---------------------------------------------------------------- 候选指数池
 # 第一层：宽基（刻画市场的 beta 骨架）

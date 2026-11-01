@@ -144,6 +144,24 @@ def _ts_cv_mse(make_model, Xs: np.ndarray, ys: np.ndarray, n_splits: int = 2,
     return final, best_e
 
 
+def _fold_zscore(Xtr, ytr, Xte, yte):
+    """折内标准化：只用训练段拟合 mu/sd，再变换同折验证段（防泄漏）。
+
+    用于 enet / lasso / ridge（X 和 y 都做 z-score）。"""
+    mu, sd = Xtr.mean(0), Xtr.std(0)
+    sd = np.where(sd == 0, 1.0, sd)
+    ym, ysd = ytr.mean(), (ytr.std() or 1.0)
+    return ((Xtr - mu) / sd, (ytr - ym) / ysd,
+            (Xte - mu) / sd, (yte - ym) / ysd)
+
+
+def _fold_scale_x(Xtr, ytr, Xte, yte):
+    """折内只对 X 按 std 缩放（不居中、不动 y），用于 KRR（RBF 核对尺度敏感）。"""
+    sd = Xtr.std(0)
+    sd = np.where(sd == 0, 1.0, sd)
+    return Xtr / sd, ytr, Xte / sd, yte
+
+
 @dataclass
 class FitResult:
     weights: pd.Series
@@ -197,14 +215,7 @@ def _fit_enet(X, y, cols, equity_ratio, prm):
     # ★ P1-02：内层 CV 的标准化必须**只用该折的训练段**拟合，
     #   再用它变换同一折的验证段。上面 Xs/ys 的全窗口标准化只用于
     #   "最后在全样本上重新拟合"那一步，不参与选参。
-    def _fold_standardize(Xtr, ytr, Xte, yte):
-        mu, sd = Xtr.mean(0), Xtr.std(0)
-        sd = np.where(sd == 0, 1.0, sd)
-        ym, ysd = ytr.mean(), (ytr.std() or 1.0)
-        return ((Xtr - mu) / sd, (ytr - ym) / ysd,
-                (Xte - mu) / sd, (yte - ym) / ysd)
-
-    mdl, _ = _ts_cv_mse(factory, Xs, ys, transform=_fold_standardize)
+    mdl, _ = _ts_cv_mse(factory, Xs, ys, transform=_fold_zscore)
     if mdl is None:
         mdl = ElasticNet(alpha=grid[0], l1_ratio=l1, positive=True,
                          max_iter=20000).fit(Xs, ys)
@@ -246,7 +257,7 @@ def _fit_lasso(X, y, cols, equity_ratio, prm):
         for a in grid:
             yield (lambda a=a: Lasso(alpha=a, positive=True, fit_intercept=True,
                                       max_iter=40000, tol=1e-5))
-    mdl, _ = _ts_cv_mse(factory, Xs, ys)
+    mdl, _ = _ts_cv_mse(factory, Xs, ys, transform=_fold_zscore)
     if mdl is None:
         mdl = Lasso(alpha=grid[0], positive=True, max_iter=40000).fit(Xs, ys)
     coef = mdl.coef_ / sd
@@ -279,7 +290,7 @@ def _fit_ridge(X, y, cols, equity_ratio, prm):
     def factory():
         for a in grid:
             yield (lambda a=a: Ridge(alpha=a, positive=True, fit_intercept=True))
-    mdl, _ = _ts_cv_mse(factory, Xs, ys)
+    mdl, _ = _ts_cv_mse(factory, Xs, ys, transform=_fold_zscore)
     if mdl is None:
         mdl = Ridge(alpha=grid[0], positive=True).fit(Xs, ys)
     coef = mdl.coef_ / sd
@@ -469,7 +480,7 @@ def _fit_krr(X, y, cols, equity_ratio, prm):
         for a in a_grid:
             for g in g_grid:
                 yield (lambda a=a, g=g: KernelRidge(alpha=a, kernel="rbf", gamma=g))
-    best, _ = _ts_cv_mse(factory, Xn, y)
+    best, _ = _ts_cv_mse(factory, Xn, y, transform=_fold_scale_x)
     mdl = best
     if mdl is None:
         mdl = KernelRidge(alpha=0.3, kernel="rbf", gamma=g_base).fit(Xn, y)
@@ -673,15 +684,21 @@ def estimate_equity(fit_fn, X: np.ndarray, y: np.ndarray, cols: List[str],
         cands = sorted({float(np.clip(E + d, lo, hi))
                         for d in (-step, 0.0, step)})
 
+    # ★ 阶段一在不动点 E 上的拟合必须单独保留：候选按升序遍历，第一个邻域
+    #   候选会走 else 把 fr 重绑成邻域拟合；若直接用 fr 复用，锚点 E 实际
+    #   参评的就是邻域拟合的 R²（且与刚写入 best 的值相等、严格 > 失败），
+    #   导致锚点永远落选、仓位只能在 ±step 邻域里选。
+    fr0 = fr
+
     best_E, best_fr, best_r2 = None, None, -np.inf
     for Ec in cands:
-        if fr is not None and abs(Ec - E) < 1e-9:
-            r2 = _r2_of(fr)                      # 阶段一的结果直接复用
+        if fr0 is not None and abs(Ec - E) < 1e-9:
+            r2 = _r2_of(fr0)                     # 阶段一在 E 上的结果直接复用
         else:
             fr = fit_fn(Ec)
             r2 = _r2_of(fr)
         if r2 > best_r2:
             best_E, best_fr, best_r2 = Ec, fr, r2
     if best_E is None:                       # 兜底：至少退回阶段一的 beta 不动点
-        return E, fr
+        return E, fr0
     return best_E, best_fr

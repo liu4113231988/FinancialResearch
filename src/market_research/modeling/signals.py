@@ -290,7 +290,12 @@ class SignalEngine:
             #   即该段根本没有可解释的收益结构），若被 ffill 成上一个窗口的 R²，
             #   这个失效窗口就被静默掩盖，健康门控照常给"拟合可信"。
             #   这里把"源数据里就是 NaN"的窗口显式还原成 NaN。
-            bad_src = src.isna().any(axis=1).reindex(idx, fill_value=False)
+            # ★ 坏窗 mask 必须 ffill 到**整个再平衡段**：src 只在再平衡日有值，
+            #   reindex(idx, fill_value=False) 只会把坏标记落在那一天，
+            #   而 diag 的 r2/te 被 ffill 铺到了 [T_i, T_{i+1}) 全程，
+            #   于是坏窗口里除再平衡日外的天数都带着"被洗白的有效值"。
+            bad_src = (src.isna().any(axis=1)
+                       .reindex(idx).ffill().fillna(False).astype(bool))
             diag.loc[bad_src] = np.nan
         else:
             diag = pd.DataFrame(index=idx, columns=["r2", "te"], dtype=float)

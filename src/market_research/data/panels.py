@@ -93,14 +93,21 @@ def load_pe_panel(verbose: bool = True) -> pd.DataFrame:
     """
     宽基指数估值面板（csindex 日频市盈率的滚动历史分位，0~1），缓存 `pe_panel`。
 
-    ★ 取数源为 csindex（官方文件只留近一个月），历史靠 `_accumulate_panel`
-      日积月累；历史不足时滚动分位按 `min_periods` 输出 NaN，估值通道按
-      无估值处理，等积累充足后自然变准。
+    ★ 缓存里存的是**原始 PE**（见 `fetch_pe_panel` 的说明）：csindex 每次
+      只返最近约一个月，若在抓取片段上直接算分位会得到全 NaN 并被永久冻结。
+      这里先 `_accumulate_panel` 把原始 PE 日积月累成完整历史，再对整块
+      重算 `_percentile` —— 历史不足时按 `min_periods` 输出 NaN，估值通道
+      按无估值处理，等积累充足后自然变准。
     """
     from market_research.modeling.signals import PE_SYMBOL, PE_FALLBACK
+    from market_research.data.providers.valuation import _percentile
 
     syms = sorted(set(PE_SYMBOL.values()) | {PE_FALLBACK})
-    return _accumulate_panel("pe_panel", fetch_pe_panel, syms, verbose)
+    raw = _accumulate_panel("pe_panel", fetch_pe_panel, syms, verbose)
+    if raw.empty:
+        return raw
+    # 分位窗口 8 年（约 2000 交易日），min_periods 取 1/3 即约 1 年
+    return raw.apply(lambda c: _percentile(c, 8.0))
 
 
 def load_dividend_panel(verbose: bool = True) -> pd.DataFrame:
@@ -228,7 +235,7 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
         df = _cached(cache_name, build, meta=meta, refresh=refresh,
                      allow_fetch=allow_fetch)
     except _DegradedNav as e:
-        print(f"[data] ⚠ {e}；本次退回累计净值口径，结果【未缓存】")
+        LOG.warning("%s；本次退回累计净值口径，结果【未缓存】", e)
         return fetch_fund_nav(fund_code, start)
     s = df.iloc[:, 0] if isinstance(df, pd.DataFrame) else df
     s.name = f"fund_{fund_code}"

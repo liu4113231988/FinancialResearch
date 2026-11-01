@@ -55,7 +55,7 @@ def ic_term_structure(sig: pd.DataFrame, nav: pd.Series,
             blocks = [v.iloc[i:i + block]
                       for i in range(0, len(v) - block + 1, block)]
             ics = [float(b["s"].corr(b["f"], method="spearman")) for b in blocks
-                   if len(b) > 20]
+                   if len(b) >= 20]
             icir = (float(np.mean(ics) / np.std(ics))
                     if len(ics) >= 4 and np.std(ics) > 1e-9 else np.nan)
             t = ic * np.sqrt(len(v) / max(h, 1))     # 按非重叠块数的粗略 t 值

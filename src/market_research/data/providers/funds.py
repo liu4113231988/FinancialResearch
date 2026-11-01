@@ -1,9 +1,12 @@
 from __future__ import annotations
+import logging
 from typing import Optional
 import numpy as np
 import pandas as pd
 import market_research.config as C
 from market_research.data.http import _retry, _clean_series
+
+LOG = logging.getLogger(__name__)
 
 def fetch_fund_nav(code: str, start: Optional[str] = None) -> pd.Series:
     """
@@ -181,6 +184,7 @@ def calibrate_total_return(cum_nav: pd.Series, unit_nav: pd.Series,
     F = (1.0 + r).cumprod()
 
     anchors = cum_ret[(cum_ret.index >= idx[0]) & (cum_ret.index <= idx[-1])]
+    degraded = False
     if len(anchors) >= 2:
         scale = {}
         for d, v in anchors.items():
@@ -201,13 +205,19 @@ def calibrate_total_return(cum_nav: pd.Series, unit_nav: pd.Series,
                 sc = sc.loc[first:]
             sc = sc.ffill().fillna(1.0)
             F = F * sc
-        elif len(anchors) >= 2:
+        else:
             # ★ 复查发现：锚点存在但全部落在净值区间之外时，这里会**静默**
-            #   跳过校准，返回只有分红修正的 F —— 使用者无从知道口径降级了。
-            print(f"[data] ⚠ 累计收益率锚点 {len(anchors)} 个全部落在净值区间"
-                  f" [{idx[0].date()} ~ {idx[-1].date()}] 之外，拆分校准未生效")
+            #   跳过校准，返回只有分红修正的 F。必须打 degraded 标记，否则
+            #   调用方会把未校准序列以 basis="total" 永久写入缓存并进入同步
+            #   正史，口径错误无从察觉。
+            LOG.warning(
+                "累计收益率锚点 %d 个全部落在净值区间 [%s ~ %s] 之外，拆分校准未生效",
+                len(anchors), idx[0].date(), idx[-1].date())
+            degraded = True
     F = F.clip(lower=1e-8)
     F.name = "total_return"
+    if degraded:
+        F.attrs["degraded"] = True
     return F
 
 
@@ -227,12 +237,12 @@ def fetch_fund_total_return(code: str,
     cum = _fetch_nav(code, "累计净值走势", start)
     unit = fetch_fund_unit_nav(code, start)
     if cum.empty or unit.empty:
-        print(f"[data] ⚠ {code} 拿不到单位净值，退回累计净值口径（P0-01 未修正）")
+        LOG.warning("%s 拿不到单位净值，退回累计净值口径（P0-01 未修正）", code)
         cum.attrs["degraded"] = True
         return cum
     rr = fetch_cum_return_curve(code, start)
     if rr.empty:
-        print(f"[data] ⚠ {code} 拿不到累计收益率锚点，只用分红修正（拆分未校准）")
+        LOG.warning("%s 拿不到累计收益率锚点，只用分红修正（拆分未校准）", code)
         idx = cum.index.intersection(unit.index)
         C, U = cum.reindex(idx), unit.reindex(idx)
         r = (C.diff() / U.shift(1)).fillna(0.0)
@@ -243,7 +253,7 @@ def fetch_fund_total_return(code: str,
         return F.clip(lower=1e-8)
     F = calibrate_total_return(cum, unit, rr)
     if F.empty:
-        print(f"[data] ⚠ {code} 总回报构造结果为空，退回累计净值口径")
+        LOG.warning("%s 总回报构造结果为空，退回累计净值口径", code)
         cum.attrs["degraded"] = True
         return cum
     return F

@@ -48,17 +48,18 @@ def _mock_csindex(pe_values):
 
 class ValuationPanelTests(unittest.TestCase):
     def test_pe_columns_follow_pe_symbol_contract(self):
-        # 列名必须是中文名（信号引擎按 PE_SYMBOL 的值取列），失败标的静默跳过
-        n = 250 * 9                          # 9 年 → 8 年分位窗口有效
+        # fetch_pe_panel 返回**原始 PE**（分位由 load_pe_panel 在累积后重算）。
+        n = 250 * 9                          # 9 年
         vals = list(np.linspace(8.0, 30.0, n))
         with patch.object(ak, "stock_zh_index_value_csindex",
                           side_effect=_mock_csindex(vals)):
             df = fetch_pe_panel(["沪深300", "不存在的标的"], verbose=False)
         self.assertIn("沪深300", df.columns)
         self.assertNotIn("不存在的标的", df.columns)
-        pct = df["沪深300"].dropna()
-        self.assertTrue(((pct >= 0) & (pct <= 1)).all())
-        self.assertAlmostEqual(float(pct.iloc[-1]), 1.0, places=10)  # 单调递增 → 最贵档
+        raw = df["沪深300"].dropna()
+        # 原始 PE 不再被夹到 [0,1]；单调递增序列最后一期就是最大值
+        self.assertAlmostEqual(float(raw.iloc[-1]), 30.0, places=10)
+        self.assertAlmostEqual(float(raw.iloc[0]), 8.0, places=10)
 
     def test_dividend_panel_converts_percent_to_decimal(self):
         with patch.object(ak, "stock_zh_index_value_csindex",
@@ -118,6 +119,37 @@ class AccumulationTests(unittest.TestCase):
         # 失败不回写：storage 里的缓存保持原样
         pd.testing.assert_frame_equal(storage.read("div_panel"), cached,
                                       check_freq=False)
+
+    def test_load_pe_panel_computes_percentile_on_accumulated_raw(self):
+        # 回归 P1-A：pe_panel 缓存存的是**原始 PE**，分位必须由 load_pe_panel
+        # 在累积出完整历史后重算——否则短片段上算分位会得到全 NaN 并被永久冻结。
+        from market_research.data import panels
+        # 种子缓存：600 个交易日的单调递增原始 PE（> min_periods=250）
+        idx = pd.bdate_range("2018-01-01", periods=600)
+        raw = pd.DataFrame({"沪深300": np.linspace(8.0, 30.0, 600)}, index=idx)
+        storage.write("pe_panel", raw, {})
+        # 本次 fetch 无新数据 → 沿用缓存（模拟离线/未到同步时点）
+        with patch("market_research.data.panels.fetch_pe_panel",
+                   return_value=pd.DataFrame()):
+            pct = panels.load_pe_panel(verbose=False)
+        self.assertIn("沪深300", pct.columns)
+        vals = pct["沪深300"].dropna()
+        self.assertGreater(len(vals), 0)
+        self.assertTrue(((vals >= 0) & (vals <= 1)).all())
+        # 单调递增原始 PE → 最后一期处于历史最贵档，分位接近 1.0
+        self.assertAlmostEqual(float(vals.iloc[-1]), 1.0, places=6)
+
+    def test_load_pe_panel_short_history_yields_nan_not_crash(self):
+        # 历史不足 min_periods 时输出 NaN（估值通道按无估值处理），不得抛异常
+        from market_research.data import panels
+        idx = pd.bdate_range("2025-12-01", periods=20)
+        raw = pd.DataFrame({"沪深300": np.linspace(8.0, 12.0, 20)}, index=idx)
+        storage.write("pe_panel", raw, {})
+        with patch("market_research.data.panels.fetch_pe_panel",
+                   return_value=pd.DataFrame()):
+            pct = panels.load_pe_panel(verbose=False)
+        self.assertIn("沪深300", pct.columns)
+        self.assertTrue(pct["沪深300"].isna().all())
 
 
 class ValuationSyncDailyTest(unittest.TestCase):
