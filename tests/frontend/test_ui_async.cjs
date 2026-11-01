@@ -67,6 +67,24 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   assert.deepEqual(cancelled, [['/api/job/job-7/cancel', 'POST']]);
   assert.equal(invalidated, 1);
   assert.equal(cancelContext.activeJob, null);
+  // 无模型可渲染时不得静默 return：详情区必须换成说明，而不是留着上一次的数字。
+  const selNodes = new Map();
+  const selContext = {
+    S: {sel: 'gone', result: {models: {ridge: {name: 'Ridge'}}}},
+    $: id => {
+      if (!selNodes.has(id)) selNodes.set(id, {style: {}});
+      return selNodes.get(id);
+    },
+  };
+  vm.createContext(selContext);
+  vm.runInContext(source.slice(source.indexOf('function renderSelected'),
+                               source.indexOf('function chart(id, opt)')), selContext);
+  selContext.renderSelected();
+  assert.equal(selNodes.get('selName').textContent, '无模型详情');
+  assert.match(selNodes.get('selDesc').textContent, /不在本次结果里/);
+  selContext.S.sel = null;
+  selContext.renderSelected();
+  assert.match(selNodes.get('selDesc').textContent, /没有可用模型/);
   const html = fs.readFileSync('src/market_research/api/static/index.html', 'utf8');
   assert.match(html, /id="btnCancelJob"/);
   assert.match(source, /\$\('btnCancelJob'\)\.onclick = cancelActiveJob/);

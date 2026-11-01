@@ -94,6 +94,17 @@ class CapitalTests(unittest.TestCase):
                       {'kind':'index','code':'sh000300','adjust':'','capital':{}}):
             with self.assertRaises(ValueError):validate_plan(plan|{'assets':[asset]})
 
+    def test_partial_fill_retries_every_full_target_session(self):
+        # 目标为满仓时，每个交易日都会用剩余现金继续补仓 —— 不是"只在新目标
+        # 出现时补一次"。假设文本必须与这个行为一致（P1-10 剩余项）。
+        frame=bars([10]*4); frame['volume']=1000
+        signal=pd.Series([1,1,1,np.nan],index=frame.index)
+        cfg=CapitalConfig(initial_cash=10005,max_participation=.1,volume_unit='shares')
+        out=simulate_capital(frame,signal,cfg,0,0)
+        self.assertEqual([t['quantity'] for t in out['trades']],[100,100,100])
+        self.assertEqual(out['units_path'],[0,100,200,300])
+        self.assertIn('每个交易日都会用剩余现金重新尝试买入',' '.join(out['assumptions']))
+
     def test_calendar_gap_and_slippage_preserve_execution_boundary(self):
         frame=bars([10,10,20]); signal=pd.Series([1,np.nan,np.nan],index=frame.index)
         partial=frame.drop(frame.index[1])

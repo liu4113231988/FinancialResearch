@@ -40,7 +40,32 @@ def fund_cache_path(params):
     return result_cache_path(params["code"],params["models"],params["params"],params.get("max_rebal"),params.get("auto_equity",False),D.data_stamp(exclude_stocks=True,fund_code=params["code"]),params.get("start"),params.get("end"))
 
 
+_CLEANED = False
+
+
+def _cleanup_stale_results() -> None:
+    """
+    删除**非当前版本**的结果缓存。
+
+    ★ config.py 曾同时写着"旧版缓存会被自动清理"和"不会被清扫"，两边都不真：
+      没有任何代码做清理，`webcache` 里长期留着 v7/v8 的 .pkl。
+      只删其它版本前缀，不动当前版本（多进程同时写当前版本是安全的）。
+    """
+    global _CLEANED
+    if _CLEANED:
+        return
+    _CLEANED = True
+    prefix = f"result_v{C.CACHE_VERSION}_"
+    try:
+        for path in CACHE_DIR.glob("result_v*.pkl"):
+            if not path.name.startswith(prefix):
+                path.unlink(missing_ok=True)
+    except OSError:
+        LOG.warning("清理旧结果缓存失败（不影响本次分析）", exc_info=True)
+
+
 def submit(operation, params):
+    _cleanup_stale_results()
     if operation == "analyze":
         sync.register("fund", params["code"], D.NAV_BASIS_TOTAL)
         path = fund_cache_path(params)

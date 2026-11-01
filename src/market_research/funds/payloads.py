@@ -164,13 +164,16 @@ def _weights_payload(w: pd.Series, min_w: float = 0.005,
     **必须过滤掉权重≈0 的项**：线性约束模型会把落选指数置零，
     但 Series 里仍保留这些列。若不过滤，43 个指数会挤进图表，
     大部分是零高度的柱，前端完全读不出重点。
+
+    ★ 不输出"被丢掉的项数"：旧字段 `n_zero` 名字与实际含义不符（它统计的是
+      **低于展示阈值**的项，不是恰好为 0 的项），而且全仓（前端、报告、测试）
+      没有任何消费方。需要时可由 `n - len(items)` 得到，不必再存一份。
     """
     if w is None or len(w) == 0:
-        return {"items": [], "sum": 0.0, "n": 0, "n_zero": 0}
+        return {"items": [], "sum": 0.0, "n": 0}
     w = w[w > 0]
     if w.empty:
-        return {"items": [], "sum": 0.0, "n": 0, "n_zero": 0}
-    dropped = int((w <= min_w).sum())
+        return {"items": [], "sum": 0.0, "n": 0}
     wv = w[w > min_w].head(top_n)
     items = []
     for code_, v in wv.items():
@@ -180,8 +183,7 @@ def _weights_payload(w: pd.Series, min_w: float = 0.005,
             "layer": C.LAYER_OF.get(code_, "其他"),
             "weight": _jnum(v, 5),
         })
-    return {"items": items, "sum": _jnum(w.sum(), 4), "n": int(len(w)),
-            "n_zero": dropped}
+    return {"items": items, "sum": _jnum(w.sum(), 4), "n": int(len(w))}
 
 
 def _weights_hist_payload(wh: pd.DataFrame, assets_limit: int = 8,
@@ -522,14 +524,23 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
             }
 
     # ---------- 5. 候选池覆盖度
-    out["coverage"] = {
-        "text": (f"候选池共 {corr.get('n_assets', 0)} 个指数，"
-                 f"覆盖宽基 / 市值风格 / 价值成长 / 申万一级行业四层。"
-                 f"相关度最高的层级是 "
-                 f"{corr['layers'][0]['layer']}（平均相关 "
-                 f"{corr['layers'][0]['avg_corr']:+.3f}），"
-                 f"这直接决定了拟合出的风格权重的可信区间。"),
-    }
+    layers = corr.get("layers") or []
+    if layers:
+        top = layers[0]
+        out["coverage"] = {
+            "text": (f"候选池共 {corr.get('n_assets', 0)} 个指数，"
+                     f"覆盖宽基 / 市值风格 / 价值成长 / 申万一级行业四层。"
+                     f"相关度最高的层级是 {top['layer']}"
+                     f"（平均相关 {top['avg_corr']:+.3f}），"
+                     f"这直接决定了拟合出的风格权重的可信区间。"),
+        }
+    else:
+        # 候选池为空（数据未取到/全部剔除）时，旧写法 corr['layers'][0] 直接 IndexError
+        out["coverage"] = {
+            "text": (f"候选池共 {corr.get('n_assets', 0)} 个指数，"
+                     "但本次没有可用的层级相关度（数据为空或已全部剔除），"
+                     "风格权重的可信区间无法评估。"),
+        }
 
     # ---------- 5. 走势描述（只描述，不预测）
     nav = np.array([v for v in navb["nav"] if v is not None], dtype=float)

@@ -145,21 +145,6 @@ def main(argv=None, *, prog=None):
     # ---- 新证据纳入报告（复查发现：P0-06/P2-02/P1-03 的产物完全没进 HTML，
     #      E9b 的数字还是硬编码 —— 又一次"代码已修、文档引用旧数"）。
     # ★ 必须在 verdict 构造**之前**读取，否则 verdict 只能继续硬编码。
-    def _read_json_cols(name, keys):
-        fp = C.RES_DIR / name
-        if not fp.exists():
-            return None
-        try:
-            d = pd.read_csv(fp)
-            out = {}
-            for k in keys:
-                if k in d.columns:
-                    out[k] = d[k].iloc[0]
-            return out or None
-        except Exception as e:                                # noqa: BLE001
-            print(f"[warn] 读取 {name} 失败: {e}")
-            return None
-
     # E9b 汇总是**长格式**（指标/值 两列），不是宽格式
     _e9b_df = read_csv_safe("E9b_时间向前验证_汇总.csv")
     e9b = None

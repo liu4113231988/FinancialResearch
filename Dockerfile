@@ -33,6 +33,8 @@ RUN apt-get update \
 
 COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
+# 容器内监听所有网卡（FIL_HOST=0.0.0.0）：对外只有 -p 映射的端口可达，
+# 且本项目没有鉴权，宿主机侧请用 127.0.0.1:8877:8877 或加带鉴权的反向代理。
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

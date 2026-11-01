@@ -22,8 +22,6 @@ import market_research.data.storage as storage
 LOG = logging.getLogger(__name__)
 SHANGHAI = timezone(timedelta(hours=8))
 HISTORY_START = "1990-01-01"
-_START_LOCK = threading.Lock()
-_THREAD = None
 
 
 def now():
@@ -282,30 +280,26 @@ def tick(current=None):
 
 
 def serve():
+    # 同步由 worker 以独立进程启动（`market_research.tasks.sync --once` 也走这里）。
+    # FIL_SYNC_ENABLED=0 必须在这个真正干活的入口生效 —— 旧的 `start()`
+    # 线程启动器无人调用，等于开关形同虚设。
+    if os.environ.get("FIL_SYNC_ENABLED", "1") == "0":
+        LOG.info("FIL_SYNC_ENABLED=0，跳过同步调度")
+        return
     schedule_time()
+    from logging.handlers import RotatingFileHandler
+    if not LOG.handlers:
+        C.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(C.DATA_DIR / "sync.log", maxBytes=2_000_000,
+                                      backupCount=3, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        LOG.addHandler(handler)
     while True:
         try:
             tick()
         except Exception:
             LOG.exception("同步调度失败")
         threading.Event().wait(30)
-
-
-def start():
-    global _THREAD
-    if os.environ.get("FIL_SYNC_ENABLED", "1") == "0":
-        return
-    schedule_time()
-    from logging.handlers import RotatingFileHandler
-    if not LOG.handlers:
-        C.DATA_DIR.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(C.DATA_DIR / "sync.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        LOG.addHandler(handler)
-    with _START_LOCK:
-        if _THREAD is None or not _THREAD.is_alive():
-            _THREAD = threading.Thread(target=serve, name="market-sync", daemon=True)
-            _THREAD.start()
 
 
 def main():

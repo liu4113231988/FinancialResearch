@@ -4,8 +4,11 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+import numpy as np
+import pandas as pd
 import market_research.config as C
 import market_research.data.marketdata as D
+from market_research.errors import CacheMiss
 from market_research.tasks.jobs import JobStore, JobRunner
 import market_research.services.analysis as web
 from market_research.api.app import app
@@ -85,6 +88,69 @@ class RouteTests(unittest.TestCase):
     def test_non_object_body(self):
         for route in ("analyze", "refit", "backtest"):
             self.assertEqual(self.client.post("/api/" + route, json=[1]).status_code, 400)
+
+
+class ReadOnlyRouteTests(unittest.TestCase):
+    """请求线程内的端点只读缓存，不替用户联网取数（P1-13 剩余项）。"""
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_correlation_tells_data_layer_not_to_fetch(self):
+        with patch.object(D, "load_panel", side_effect=CacheMiss("冷缓存")) as load:
+            response = self.client.get("/api/corr", params={"code": "110022", "win": 60})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("刷新数据", response.json()["error"])
+        self.assertIs(load.call_args.kwargs["allow_fetch"], False)
+
+    def test_correlation_computes_from_already_loaded_panel(self):
+        rng = np.random.default_rng(7)
+        index = pd.date_range("2024-01-01", periods=60, freq="B")
+        panel = pd.DataFrame({"__FUND__": np.exp(np.cumsum(rng.normal(0, .01, 60))),
+                              "801010": np.exp(np.cumsum(rng.normal(0, .01, 60)))},
+                             index=index)
+        with patch.object(D, "load_panel", return_value=panel) as load:
+            response = self.client.get("/api/corr", params={"code": "110022", "win": 30})
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(load.call_args.kwargs["allow_fetch"], False)
+        self.assertIn("correlation", response.json())
+
+    def test_name_route_never_blocks_on_lookup(self):
+        with patch("market_research.funds.analysis._cached_name",
+                   return_value=(None, "unknown")) as cached:
+            response = self.client.get("/api/name/110022")
+        self.assertEqual(response.status_code, 200)
+        # 未查 = found 为 None；前端只在 found=False 时提示"代码可能有误"
+        self.assertIsNone(response.json()["found"])
+        self.assertTrue(response.json()["deferred"])
+        cached.assert_called_once_with("110022")
+
+    def test_name_route_still_reports_a_known_absent_code(self):
+        with patch("market_research.funds.analysis._cached_name",
+                   return_value=(None, "absent")):
+            response = self.client.get("/api/name/999999")
+        self.assertIs(response.json()["found"], False)
+        self.assertFalse(response.json()["deferred"])
+
+
+class NameLookupTests(unittest.TestCase):
+    def test_read_only_lookup_never_reaches_the_network(self):
+        from market_research.funds.analysis import _guess_name
+        with patch("market_research.funds.analysis._cache_load", return_value=None), \
+             patch("market_research.data.marketdata.http_timeout",
+                   side_effect=AssertionError("请求线程内不应联网")):
+            self.assertIsNone(_guess_name("110022", allow_network=False))
+
+    def test_cached_name_separates_absent_from_unknown(self):
+        from market_research.funds import analysis
+        future = f"{analysis._NAME_NEG_PREFIX}{analysis.time.time():.0f}"
+        with patch.object(analysis, "_cache_load", return_value="易方达消费行业"):
+            self.assertEqual(analysis._cached_name("110022"), ("易方达消费行业", "hit"))
+        with patch.object(analysis, "_cache_load", return_value=future):
+            self.assertEqual(analysis._cached_name("999999"), (None, "absent"))
+        expired = f"{analysis._NAME_NEG_PREFIX}{analysis.time.time() - analysis._NAME_NEG_TTL - 60:.0f}"
+        with patch.object(analysis, "_cache_load", return_value=expired):
+            self.assertEqual(analysis._cached_name("999999"), (None, "unknown"))
 
 
 if __name__ == "__main__":

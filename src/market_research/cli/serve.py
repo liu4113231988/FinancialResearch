@@ -7,10 +7,12 @@
 本脚本会先按端口清理，再启动，并用 /api/health 确认新进程已就绪。
 
 用法：
-    python webapp/serve.py                     # 默认 127.0.0.1:8760
-    python webapp/serve.py --port 9000
-    python webapp/serve.py --restart           # 先清理再启动
-    python webapp/serve.py --host0.0.0.0      # 局域网访问
+    python run.py serve                         # 默认 127.0.0.1:8760
+    python run.py serve --port 9000
+    python run.py serve --restart               # 先清理再启动
+    python run.py serve --host 0.0.0.0          # 监听所有网卡（无鉴权，勿暴露公网）
+
+★ 本项目**没有登录/鉴权**：`--host 0.0.0.0` 只适合可信局域网。
 """
 from __future__ import annotations
 

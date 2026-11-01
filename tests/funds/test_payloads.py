@@ -49,6 +49,19 @@ class ResidualScaleTest(unittest.TestCase):
         self.assertLess(float(np.abs(vals).max()), 1.0)
 
 
+class WeightsPayloadTest(unittest.TestCase):
+    def test_subthreshold_items_are_dropped_and_n_counts_positive_weights_only(self):
+        from market_research.funds.payloads import _weights_payload
+        w = pd.Series({"sh000300": 0.5, "801120": 0.3,
+                       "801010": 0.004, "801080": 0.0})
+        out = _weights_payload(w)
+        self.assertEqual([x["code"] for x in out["items"]], ["sh000300", "801120"])
+        self.assertEqual(out["n"], 3)          # 恰好为 0 的项不计入
+        # 旧字段 n_zero 名为"零权重数"、实为"低于展示阈值数"，且无任何消费方
+        self.assertEqual(set(out), {"items", "sum", "n"})
+        self.assertEqual(_weights_payload(None), {"items": [], "sum": 0.0, "n": 0})
+
+
 class DisclosureLagTest(unittest.TestCase):
     def test_statutory_deadlines(self):
         self.assertEqual(H.disclosure_lag_days("2024-06-30"), 62)   # 半年报 8/31

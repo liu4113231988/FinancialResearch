@@ -31,7 +31,8 @@ for _d in (DATA_DIR, FIG_DIR, RES_DIR):
 CACHE_VERSION = 9
 
 # 数据缓存版本：修改 align_prices / 覆盖率阈值 / 候选池等取数口径后 +1，
-# 旧版 output/data/panel_*.csv 会被自动判为过期并重新抓取。
+# 旧版 output/data/panel_*.csv 会被自动判为过期并重新抓取；
+# 结果缓存（result_v*.pkl）在下次提交分析时按版本号清理（见 services._cleanup_stale_results）。
 # 2 = 基金收益口径改为「日频总回报（含分红再投）」（P0-01）：实测累计净值直算
 #     在 14 只基金上平均低估 23.19%、最差 76.12%，必须重抓。
 # 3 = 总回报校准改为「只用当时已公布的锚点」前向填充（旧版对相邻未来锚点插值），

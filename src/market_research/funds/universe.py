@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -31,6 +32,8 @@ import numpy as np
 import pandas as pd
 
 import market_research.config as C
+
+LOG = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- 冻结的规则常量
 # 类型：主动权益（股票型 + 偏股/灵活混合）。指数/债券/货币/FOF/QDII 不在此列。
@@ -79,7 +82,7 @@ def _share_class(name: str) -> Optional[str]:
     return None                            # 无后缀 = 默认份额
 
 
-def candidates(refresh: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def candidates() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     第一步：按类型 + 名称规则粗筛（不逐只请求，快）。
 
@@ -122,6 +125,11 @@ def enrich(codes: List[str], verbose: bool = True,
 
     `投资策略` 用来二次确认"被动/指数"——名称没写但策略说明是被动管理的要剔除。
     """
+    if not codes:
+        # 空输入必须返回**带列**的空表：旧实现返回 pd.DataFrame([])，
+        # build_pool 随后 det["成立时间"] 直接 KeyError，看不出是"没有候选"。
+        return pd.DataFrame(columns=["基金代码", "基金简称", "成立时间",
+                                     "当前规模_亿", "管理人", "策略"])
     import akshare as ak
     rows = []
     t0 = time.time()
@@ -185,6 +193,8 @@ def build_pool(target_per_layer: int = 20, seed: int = DEFAULT_SEED,
     if verbose:
         print(f"[fundpool] 粗筛后候选 {len(cand)} 只，"
               f"名称/类型规则排除 {len(excl)} 只")
+    if cand.empty:
+        return pd.DataFrame(), excl
     if enrich_n:
         cand = cand.head(enrich_n).reset_index(drop=True)
     elif pre_sample and len(cand) > pre_sample:
@@ -282,8 +292,14 @@ def load_pool() -> pd.DataFrame:
         return pd.DataFrame()
     try:
         d = pd.read_csv(fp, dtype={"基金代码": str})
+        if "基金代码" not in d.columns:
+            raise ValueError(f"缺少「基金代码」列（实际列：{list(d.columns)[:6]}）")
         return d
     except Exception:                                         # noqa: BLE001
+        # 池文件损坏时不能静默退回 14 只便利样本：那会让 E1~E9 全部
+        # 在"样本已扩池"的错觉下只用 14 只跑，而报告不会显示任何异常。
+        LOG.warning("基金池文件不可用（%s），本次将回退到 14 只便利样本",
+                    fp, exc_info=True)
         return pd.DataFrame()
 
 

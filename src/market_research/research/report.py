@@ -74,13 +74,6 @@ def _fig(src: str, caption: str) -> str:
             f'<figcaption>{caption}</figcaption></figure>')
 
 
-def _verdict_badge(ok: Optional[bool], text_ok: str, text_bad: str) -> str:
-    if ok is None:
-        return f'<span class="badge badge-warn">{text_bad}</span>'
-    cls = "badge-ok" if ok else "badge-bad"
-    return f'<span class="badge {cls}">{text_ok if ok else text_bad}</span>'
-
-
 CSS = """
 :root{
   --ink:#0f172a; --ink2:#334155; --muted:#64748b; --line:#e2e8f0;
@@ -290,7 +283,10 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
 
     # 通道级 IC：同样从 E1 表算，不写死（旧版硬编码 −0.010 / −0.112）
     _e1 = experiments.get("E1_IC期限结构")
-    _e1_cols = ([c for c in _e1.columns if c != "信号"]
+    # 只认"xx日"的前瞻期列：如果传入的是长表（含基金/前瞻期列），
+    # 旧写法会把基金代码当数值列参与 min/max，静默得出错误结论。
+    _e1_cols = ([c for c in _e1.columns
+                 if c != "信号" and str(c).endswith("日")]
                 if isinstance(_e1, pd.DataFrame) and "信号" in _e1.columns
                 else [])
 
@@ -536,7 +532,8 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     try:
         _sd = main.get("style_drift") or {}
         if _sd.get("ok"):
-            _cls = "good" if _sd.get("stable") else "warn"
+            # CSS 里只有 .lead.ok / .lead.warn，"good" 没有样式，稳定态等于无提示
+            _cls = "ok" if _sd.get("stable") else "warn"
             _parts = ['<div class="lead ' + _cls + '"><b>'
                       + str(_sd.get("verdict", "")) + '</b></div>']
             _cps = (_sd.get("change_points") or [])[:3]
@@ -597,8 +594,8 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
 
     # ---------------- 实验区
     PCT_COLS = ("年化收益", "年化波动", "最大回撤", "累计收益",
-                "月胜率", "正贡献比例", "超额年化_vs对照", "超额回撤_vs对照",
-                "策略年化", "对照年化", "平均仓位", "正贡献比例")
+                "月胜率", "超额年化_vs对照", "超额回撤_vs对照",
+                "策略年化", "对照年化", "平均仓位")
     PCT1_COLS = ("正贡献比例",)
     F3_COLS = ("夏普", "Calmar", "ICIR", "最优_超额夏普")
 
@@ -834,7 +831,7 @@ r<sub>f,t</sub> = Σ w<sub>i</sub> · r<sub>i,t</sub> + ε<sub>t</sub>
 </div>
 
 <h3>3.3 绩效与对照实验</h3>
-{_fig(figs.get('equity',''), '净值曲线对比')}
+<p class="muted">净值曲线见 3.0 节开头（同一张图不重复嵌入，避免报告体积翻倍）。</p>
 {metrics_tbl}
 {_fig(figs.get('variants',''), '对照实验：各方案横向对比（灰=单通道，橙=恒定仓位对照，红=融合策略，蓝=买入持有）')}
 {_fig(figs.get('drawdown',''), '回撤对比')}

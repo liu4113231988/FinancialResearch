@@ -152,7 +152,9 @@ def load_fund_holdings(code: str, refresh: bool = False,
     for yr in range(start_year, end_year + 1):
         try:
             d = ak.fund_portfolio_hold_em(symbol=code, date=str(yr))
-            if d is None or len(d):
+            # ★ 旧写法 `d is None or len(d)` 会把 None 也 append 进 frames，
+            #   后面 pd.concat 直接 TypeError。必须只收非空表。
+            if d is not None and len(d):
                 frames.append(d)
         except Exception as e:                                # noqa: BLE001
             if verbose:

@@ -70,7 +70,8 @@ def load_pe_panel(verbose: bool = True) -> pd.DataFrame:
 def load_index_universe(start: Optional[str] = None,
                         end: Optional[str] = None,
                         refresh: bool = False,
-                        verbose: bool = True) -> pd.DataFrame:
+                        verbose: bool = True,
+                        allow_fetch: bool = True) -> pd.DataFrame:
     """
     候选指数池的价格宽表（**全局缓存**，与基金无关）。
 
@@ -97,12 +98,14 @@ def load_index_universe(start: Optional[str] = None,
             print(f"[data] 抓取候选指数池 {len(C.NAME_OF)} 个 ...")
         return fetch_universe(C.NAME_OF.keys(), start, end, verbose=verbose)
 
-    df = _cached(cache_name, build, meta=meta, refresh=refresh)
+    df = _cached(cache_name, build, meta=meta, refresh=refresh,
+                 allow_fetch=allow_fetch)
     # ★ 缺失资产必须留痕（N-07）：部分行情失败会静默得到一个"不完整指数池"，
     #   下游的覆盖率过滤会把它们当"中途停编"剔除，掩盖了真实原因是抓取失败。
     #   无条件写入（空列表 = 无缺失），否则"没这个字段"和"没缺失"分不清。
     missing = [c for c in C.NAME_OF if c not in df.columns]
-    if missing and not refresh:
+    # 只读模式（allow_fetch=False）下补取同样是联网抓取，必须跳过。
+    if missing and not refresh and allow_fetch:
         try:
             add = fetch_universe(missing, start, end, verbose=verbose)
             add = add.loc[:, add.columns.intersection(missing)].dropna(axis=1, how="all")
@@ -117,15 +120,19 @@ def load_index_universe(start: Optional[str] = None,
         "n_missing": len(missing),
         "n_expected": len(C.NAME_OF)})
     if missing:
-        print(f"[data] ⚠ 候选池缺 {len(missing)}/{len(C.NAME_OF)} 个指数"
-              f"（{', '.join(missing[:6])}{'…' if len(missing) > 6 else ''}）"
-              f"——重跑本命令可补齐，已成功的部分不会重复请求")
+        # 用 logging 而不是 print：这条警告会在 GBK 控制台打印 ⚠（U+26A0）时
+        # 抛 UnicodeEncodeError，把一次取数变成"程序崩了"。日志处理器会吞掉
+        # 编码错误，且这里本来也只是一条降级说明。
+        LOG.warning("候选池缺 %d/%d 个指数（%s）——重跑本命令可补齐，已成功的部分不会重复请求",
+                    len(missing), len(C.NAME_OF),
+                    ", ".join(missing[:6]) + ("…" if len(missing) > 6 else ""))
     return df
 
 
 def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
                          refresh: bool = False,
-                         basis: str = NAV_BASIS_TOTAL) -> pd.Series:
+                         basis: str = NAV_BASIS_TOTAL,
+                         allow_fetch: bool = True) -> pd.Series:
     """
     单只基金的收益序列（独立缓存，~100 KB，避免与指数抓取耦合）。
 
@@ -168,7 +175,8 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
         return fetch_fund_nav(fund_code, start).to_frame()
 
     try:
-        df = _cached(cache_name, build, meta=meta, refresh=refresh)
+        df = _cached(cache_name, build, meta=meta, refresh=refresh,
+                     allow_fetch=allow_fetch)
     except _DegradedNav as e:
         print(f"[data] ⚠ {e}；本次退回累计净值口径，结果【未缓存】")
         return fetch_fund_nav(fund_code, start)
@@ -203,7 +211,8 @@ def fetch_start_for(start: Optional[str] = None) -> str:
 def load_panel(fund_code: str, start: Optional[str] = None,
                end: Optional[str] = None, refresh: bool = False,
                verbose: bool = True,
-               nav_basis: str = NAV_BASIS_TOTAL) -> pd.DataFrame:
+               nav_basis: str = NAV_BASIS_TOTAL,
+               allow_fetch: bool = True) -> pd.DataFrame:
     """
     返回对齐后的价格面板：列 = 候选指数 + __FUND__，**已裁剪到 [start, end]**。
 
@@ -221,16 +230,22 @@ def load_panel(fund_code: str, start: Optional[str] = None,
     对齐按**完整抓取区间**做（覆盖率筛选需要全样本），之后再裁剪到分析窗口 ——
     顺序反过来会让覆盖率统计只看到窗口内的样本，把"曾经存在过的指数"误判为
     缺失而剔除。
+
+    ★ `allow_fetch=False` 是**只读**模式：净值或指数池缓存任一缺失就抛
+      `CacheMiss`，不会替调用方联网取数。供 URL 请求线程内的轻量接口
+      （`/api/corr`）使用 —— 请求线程里的抓取既不可取消，也不占任务队列名额。
     """
     start = start or C.START_DATE
     end = end if end is not None else C.END_DATE
     fs = fetch_start_for(start)
-    nav = load_fund_nav_cached(fund_code, fs, refresh=refresh, basis=nav_basis)
+    nav = load_fund_nav_cached(fund_code, fs, refresh=refresh, basis=nav_basis,
+                               allow_fetch=allow_fetch)
     if verbose:
         tag = "总回报" if nav_basis == NAV_BASIS_TOTAL else "累计净值(旧口径)"
         print(f"[data] 基金 {fund_code} {tag} {len(nav)} 行  "
               f"{nav.index[0].date()} ~ {nav.index[-1].date()}")
-    px = load_index_universe(fs, end, refresh=refresh, verbose=verbose)
+    px = load_index_universe(fs, end, refresh=refresh, verbose=verbose,
+                             allow_fetch=allow_fetch)
     out = align_prices(px, nav)
     warnings = list(out.attrs.get("warnings") or [])
 

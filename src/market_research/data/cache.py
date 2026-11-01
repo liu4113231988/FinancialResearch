@@ -5,6 +5,7 @@ from typing import Optional
 import pandas as pd
 import market_research.config as C
 from market_research.data import storage
+from market_research.errors import CacheMiss
 
 def data_stamp(*, exclude_stocks=False, fund_code=None) -> str:
     """内容指纹；可隔离股票/其他基金，保守保留共享与未知依赖。"""
@@ -55,8 +56,13 @@ def _cache_info_write(name: str, info: dict):
     storage.update_info(name, info)
 
 
-def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False):
-    """DuckDB 为唯一写入目标；兼容导入旧 CSV，刷新失败保留上一份数据。"""
+def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False,
+            allow_fetch: bool = True):
+    """DuckDB 为唯一写入目标；兼容导入旧 CSV，刷新失败保留上一份数据。
+
+    allow_fetch=False 表示"只读"：缓存未命中时抛 `CacheMiss`，绝不调用
+    builder（builder 通常就是联网抓取）。仅供请求线程内的轻量接口使用。
+    """
     if not refresh and (meta is None or _cache_meta_valid(name, meta)):
         frame = storage.read(name)
         if frame is not None:
@@ -69,6 +75,8 @@ def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False):
                 old_meta = json.loads(saved.read_text(encoding="utf-8")) if saved.exists() else {}
                 storage.write(name, frame, _with_info(meta or old_meta, frame))
                 return frame
+    if not allow_fetch:
+        raise CacheMiss(f"缓存 {name} 未就绪（只读模式不抓取）")
     frame = builder()
     storage.write(name, frame, _with_info(meta or {}, frame))
     return frame

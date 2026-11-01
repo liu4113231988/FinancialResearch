@@ -24,8 +24,11 @@ from typing import Any, Dict, Optional
 def _git_head(root: Optional[Path] = None) -> Optional[str]:
     try:
         root = root or Path(__file__).resolve().parent.parent
+        # Windows 中文 locale 下默认解码会失败（UnicodeDecodeError），
+        # 结果被 except 吞成"非 git 环境"。显式 utf-8 + replace。
         out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
-                             capture_output=True, text=True, timeout=10)
+                             capture_output=True, text=True, timeout=10,
+                             encoding="utf-8", errors="replace")
         if out.returncode == 0:
             return out.stdout.strip()[:40]
     except Exception:                                         # noqa: BLE001
@@ -33,12 +36,35 @@ def _git_head(root: Optional[Path] = None) -> Optional[str]:
     return None
 
 
+def _git_dirty(root: Optional[Path] = None) -> Optional[bool]:
+    """工作区是否有未提交改动。指纹只记 commit 会把"跑的是脏代码"说成可复现。"""
+    try:
+        root = root or Path(__file__).resolve().parent.parent
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                             capture_output=True, text=True, timeout=10,
+                             encoding="utf-8", errors="replace")
+        if out.returncode == 0:
+            return bool(out.stdout.strip())
+    except Exception:                                         # noqa: BLE001
+        pass
+    return None
+
+
 def _lib_versions() -> Dict[str, Optional[str]]:
+    """
+    直接读包元数据，避免为了拿版本号而 import matplotlib/duckdb 等重库
+    （旧实现用 `__import__`，仅是记录指纹就会拉起画布与数据库驱动）。
+    """
+    from importlib.metadata import PackageNotFoundError, version as pkg_version
+
     out: Dict[str, Optional[str]] = {}
-    for mod in ("numpy", "pandas", "scipy", "sklearn", "matplotlib", "duckdb"):
+    for mod, pkg in (("numpy", "numpy"), ("pandas", "pandas"),
+                     ("scipy", "scipy"), ("sklearn", "scikit-learn"),
+                     ("matplotlib", "matplotlib"), ("duckdb", "duckdb")):
         try:
-            m = __import__(mod)
-            out[mod] = getattr(m, "__version__", "?")
+            out[mod] = pkg_version(pkg)
+        except PackageNotFoundError:
+            out[mod] = None
         except Exception:                                     # noqa: BLE001
             out[mod] = None
     return out
@@ -111,6 +137,7 @@ def run_fingerprint(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "git_commit": _git_head(),
+        "git_dirty": _git_dirty(),
         "libs": _lib_versions(),
         "data": data_summary(),
         "config": _config_snapshot(),

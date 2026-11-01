@@ -489,8 +489,9 @@ function showAlert(msg) {
 }
 // （已删除从未被调用的 busy() 与对应的 #loading 遮罩）
 
-// 代码合法但名录里查不到时给个提示。查不到也可能只是名录接口不可用，
-// 所以只在「明确查到名录且未命中」时才提示，且不阻断分析。
+// 代码合法但名录里查不到时给个提示。后端只读本地名录缓存（不联网）：
+// found=false 表示名录确实拉到过且没有这只基金；found=null 表示这次没查。
+// 两者不能混为一谈 —— 只在 false 时提示，且不阻断分析。
 async function checkName(code, token = fundGeneration) {
   try {
     const r = await api(`/api/name/${code}`);
@@ -825,7 +826,12 @@ function applyResult(res) {
   S.params = JSON.parse(JSON.stringify(res.meta.params || {}));
   S.rollWin = res.correlation?.roll_window || 120;
   $('rollWin').value = String(S.rollWin);
-  S.best = res.meta.best_model || Object.keys(res.models)[0];
+  // ★ best_model 可能指向本次**没有产出**的模型（重学后模型集合变化、或命中
+  //   旧结果缓存）。旧写法直接赋给 S.sel，下面所有渲染都只命中 `!m` 分支静默
+  //   退出，详情区继续显示上一次的数字，看起来像本次结果。
+  const present = Object.keys(res.models || {}).filter(k => res.models[k]);
+  S.best = (res.meta.best_model && res.models[res.meta.best_model])
+    ? res.meta.best_model : (present[0] || null);
   S.sel = S.best;
   const visible = !window.MarketApp || MarketApp.kind === 'fund';
   $('empty').hidden = true;
@@ -1035,8 +1041,24 @@ function renderRank() {
 
 // ==================================================================== 选中模型详情
 function renderSelected() {
-  const k = S.sel; if (!k) return;
-  const m = S.result.models[k]; if (!m) return;
+  const models = (S.result && S.result.models) || {};
+  const k = S.sel;
+  const m = k ? models[k] : null;
+  if (!m) {
+    // ★ 不静默：没有可渲染的模型时，详情区必须说清"本次没有结果"还是
+    //   "选中的模型已不存在"，否则会留着上一次的数字，读起来像本次结果。
+    $('selName').textContent = '无模型详情';
+    $('selFamily').textContent = '—';
+    $('selInterp').textContent = '';
+    $('selInterp').style.color = '';
+    $('selTime').textContent = '';
+    $('selDesc').textContent = k
+      ? `选中的模型「${k}」不在本次结果里（可能已重学或换过基金），请在上方模型条里另选一个。`
+      : '本次结果没有可用模型：窗口内可能所有模型都未产出有效结果，请换窗口或重跑分析。';
+    $('selKpis').innerHTML = '';
+    if ($('selNote')) $('selNote').hidden = true;
+    return;
+  }
   $('selName').textContent = m.name;
   $('selFamily').textContent = m.family;
   $('selInterp').textContent = m.interpretable ? '权重可解释' : '权重=重要性(不可当持仓)';

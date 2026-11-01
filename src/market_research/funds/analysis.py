@@ -219,12 +219,17 @@ _NAME_NEG_TTL = 24 * 3600
 _NAME_NEG_PREFIX = "__neg__"
 
 
-def _guess_name(code: str) -> Optional[str]:
-    """
-    尝试解析基金中文名；**查不到时返回 None**，不再用代码冒充名字。
+def _cached_name(code: str) -> tuple[Optional[str], str]:
+    """只读本地名录缓存，返回 `(name, state)`。
 
-    早期实现失败时回退成 code，调用方无法区分"这只基金就叫 110022"和
-    "名录里查不到"，于是前端对"代码输错了"完全静默，只能等任务跑完才发现。
+    state：
+      - `"hit"`     有名字；
+      - `"absent"`  名录**确实拉到过**且没有这只基金（负缓存未过期）；
+      - `"unknown"` 没查过、负缓存已过期、或旧格式空串 —— 需要联网才能确定。
+
+    ★ 必须把 `"absent"` 与 `"unknown"` 分开：请求线程内的 `/api/name` 不再联网，
+      若两者都返回 None，前端就分不清"代码输错了"和"这次没查"，
+      只能一律不提示（或一律误报）。
     """
     hit = _cache_load(code, "name")
     # ★ P1-05：负缓存必须有 TTL。旧实现把"网络失败"和"名录里确实没有"都写成
@@ -232,12 +237,33 @@ def _guess_name(code: str) -> Optional[str]:
     if isinstance(hit, str) and hit.startswith(_NAME_NEG_PREFIX):
         try:
             if time.time() - float(hit[len(_NAME_NEG_PREFIX):]) < _NAME_NEG_TTL:
-                return None                     # 负缓存未过期
+                return None, "absent"           # 负缓存未过期
         except (TypeError, ValueError):
             pass
-    elif hit is not None and hit != "":
-        return hit
-    # 走到这里：未命中、负缓存过期、或是旧格式的空串 —— 都重新查一次
+        return None, "unknown"                  # 负缓存损坏/过期
+    if hit is not None and hit != "":
+        return hit, "hit"
+    return None, "unknown"
+
+
+def _guess_name(code: str, allow_network: bool = True) -> Optional[str]:
+    """
+    尝试解析基金中文名；**查不到时返回 None**，不再用代码冒充名字。
+
+    早期实现失败时回退成 code，调用方无法区分"这只基金就叫 110022"和
+    "名录里查不到"，于是前端对"代码输错了"完全静默，只能等任务跑完才发现。
+
+    allow_network=False 表示只查本地缓存（请求线程内的 `/api/name` 用）：
+    名单接口曾在请求线程里挂起，而这类调用不能取消、也不占任务队列名额。
+    """
+    name, state = _cached_name(code)
+    if state == "hit":
+        return name
+    if state == "absent":
+        return None
+    # state == "unknown"：没查过、负缓存过期、或旧格式空串 —— 需要联网
+    if not allow_network:
+        return None
 
     nm, listed = None, False        # listed = 名录**成功拉取**（区分网络失败）
     try:

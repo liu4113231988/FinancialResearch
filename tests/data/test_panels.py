@@ -8,6 +8,7 @@ import pandas as pd
 
 from market_research import config as C
 from market_research.data import panels, storage
+from market_research.errors import CacheMiss
 
 
 class PartialPoolTests(unittest.TestCase):
@@ -43,4 +44,20 @@ class PartialPoolTests(unittest.TestCase):
             with self.assertLogs(panels.LOG, level="WARNING"):
                 result = panels.load_index_universe("2024-01-01", verbose=False)
         pd.testing.assert_frame_equal(result, self.frame, check_freq=False)
+        self.assertEqual(storage.metadata("index_universe_2024-01-01")["info"]["missing_assets"], ["missing"])
+
+    def test_read_only_mode_raises_instead_of_fetching(self):
+        # 请求线程内的接口用 allow_fetch=False：缓存缺失必须立刻失败，
+        # 不能替用户触发抓取（不可取消、不占队列名额）。
+        with patch.object(panels, "fetch_universe") as fetch:
+            with self.assertRaises(CacheMiss):
+                panels.load_index_universe("2023-01-02", verbose=False, allow_fetch=False)
+            fetch.assert_not_called()
+
+    def test_read_only_mode_serves_warm_cache_without_backfilling(self):
+        with patch.object(panels, "fetch_universe") as fetch:
+            result = panels.load_index_universe("2024-01-01", verbose=False, allow_fetch=False)
+            fetch.assert_not_called()
+        pd.testing.assert_frame_equal(result, self.frame, check_freq=False)
+        # 缺列照旧留痕，只是不去补取
         self.assertEqual(storage.metadata("index_universe_2024-01-01")["info"]["missing_assets"], ["missing"])

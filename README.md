@@ -38,10 +38,12 @@ uv run --locked market-research --port 8877
 
 ```powershell
 docker build -t market-research:local .
-docker run -d --init --name market-research -p 8877:8877 -v market-research-data:/data market-research:local
+docker run -d --init --name market-research -p 127.0.0.1:8877:8877 -v market-research-data:/data market-research:local
 ```
 
 访问 `http://127.0.0.1:8877/`。镜像使用 Python 3.13，通过 `uv.lock` 安装运行依赖和非 editable 项目包；最终镜像只复制安装环境，包含前端和 SQL 包资源，以 UID/GID 10001 运行。`.dockerignore` 采用允许列表，本机 `.venv`、行情、结果、Git、Node 依赖及测试产物不进入构建上下文。
+
+> **安全边界**：本项目**没有登录/鉴权**，`-p 8877:8877` 会把 API 发布到所有网卡，同一网段的任何人都能提交分析任务、读写数据卷。只在本机使用时请写 `-p 127.0.0.1:8877:8877`；确需局域网访问时，前面必须加带鉴权的反向代理，且不要暴露到公网。
 
 命名卷 `market-research-data` 挂载到 `/data`，行情数据库、队列和日志位于 `/data/output/data`，研究输出也保存在该卷中。容器首次运行创建独立数据，**不会自动导入本机已有行情**。若使用宿主目录代替命名卷，应确保该目录可由容器 UID/GID 10001 写入。停止/删除容器不会删除命名卷；备份或迁移 DuckDB 前先停止容器内所有写入进程。
 

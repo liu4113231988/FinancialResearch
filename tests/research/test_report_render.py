@@ -80,6 +80,15 @@ class ReportConclusionTest(unittest.TestCase):
         self.assertNotIn("权重和为股票仓位假设 0.90", html)
         self.assertNotIn("Σw<sub>i</sub> = 0.90", html)
 
+    def test_stable_style_uses_existing_css_class(self):
+        main = _main()
+        main["style_drift"] = {"ok": True, "stable": True, "verdict": "风格稳定"}
+        html = _render(main)
+        # 旧代码写 class="lead good"，CSS 里只有 .lead.ok，稳定态等于没有样式
+        self.assertIn('class="lead ok"', html)
+        self.assertNotIn('class="lead good"', html)
+        self.assertIn("风格稳定", html)
+
     def test_e3_combo_count_not_row_count(self):
         exp = {"_e3_stat": {"n": 108, "combos": 27, "pos": 0.5,
                             "mean": -0.1, "median": -0.12}}
