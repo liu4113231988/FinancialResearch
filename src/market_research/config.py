@@ -28,7 +28,10 @@ for _d in (DATA_DIR, FIG_DIR, RES_DIR):
 #     ★ 改口径必须 +1：否则旧口径产出的 .pkl 仍会命中，且不会被清扫。
 # 8 = 核岭回归读取公开 alpha 参数，避免调参后命中旧的无效结果。
 # 9 = 模型残差改为「归一化后的 fund − synth」（旧缓存里是净值水平差，图上全为正）。
-CACHE_VERSION = 9
+# 10 = Web 重估点切换到 calendar 模式（前缀稳定，历史重估点不再随追加数据位移），
+#      且 data_stamp 收窄到基金自身的抓取窗口（旧 stamp 把其它窗口的缓存也算进依赖）。
+#      旧口径结果全部失效，由清理任务移除。
+CACHE_VERSION = 10
 
 # 数据缓存版本：修改 align_prices / 覆盖率阈值 / 候选池等取数口径后 +1，
 # 旧版 output/data/panel_*.csv 会被自动判为过期并重新抓取；
@@ -37,7 +40,10 @@ CACHE_VERSION = 9
 #     在 14 只基金上平均低估 23.19%、最差 76.12%，必须重抓。
 # 3 = 总回报校准改为「只用当时已公布的锚点」前向填充（旧版对相邻未来锚点插值），
 #     净值序列数值会变，必须让旧缓存失效。
-DATA_CACHE_VERSION = 3
+# 4 = 估值面板取数源从乐咕（stock_index_pe_lg，当前 akshare 版本已缺失）切换为
+#     中证官网 csindex（stock_zh_index_value_csindex，日频市盈率2/股息率2）。
+#     pe_panel 数值口径整体变化（月→日），旧缓存必须失效；新增 div_panel。
+DATA_CACHE_VERSION = 4
 
 # ---------------------------------------------------------------- 候选指数池
 # 第一层：宽基（刻画市场的 beta 骨架）
@@ -220,12 +226,12 @@ RBSA = dict(
     #   默认 0 = 不改任何现有结果。注意这是**全局统一**的粗调整，
     #   各指数真实股息率不同，精确做法需要逐指数的股息数据。
     index_dividend_annual=0.0,
-    # ★ 注意（N-06 更正）：RBSA.fit_rolling 传的是 max_rebal=None（不抽稀），
-    #   因此研究路径（run_experiments / run_walkforward / run_robustness）
-    #   的前缀**本来**就是稳定的，无需切换。会漂移的只有 Web 的抽稀模式，
-    #   故默认仍为 linspace；若 Web 也要兼顾前缀稳定，改成 "calendar"
-    #   （会改变 Web 首屏结果，需连同 CACHE_VERSION 一起 +1）。
-    rebal_mode="linspace",
+    # ★ 2026-11-01：Web 抽稀也切换到 calendar（P1 修复轮关闭"Web 重估点前缀
+    #   稳定性"待办）。研究路径（RBSA.fit_rolling）本来就是 max_rebal=None
+    #   不抽稀，前缀天然稳定；会漂移的只有 Web 的抽稀模式 —— 现在统一用
+    #   calendar 锚点 + 保留尾部的限流（已选历史点不会被挤出，只会新增）。
+    #   首屏结果与 linspace 口径不同，CACHE_VERSION 已同步 +1。
+    rebal_mode="calendar",
     # ★ 默认开启自适应仓位。固定 0.9 对混合型基金是灾难性的：
     #   实测 163402 / 000001 / 519005 在 Σw=0.9 下窗口内 R² 中位数为 0.000，
     #   而把 Σw 降到各自的实际仓位（0.25~0.30）后 R² 恢复到 0.74~0.85。

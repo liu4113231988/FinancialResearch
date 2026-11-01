@@ -35,6 +35,7 @@ RBSA 用指数收益回归推断"这只基金在赌哪些行业"，权重可解�
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
@@ -70,9 +71,26 @@ HOLDINGS_CACHE_VERSION = 1
 
 
 # ====================================================================== 行业映射
+# 缺失行业重试冷却期（秒）：失败行业不能永久冻结（P1-11），但离线环境下
+# 每次调用都重打 31 个网络请求会拖垮所有调用方，故按冷却期节流补取。
+INDUSTRY_RETRY_COOLDOWN_SECONDS = 3600
+
+
 def _industry_index_codes() -> Dict[str, str]:
     """候选池里的申万一级行业指数（代码 801xxx）。"""
     return {k: v for k, v in C.NAME_OF.items() if str(k).startswith("801")}
+
+
+def _industry_map_meta_fp() -> Path:
+    return C.DATA_DIR / f"industry_map_v{HOLDINGS_CACHE_VERSION}_meta.json"
+
+
+def _fetch_industry_constituents(code: str, name: str) -> pd.DataFrame:
+    import akshare as ak
+    d = ak.index_component_sw(symbol=code)
+    col = "证券代码" if "证券代码" in d.columns else d.columns[1]
+    return pd.DataFrame({"code": d[col].astype(str).str.zfill(6),
+                         "industry": name})
 
 
 def load_industry_map(refresh: bool = False,
@@ -85,44 +103,133 @@ def load_industry_map(refresh: bool = False,
 
     ★ 为什么不用东财/中信行业：口径与候选指数（申万）不一致，转换表要人工
       维护且容易错。申万成分股与候选指数同源，零转换成本。
+
+    ★ 不完整映射不得永久冻结（P1-11）：meta 文件记录缺失行业，缓存命中时
+      若存在缺失行业，按 `INDUSTRY_RETRY_COOLDOWN_SECONDS` 冷却期节流补取
+      并合并；`refresh=True` 无条件重抓全部行业。旧实现一次失败的结果会被
+      "非空缓存直接命中"永久保留。注意：这只解决**覆盖不完整**；
+      映射本身的幸存者偏差（当前成分回溯历史）仍是数据缺口。
     """
     fp = C.DATA_DIR / f"industry_map_v{HOLDINGS_CACHE_VERSION}.csv"
-    if fp.exists() and not refresh:
-        try:
-            s = pd.read_csv(fp, index_col=0, dtype=str).iloc[:, 0]
-            s = s.dropna()
-            if len(s):
-                return s
-        except Exception:                                     # noqa: BLE001
-            pass                                    # 缓存损坏则重建
-
-    import akshare as ak
+    meta_fp = _industry_map_meta_fp()
     inds = _industry_index_codes()
-    rows = []
-    t0 = time.time()
-    for code, name in inds.items():
-        try:
-            d = ak.index_component_sw(symbol=code)
-            col = "证券代码" if "证券代码" in d.columns else d.columns[1]
-            for c in d[col].astype(str).str.zfill(6):
-                rows.append((c, name))
-        except Exception as e:                                # noqa: BLE001
-            if verbose:
-                print(f"[holdings] ⚠ 行业 {code} {name} 成分股获取失败："
-                      f"{type(e).__name__}")
 
-    m = (pd.DataFrame(rows, columns=["code", "industry"])
-         .drop_duplicates("code", keep="first")
+    meta = {}
+    if meta_fp.exists():
+        try:
+            meta = json.loads(meta_fp.read_text(encoding="utf-8"))
+        except Exception:                                     # noqa: BLE001
+            meta = {}
+    cached = None
+    if fp.exists():
+        try:
+            s = pd.read_csv(fp, index_col=0, dtype=str).iloc[:, 0].dropna()
+            if len(s):
+                cached = s
+        except Exception:                                     # noqa: BLE001
+            cached = None                      # 缓存损坏则重建
+
+    if refresh:
+        to_fetch = list(inds)
+    elif cached is None:
+        # 缓存缺失/损坏：无论 meta 怎么说都重建；但刚失败过的场景仍受
+        # 冷却期约束 —— 离线环境下否则每次调用都重打全部行业请求。
+        if meta.get("last_retry_at"):
+            try:
+                elapsed = (pd.Timestamp.today()
+                           - pd.Timestamp(meta["last_retry_at"])).total_seconds()
+                if elapsed < INDUSTRY_RETRY_COOLDOWN_SECONDS:
+                    LOG.warning("行业映射上次构建失败，冷却期内不再重试"
+                                "（%d 秒后自动重试）",
+                                INDUSTRY_RETRY_COOLDOWN_SECONDS)
+                    return pd.Series(name="industry", dtype=object)
+            except Exception:                                     # noqa: BLE001
+                pass
+        to_fetch = list(inds)
+    else:
+        # 无 meta 的旧缓存无法得知当初抓了哪些行业：视为可能不完整，
+        # 全量补取一次并写 meta（离线失败也会留下缺失状态与冷却时间）。
+        missing = set(meta.get("missing_industries", inds))
+        to_fetch = sorted(missing)
+        if meta.get("last_retry_at"):
+            try:
+                elapsed = (pd.Timestamp.today()
+                           - pd.Timestamp(meta["last_retry_at"])).total_seconds()
+                if elapsed < INDUSTRY_RETRY_COOLDOWN_SECONDS:
+                    to_fetch = []            # 冷却期内：先用现有缓存
+            except Exception:                                 # noqa: BLE001
+                pass
+        if not to_fetch:
+            return cached
+
+    frames = []
+    failed = []
+    if to_fetch:
+        t0 = time.time()
+        for code in to_fetch:
+            try:
+                frames.append(_fetch_industry_constituents(code, inds[code]))
+            except Exception as e:                            # noqa: BLE001
+                failed.append(code)
+                if verbose:
+                    print(f"[holdings] ⚠ 行业 {code} {inds.get(code, code)} "
+                          f"成分股获取失败：{type(e).__name__}")
+            time.sleep(0.15)                  # 轻微限速，避免被限流
+        if verbose:
+            print(f"[holdings] 行业映射补取 {len(to_fetch)} 个行业"
+                  f"（{time.time() - t0:.1f}s）")
+    # 新抓取在前：同名股票以最新一次抓取的行业为准（keep=first）
+    if cached is not None and not refresh:
+        frames.append(cached.rename("industry").to_frame().reset_index()
+                      .rename(columns={cached.index.name or "index": "code"}))
+    merged = (pd.concat(frames, ignore_index=True)
+              if frames else pd.DataFrame(columns=["code", "industry"]))
+    m = (merged.drop_duplicates("code", keep="first")
          .set_index("code")["industry"])
     m.name = "industry"
     _atomic_csv_write(m.to_frame(), fp)
+    _write_industry_map_meta(meta_fp, failed, list(inds))
+    if failed:
+        LOG.warning("行业映射缺 %d/%d 个行业（%s）：现有部分已缓存可用，"
+                    "冷却期 %d 秒后自动补取",
+                    len(failed), len(inds), ", ".join(failed[:6])
+                    + ("…" if len(failed) > 6 else ""),
+                    INDUSTRY_RETRY_COOLDOWN_SECONDS)
     if verbose:
-        print(f"[holdings] 行业映射：{len(m)} 只股票 / {len(inds)} 个行业"
-              f"（{time.time() - t0:.1f}s）")
+        print(f"[holdings] 行业映射：{len(m)} 只股票 / "
+              f"{len(inds) - len(failed)}/{len(inds)} 个行业"
+              + (f"，缺 {len(failed)} 个待补取" if failed else ""))
     return m
 
 
+def _write_industry_map_meta(meta_fp: Path, failed, inds) -> None:
+    meta = {
+        "missing_industries": sorted(str(c) for c in failed),
+        "n_industries": len(inds),
+        "last_retry_at": pd.Timestamp.today().isoformat(),
+    }
+    meta_fp.write_text(json.dumps(meta, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+
+
 # ====================================================================== 基金持仓
+def _holdings_meta_fp(code: str) -> Path:
+    return C.DATA_DIR / f"fund_holdings_{code}_v{HOLDINGS_CACHE_VERSION}_meta.json"
+
+
+def _write_holdings_meta(meta_fp: Path, fetched, failed, wanted) -> None:
+    """记录已成功抓取（含合法空结果）与失败的年份，供下次增量补取。"""
+    meta = {
+        "fetched_years": sorted(int(y) for y in fetched),
+        "failed_years": sorted(int(y) for y in failed),
+        "start_year": int(wanted[0]),
+        "end_year": int(wanted[-1]),
+        "refreshed_at": pd.Timestamp.today().isoformat(),
+    }
+    meta_fp.write_text(json.dumps(meta, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+
+
 def load_fund_holdings(code: str, refresh: bool = False,
                        verbose: bool = True,
                        start_year: Optional[int] = None) -> pd.DataFrame:
@@ -134,43 +241,94 @@ def load_fund_holdings(code: str, refresh: bool = False,
 
     `完整` = 该期是半年报/年报（全部持仓）还是季报（仅前十大）。
     下游**只应使用 `完整 == True`** 的期数做聚合。
+
+    ★ 缓存是**增量的**（P1-18）：meta 文件记录已成功抓取的年份（含合法的
+      空结果）与失败年份。请求窗口内未被覆盖的年份（含上次失败的）会自动
+      补取并与缓存合并；失败年份**不会伪装成完整历史**，每次调用重试并在
+      警告中留痕。`refresh=True` 才无条件重抓整个窗口。
     """
+    if start_year is None:
+        start_year = int(pd.Timestamp(C.START_DATE).year)
+    end_year = int(pd.Timestamp.today().year)
+    wanted = list(range(start_year, end_year + 1))
     fp = C.DATA_DIR / f"fund_holdings_{code}_v{HOLDINGS_CACHE_VERSION}.csv"
-    if fp.exists() and not refresh:
+    meta_fp = _holdings_meta_fp(code)
+
+    meta = {}
+    if meta_fp.exists():
+        try:
+            meta = json.loads(meta_fp.read_text(encoding="utf-8"))
+        except Exception:                                     # noqa: BLE001
+            meta = {}                        # meta 损坏等价于无 meta：全部补取
+    fetched = set(meta.get("fetched_years", []))
+
+    cached = None
+    if fp.exists():
         try:
             df = pd.read_csv(fp)
             if len(df):
                 # ★ 必须重新规整类型：CSV 没有类型信息，"600519" 会被读成 int，
                 #   丢掉前导零后与 industry_map 的字符串索引完全对不上 ——
                 #   实测症状是"781 条持仓全部未映射"，而联网直取时 100% 命中。
-                return _retype_holdings(df)
+                cached = _retype_holdings(df)
         except Exception:                                     # noqa: BLE001
-            pass
+            cached = None
 
-    import akshare as ak
-    if start_year is None:
-        start_year = int(pd.Timestamp(C.START_DATE).year)
-    end_year = int(pd.Timestamp.today().year)
+    if refresh:
+        to_fetch = list(wanted)
+        fetched = set()          # 强刷后重建 meta：旧成功记录不再豁免本窗口
+    else:
+        to_fetch = [y for y in wanted if y not in fetched]
+        if cached is not None and not to_fetch:
+            return cached
+
     frames = []
-    for yr in range(start_year, end_year + 1):
-        try:
-            d = ak.fund_portfolio_hold_em(symbol=code, date=str(yr))
-            # ★ 旧写法 `d is None or len(d)` 会把 None 也 append 进 frames，
-            #   后面 pd.concat 直接 TypeError。必须只收非空表。
-            if d is not None and len(d):
-                frames.append(d)
-        except Exception as e:                                # noqa: BLE001
-            if verbose:
-                print(f"[holdings] ⚠ {code} {yr} 年持仓获取失败："
-                      f"{type(e).__name__}")
-        time.sleep(0.15)                      # 轻微限速，避免被限流
+    newly_failed = []
+    if to_fetch:
+        if verbose:
+            print(f"[holdings] {code} 抓取 {to_fetch[0]}~{to_fetch[-1]} 年持仓"
+                  f"（共 {len(to_fetch)} 年）")
+        import akshare as ak
+        for yr in to_fetch:
+            try:
+                d = ak.fund_portfolio_hold_em(symbol=code, date=str(yr))
+                # ★ 旧写法 `d is None or len(d)` 会把 None 也 append 进 frames，
+                #   后面 pd.concat 直接 TypeError。必须只收非空表。
+                if d is not None and len(d):
+                    frames.append(d)
+                fetched.add(yr)
+            except Exception as e:                            # noqa: BLE001
+                newly_failed.append(yr)
+                if verbose:
+                    print(f"[holdings] ⚠ {code} {yr} 年持仓获取失败："
+                          f"{type(e).__name__}")
+            time.sleep(0.15)                  # 轻微限速，避免被限流
 
-    if not frames:
+    failed = ((set(meta.get("failed_years", [])) - set(to_fetch))
+              | set(newly_failed))
+    if not frames and cached is None:
+        # 一期成功的历史都没有：也要写 meta（成功年份不再重复打网络），
+        # 但失败年份不写入 fetched，下次调用自动重试。
+        _write_holdings_meta(meta_fp, fetched - set(newly_failed), failed, wanted)
         return pd.DataFrame()
-    df = pd.concat(frames, ignore_index=True)
-    df = _normalize_holdings(df)
-    _atomic_csv_write(df, fp)
-    return _retype_holdings(df)
+
+    merged = cached
+    if frames:
+        fresh = _normalize_holdings(pd.concat(frames, ignore_index=True))
+        merged = fresh if (merged is None or merged.empty) \
+            else pd.concat([merged, fresh], ignore_index=True)
+    out = pd.DataFrame()
+    if merged is not None and len(merged):
+        out = (merged.drop_duplicates(subset=["季末", "股票代码"], keep="last")
+               .sort_values("季末").reset_index(drop=True))
+        _atomic_csv_write(out, fp)
+    _write_holdings_meta(meta_fp, fetched - set(newly_failed), failed, wanted)
+    still_failed = sorted(failed & set(wanted))
+    if still_failed:
+        # 失败年份不得伪装成完整历史：明确留痕，下次调用自动重试。
+        LOG.warning("%s 持仓 %s 年抓取失败，历史不完整；下次调用将重试这些年份",
+                    code, still_failed)
+    return _retype_holdings(out) if len(out) else pd.DataFrame()
 
 
 def _retype_holdings(df: pd.DataFrame) -> pd.DataFrame:
@@ -293,6 +451,10 @@ def exposure_coverage(holdings: pd.DataFrame, industry_map: pd.Series,
     if not frames:
         return pd.DataFrame()
     out = pd.concat(frames, axis=1).fillna(0.0).sort_index()
+    # ★ P1-14：全映射（无未映射行）或全未映射（无已映射行）时，concat 只会
+    #   生成其中一列；无条件相加两列会 KeyError，使全覆盖基金的持仓研究
+    #   直接失败。非空结果必须始终补齐两列。
+    out = out.reindex(columns=["已映射权重", "未映射权重"], fill_value=0.0)
     out["合计"] = out["已映射权重"] + out["未映射权重"]
     out["覆盖率"] = np.where(out["合计"] > 0,
                            out["已映射权重"] / out["合计"], np.nan)
@@ -450,6 +612,12 @@ def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
     （现金/债券/未映射行业）按 `cash_rate` 年化计息 —— 旧实现记 0 收益，
     比"空仓也有货币收益"的真实口径更差，会把基金经理的现金管理算成 alpha。
 
+    ★ 收益口径（P1-16）：返回**简单日收益**，权重按**每日再平衡**处理
+      （半年度调仓只改权重向量；逐日不追踪漂移，这是显式约定）。股票腿用
+      `pct_change()` 的简单收益加权，现金与股息腿也是简单日收益 —— 旧实现
+      股票腿用对数收益、现金/股息腿用简单收益，`compare_benchmarks` 又统一
+      `exp(sum)`，既混合口径也不等于按权重持有资产的组合收益。
+
     ★ 指数口径：panel 里的行业指数是**价格指数**（不含股息），
       而基金净值是**总回报**。缺的这段股息此前只能标注（每年约 1.5~2.5%），
       会让基准系统性偏低、把股息算成基金的"选股能力"。
@@ -475,7 +643,7 @@ def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
     if not cols:
         return pd.Series(dtype=float)
 
-    rets = np.log(panel[cols].astype(float)).diff()
+    rets = panel[cols].astype(float).pct_change()
     daily_div = (1.0 + dividend_yield) ** (1.0 / 252.0) - 1.0
     parts = []
     for qend in exposure.index:
@@ -509,6 +677,8 @@ def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
     out = out.dropna().sort_index()
     out.attrs["dividend_yield"] = dividend_yield
     out.attrs["cash_rate"] = float(cash_rate)
+    out.attrs["returns"] = "simple"
+    out.attrs["rebalance"] = "daily"
     return out
 
 
@@ -519,41 +689,70 @@ def compare_benchmarks(fund_nav: pd.Series, rbsa_syn_nav: pd.Series,
 
     都在**同一段共同区间**上比较，且持仓基准已按披露滞后起算，
     所以这是一个"可实现"的比较，不是事后最优的比较。
+
+    ★ 收益口径（P1-16）：全部统一为**简单日收益**。净值序列用 `pct_change`
+      转日收益（对持有者而言这就是简单收益），持仓基准本身已是简单日收益；
+      区间收益 = ∏(1+r) − 1，年化按几何折算。旧实现把简单/对数收益混在
+      `exp(sum)` 里，不等于按权重持有资产的组合收益。
+
+    ★ 信息比率（P1-17）：列名 `信息比率IR` = 超额日收益均值 / 跟踪误差
+      × √252，超额对象由 `IR参照` 列声明 —— 前三行参照**基金**，
+      "持仓−RBSA（跟踪差）"行参照 **RBSA 合成基准**（旧实现名为"相对基金IR"
+      却只算序列自身的收益波动比，基金自己的这一列也非零）。
+      约定：超额恒为 0（含参照自身）输出 0；超额恒定非零（零跟踪误差）
+      时 IR 无定义，输出 NaN。
     """
     if holding_ret is None or holding_ret.empty:
         return {"ok": False, "reason": "持仓基准序列为空"}
     idx = holding_ret.index
-    f = np.log(pd.Series(fund_nav).astype(float)).diff().reindex(idx).dropna()
-    s = np.log(pd.Series(rbsa_syn_nav).astype(float)).diff().reindex(idx).dropna()
+    f = pd.Series(fund_nav).astype(float).pct_change().reindex(idx).dropna()
+    s = pd.Series(rbsa_syn_nav).astype(float).pct_change().reindex(idx).dropna()
     common = f.index.intersection(s.index)
     if len(common) < 60:
         return {"ok": False,
                 "reason": f"共同区间只有 {len(common)} 个交易日，不足以比较"}
     f, s, h = f.loc[common], s.loc[common], holding_ret.loc[common]
+    n = len(common)
 
-    def _stat(r, name):
-        eq = float(np.exp(r.sum()))
-        n = len(r)
+    def _ir(ex) -> float:
+        sd = float(ex.std(ddof=1))
+        mean = float(ex.mean())
+        # 零跟踪误差需按容差判断：恒定超额序列的 std 会因浮点求均值引入
+        # ~1e-18 的噪声而"非零"，直接除会把 IR 抬到 1e16 量级。
+        if sd <= 1e-12:
+            return 0.0 if abs(mean) <= 1e-12 else np.nan
+        return float(mean / sd * np.sqrt(252))
+
+    def _growth(r) -> float:
+        g = float(np.prod(1.0 + np.asarray(r, dtype=float)))
+        return g if g > 0 else np.nan
+
+    def _stat(r, name, ref, ref_name):
+        g = _growth(r)
         return {
             "基准": name,
-            "区间收益": eq - 1,
-            "年化收益": float(np.exp(r.mean() * 252) - 1),
+            "区间收益": g - 1.0,
+            "年化收益": float(g ** (252.0 / n) - 1.0) if np.isfinite(g) else np.nan,
             "年化波动": float(r.std(ddof=1) * np.sqrt(252)),
             "与基金相关": float(r.corr(f)),
-            "相对基金IR": float(r.mean() / r.std(ddof=1) * np.sqrt(252))
-            if r.std(ddof=1) > 0 else np.nan,
+            "信息比率IR": _ir(r - ref),
+            "IR参照": ref_name,
         }
 
-    rows = [_stat(f, "基金实际"), _stat(s, "RBSA合成基准"), _stat(h, "持仓基准")]
-    # 持仓基准 vs RBSA 基准：跟踪差异
+    rows = [_stat(f, "基金实际", f, "基金"),
+            _stat(s, "RBSA合成基准", f, "基金"),
+            _stat(h, "持仓基准", f, "基金")]
+    # 持仓基准 vs RBSA 基准：跟踪差异（参照是 RBSA，不是基金）
     d = h - s
+    hg, sg = _growth(h), _growth(s)
+    rel = hg / sg if np.isfinite(hg) and np.isfinite(sg) and sg > 0 else np.nan
     rows.append({
         "基准": "持仓−RBSA（跟踪差）",
-        "区间收益": float(np.exp(d.sum()) - 1),
-        "年化收益": float(np.exp(d.mean() * 252) - 1),
+        "区间收益": rel - 1.0,
+        "年化收益": float(rel ** (252.0 / n) - 1.0) if np.isfinite(rel) else np.nan,
         "年化波动": float(d.std(ddof=1) * np.sqrt(252)),
         "与基金相关": float(d.corr(f)),
-        "相对基金IR": float(d.mean() / d.std(ddof=1) * np.sqrt(252))
-        if d.std(ddof=1) > 0 else np.nan,
+        "信息比率IR": _ir(d),
+        "IR参照": "RBSA合成基准",
     })
-    return {"ok": True, "stats": pd.DataFrame(rows), "n_days": int(len(common))}
+    return {"ok": True, "stats": pd.DataFrame(rows), "n_days": int(n)}

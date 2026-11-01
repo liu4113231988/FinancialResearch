@@ -7,9 +7,12 @@ import market_research.config as C
 from market_research.data import storage
 from market_research.errors import CacheMiss
 
-def data_stamp(*, exclude_stocks=False, fund_code=None) -> str:
-    """内容指纹；可隔离股票/其他基金，保守保留共享与未知依赖。"""
-    return storage.stamp(exclude_stocks=exclude_stocks, fund_code=fund_code)
+def data_stamp(*, exclude_stocks=False, fund_code=None,
+               fetch_start=None, end=None) -> str:
+    """内容指纹；可隔离股票/其他基金，传 fetch_start/end 后进一步收窄到
+    本基金本抓取窗口的实际依赖（见 storage.stamp）。"""
+    return storage.stamp(exclude_stocks=exclude_stocks, fund_code=fund_code,
+                         fetch_start=fetch_start, end=end)
 
 
 def _cache_meta_path(name: str) -> Path:

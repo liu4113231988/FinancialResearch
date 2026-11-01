@@ -127,10 +127,12 @@ class ModelZoo:
             if k < len(idx):
                 out.append(idx[k])
         out = sorted(set(out))
-        # 仍需限流时，从尾部**丢弃**而不是重新抽稀（丢弃不改变已选点的位置）
+        # 仍需限流时**保留最新 max_rebal 个锚点、从头部丢弃**（P1 修复轮）：
+        # 等距 stride 采样在样本变长后步长会变，已选锚点集合随之改变 ——
+        # 同样不是前缀稳定。保留尾部则保证"已选过的历史点永远还在"
+        # （新集合是旧集合的超集），只有最老的点会被挤出窗口。
         if max_rebal and len(out) > max_rebal:
-            step = int(np.ceil(len(out) / max_rebal))
-            out = out[::step]
+            out = out[-int(max_rebal):]
         return out
 
     # -------------------------------------------------------------- 主入口

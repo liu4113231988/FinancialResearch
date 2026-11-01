@@ -85,10 +85,49 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   selContext.S.sel = null;
   selContext.renderSelected();
   assert.match(selNodes.get('selDesc').textContent, /没有可用模型/);
+  // 冷缓存（P1-13）：/api/corr 返回 202 + job_id → 独立轮询 corr 任务并写回。
+  const corrAlerts = [];
+  const corrNodes = new Map();
+  const corrContext = {
+    URLSearchParams, setTimeout: fn => fn(),
+    S: {result: {code:'110022', meta:{window_requested:'2021-01-01', window_requested_end:'2025-01-01'}}, rollWin: 120},
+    $: id => {if (!corrNodes.has(id)) corrNodes.set(id, {}); return corrNodes.get(id);},
+    api: url => new Promise(resolve => pending.push({url, resolve})),
+    renderCorr() {},
+    showAlert(message) {corrAlerts.push(message);},
+  };
+  vm.createContext(corrContext);
+  vm.runInContext(source.slice(source.indexOf('let fundGeneration ='), source.indexOf('// ==================================================================== 运行分析')), corrContext);
+  vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.indexOf('function applyResult(res)')), corrContext);
+  const corrJob = corrContext.updateCorrelation(150);
+  await Promise.resolve();
+  pending[4].resolve({ok:true, job_id:'corr9'});
+  await new Promise(setImmediate);
+  assert.equal(pending[5].url, '/api/job/corr9');
+  assert.ok(corrAlerts.some(m => m && m.includes('后台重算')));
+  pending[5].resolve({status:'done'});
+  await new Promise(setImmediate);
+  assert.equal(pending[6].url, '/api/result/corr9');
+  pending[6].resolve({result:{correlation:'queued'}});
+  await corrJob;
+  assert.equal(corrContext.S.result.correlation, 'queued');
+  assert.equal(corrContext.S.rollWin, 150);
   const html = fs.readFileSync('src/market_research/api/static/index.html', 'utf8');
   assert.match(html, /id="btnCancelJob"/);
   assert.match(source, /\$\('btnCancelJob'\)\.onclick = cancelActiveJob/);
   assert.match(source, /attempts > 200 \? 2000/);
+  // 页面恢复 / 自选 / 带口径导出（P1 修复轮）：控件必须真实接线，导出必须带口径
+  assert.match(source, /fil_watchlist/);
+  assert.match(source, /fil_last_run/);
+  assert.match(source, /data_provenance/);
+  assert.match(source, /\$\('btnWatch'\)\.onclick = toggleWatchlist/);
+  assert.match(source, /\$\('watchSel'\)\.onchange/);
+  assert.match(source, /\$\('btnExport'\)\.onclick = exportResult/);
+  assert.match(source, /saveLastRun\(\{code/);
+  assert.match(source, /restoreLastRun\(\)/);
+  assert.match(html, /id="btnWatch"/);
+  assert.match(html, /id="watchSel"/);
+  assert.match(html, /id="btnExport"/);
   console.log('Cancel button wired, polling capped and backoff applied: OK');
   console.log('Correlation window, response ordering, replaced fund and stale polling: OK');
   console.log('Backtest stale error and late result fencing: OK');

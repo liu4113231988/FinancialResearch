@@ -70,6 +70,12 @@ wheel 检查应在独立虚拟环境安装构建产物，在源码目录之外�
 
 ## 已有验证记录
 
+csindex 估值/股息源切换一轮（2026-11-01）：完整282项unittest、两套脚本式回归及两套前端回归通过；csindex 接口联网实跑确认可用（沪深300 等 6 个宽基均返回日频 `市盈率2`/`股息率2`，个别标的偶发超时由重试与增量补取兜底）。估值面板取数源从乐咕（当前 akshare 版本已缺失，`pe_panel` 损坏）切换为中证官网 `stock_zh_index_value_csindex`；因官方文件只保留近一个月，`pe_panel`/`div_panel` 改为本地**累积缓存**（`_accumulate_panel`：旧历史保留、重叠日期以新值为准、失败沿用缓存），并挂接每日同步（`sync._accumulate_valuation`，`valuation_sync.json` 记录当日状态）；分位窗口 `min_periods` 放宽到"至少 1 年"，历史不足时估值通道按无估值处理。`DATA_CACHE_VERSION` 3→4。新增 `tests/data/test_valuation.py` 7 项（列名契约、分位口径、%→小数、覆盖边界、累积合并/失败保留/每日一次）。边界留痕：csindex 不含申万行业，行业腿股息仍待情景参数或个股分红推导（见[待办](../TODO.md)）。未重跑浏览器检查、真实数据研究与 `uv build`。
+
+工程与数据源一轮（2026-11-01）：完整275项unittest、两套脚本式回归及两套前端回归通过；数据源探针 `tests/tools/probe_dividend.py` 联网实跑（akshare 1.19.1）。①`rebal_mode` 切换 `calendar` 并把限流改为保留尾部锚点（`tests/modeling/test_rebal_calendar.py` 4 项：限流下只从头部丢点、不超限流时前缀严格相等、linspace 对照漂移）；②`data_stamp` 支持按抓取窗口收窄、worker 启动清理重复窗口指数池缓存、当前版本结果缓存按 30 天 mtime 淘汰（`test_storage` 2 项 + `test_result_cache_cleanup` 1 项）；③前端 localStorage 页面恢复/自选/带口径导出（前端回归接线断言）；④`CACHE_VERSION` 9→10（口径变更，旧结果缓存由清理任务移除）。探针结论：`sw_index_first_info` 提供逐申万一级行业静态股息率（P1-10 可接数的路径），无全收益行业指数通道，详见[待办](../TODO.md)。未重跑浏览器检查、真实数据研究与 `uv build`。
+
+P1-13 相关度入队一轮（2026-11-01）：完整269项unittest及两套前端回归通过（脚本式回归为上一轮基线，本轮未改动窗口/行情代码，未重跑）。`/api/corr` 冷缓存契约从 409 改为 202 + 队列任务（`services.analysis.correlation`，worker 内允许取数、可取消、占名额），暖缓存仍为请求内毫秒级重算；新增4项覆盖冷缓存提交（请求线程 `allow_fetch=False` 不变）、队列耗尽 429、corr 任务端到端执行与结果读取，前端回归新增 202 → 轮询 `/api/job` → `/api/result` 写回场景。同轮还包含 P1-14/15/16/17/18、P2-19、P1-11 代码侧修复（详见[待办](../TODO.md)）。未重跑浏览器检查、真实数据研究与 `uv build`。
+
 持仓口径一轮（2026-11-01）：完整245项unittest、两套脚本式回归及两套前端回归通过。新增7项覆盖持仓基准的股息腿（按股票权重缩放、默认跟随 `C.RBSA["index_dividend_annual"]` 并写入 `attrs`、负值拒绝）、`exposure_coverage()` 的已映射/未映射/合计/覆盖率拆分，以及 `align_vs_rbsa(coverage=...)` 输出未映射权重与说明、未传 coverage 时明确承认"无法区分现金与抓不到行业的股票"。`holdings` 命令的 H0/H1 增加未映射权重均值、覆盖率均值、持仓基准股息率三列。首跑曾出现 1 个 error（未复现，随后连跑两次均 245 项通过）。未重跑浏览器检查与 `uv build`；未完成项见[待办](../TODO.md)。
 
 P2 收尾一轮（2026-11-01）：完整238项unittest、两套脚本式回归及两套前端回归通过。新增1项断言权重 payload 不再输出 `n_zero`（"低于展示阈值"的项数由 `n - len(items)` 得到，恰好为 0 的权重不计入 `n`）；前端新增"无模型详情"空态断言，`renderSelected()` 不再静默 return，`applyResult()` 把 `best_model` 收敛到本次真实存在的模型。未重跑浏览器检查与 `uv build`；未完成项见[待办](../TODO.md)。

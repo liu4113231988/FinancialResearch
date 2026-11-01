@@ -39,7 +39,11 @@ import pandas as pd
 
 import market_research.config as C
 
-# 候选指数 → 乐咕乐股 PE 接口可用名称（月度，2005 年起）
+# 候选指数 → 估值/股息面板列名。取数源为 csindex 官方接口
+# （`stock_zh_index_value_csindex`，日频），列名→代码映射见
+# `data/providers/valuation.py:CSINDEX_CODE`。
+# ★ 覆盖边界：csindex 只收录中证/上证系指数，估值/股息通道因此只映射这
+#   6 个宽基；申万行业（801xxx）与国证系列（399xxx）不在覆盖范围。
 PE_SYMBOL = {
     "sh000300": "沪深300", "sh000016": "上证50", "sh000905": "中证500",
     "sh000852": "中证1000", "sh000903": "中证100", "sh000009": "上证380",
@@ -128,7 +132,8 @@ class SignalEngine:
             if s is not None:
                 w_sym[s] += weights_hist[a].fillna(0.0)
 
-        # 月度 PE asof 对齐到每个重估日。
+        # 月度 PE asof 对齐到每个重估日。（取数源已切 csindex 日频；滞后仍按
+        # pe_lag_days 配置，对日频数据偏保守，收紧需显式配置，不隐式变更）
         # reindex(method="ffill") 在**索引单调递增**的前提下等价于 asof 连接，
         # 会取"不晚于该日的最近一期"，正是我们要的语义（早期注释说不能用它，是错的）。
         # ★ 但要叠加发布滞后：乐咕乐股的月末 PE（如 2020-01-31）要到次月初才发布，

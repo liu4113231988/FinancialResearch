@@ -257,6 +257,36 @@ def leader():
                 fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
+def _accumulate_valuation(current) -> None:
+    """每日累积 csindex 估值/股息面板（上海时间，每天一次）。
+
+    ★ "只取 stock_zh_index_value_csindex" 口径下，官方文件只保留最近约
+      一个月的日频数据 —— 历史长度只能靠每天把最近一段合并进本地缓存来
+      积累（见 data/panels.py:_accumulate_panel）。断跑超过一个月，缺失
+      时段无法回补（留痕在面板的日期空洞里，分位窗口按可用样本计算）。
+    """
+    import market_research.data.marketdata as D
+    state_fp = C.DATA_DIR / "valuation_sync.json"
+    today = current.date().isoformat()
+    try:
+        state = json.loads(state_fp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    if state.get("last_success") == today:
+        return
+    try:
+        D.load_pe_panel(verbose=False)
+        D.load_dividend_panel(verbose=False)
+    except Exception:
+        LOG.exception("估值/股息面板累积失败（明天重试）")
+        return
+    state["last_success"] = today
+    try:
+        state_fp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        LOG.warning("估值面板累积状态写入失败（不影响数据）", exc_info=True)
+
+
 def tick(current=None):
     current = current or now()
     with leader() as acquired:
@@ -277,6 +307,7 @@ def tick(current=None):
                 LOG.exception("同步失败 %s", asset["asset_key"])
                 with storage.connection() as db:
                     db.execute("UPDATE sync_assets SET error=?,state='error' WHERE asset_key=?", [str(error)[:500], asset["asset_key"]])
+        _accumulate_valuation(current)
 
 
 def serve():

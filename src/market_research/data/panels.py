@@ -8,7 +8,7 @@ from market_research.data import storage
 from market_research.data.cache import _cached, _cache_info_write, _with_info
 from market_research.data.providers.funds import NAV_BASIS_CUM, NAV_BASIS_TOTAL, fetch_fund_nav, fetch_fund_total_return
 from market_research.data.providers.indices import fetch_universe
-from market_research.data.providers.valuation import fetch_pe_panel
+from market_research.data.providers.valuation import fetch_pe_panel, fetch_dividend_panel
 
 LOG = logging.getLogger(__name__)
 
@@ -52,19 +52,69 @@ def to_log_returns(df: pd.DataFrame) -> pd.DataFrame:
     return r.replace([np.inf, -np.inf], np.nan).dropna()
 
 
+def _accumulate_panel(name: str, fetch, syms, verbose: bool = True) -> pd.DataFrame:
+    """
+    累积缓存：csindex 官方估值文件**只保留最近约一个月**的日频数据，
+    历史长度必须靠"每次把最近一段合并进本地缓存"日积月累。
+
+    规则：
+      * 旧缓存永远保留（断网/失败时返回既有数据，指纹不变、不打扰下游）；
+      * 新数据在重叠日期上覆盖旧值（官方会修正当期数值），缺失列沿用旧列；
+      * 只有真的合并进新内容才回写 storage（否则空转也会改 stamp）。
+    旧乐咕时代的月度历史（若有）与新日频数据同列名合并，一并保留。
+    """
+    cached = storage.read(name)
+    if cached is not None and not isinstance(cached.index, pd.DatetimeIndex):
+        cached.index = pd.to_datetime(cached.index)
+    # 首次抓全量；已有缓存时优先补缺列（首次失败过的标的），否则抓全量以覆盖修订
+    targets = ([s for s in syms if cached is None or s not in cached.columns]
+               if cached is not None else list(syms)) or list(syms)
+    try:
+        fresh = fetch(targets, verbose=verbose)
+    except Exception as e:                                    # noqa: BLE001
+        if verbose:
+            print(f"  [{name}] 抓取失败，沿用本地累积缓存：{type(e).__name__}")
+        return cached if cached is not None else pd.DataFrame()
+    if fresh is None or fresh.empty:
+        return cached if cached is not None else pd.DataFrame()
+    if cached is None or cached.empty:
+        df = fresh.sort_index()
+    else:
+        union = cached.index.union(fresh.index)
+        df = fresh.reindex(union).combine_first(cached.reindex(union)).sort_index()
+    if verbose:
+        print(f"  [{name}] 累积 {df.shape}：{df.index[0].date()} ~ "
+              f"{df.index[-1].date()}（本次新增 {len(fresh)} 期）")
+    storage.write(name, df, _with_info({}, df))
+    return df
+
+
 def load_pe_panel(verbose: bool = True) -> pd.DataFrame:
+    """
+    宽基指数估值面板（csindex 日频市盈率的滚动历史分位，0~1），缓存 `pe_panel`。
+
+    ★ 取数源为 csindex（官方文件只留近一个月），历史靠 `_accumulate_panel`
+      日积月累；历史不足时滚动分位按 `min_periods` 输出 NaN，估值通道按
+      无估值处理，等积累充足后自然变准。
+    """
     from market_research.modeling.signals import PE_SYMBOL, PE_FALLBACK
 
     syms = sorted(set(PE_SYMBOL.values()) | {PE_FALLBACK})
-    df = _cached("pe_panel", lambda: fetch_pe_panel(syms, verbose=verbose))
-    # 缓存可能因当初部分标的抓取失败而缺列：增量补取后合并并回写
-    missing = [s for s in syms if s not in df.columns]
-    if missing:
-        add = fetch_pe_panel(missing, verbose=verbose)
-        if add.shape[1]:
-            df = pd.concat([df, add], axis=1).sort_index()
-            storage.write("pe_panel", df, _with_info({}, df))
-    return df
+    return _accumulate_panel("pe_panel", fetch_pe_panel, syms, verbose)
+
+
+def load_dividend_panel(verbose: bool = True) -> pd.DataFrame:
+    """
+    宽基指数日频股息率面板（csindex `股息率2`，年化小数），缓存 `div_panel`。
+
+    P1-10 覆盖边界：csindex 不含申万行业指数，行业腿的股息仍由
+    `C.RBSA["index_dividend_annual"]` 情景参数承担；本面板是 csindex 覆盖
+    范围内（宽基/风格）的真实股息率历史，同样按日累积。
+    """
+    from market_research.modeling.signals import PE_SYMBOL, PE_FALLBACK
+
+    syms = sorted(set(PE_SYMBOL.values()) | {PE_FALLBACK})
+    return _accumulate_panel("div_panel", fetch_dividend_panel, syms, verbose)
 
 
 def load_index_universe(start: Optional[str] = None,
@@ -240,6 +290,13 @@ def load_panel(fund_code: str, start: Optional[str] = None,
     fs = fetch_start_for(start)
     nav = load_fund_nav_cached(fund_code, fs, refresh=refresh, basis=nav_basis,
                                allow_fetch=allow_fetch)
+    # ★ P1-15：净值必须先截到分析结束日再做对齐与覆盖率筛选。
+    #   指数池按 end 截止；若净值延伸到 end 之后，那些日期的指数缺失会
+    #   稀释覆盖率分母，把完整覆盖历史窗口的指数误判为"中途停编"而剔除
+    #   （历史窗口的分析结果随"今天抓到的净值长度"漂移）。截断只影响
+    #   对齐/筛选，起始侧的预热区间（fs < start）照旧保留。
+    if end is not None:
+        nav = nav.loc[nav.index <= pd.Timestamp(end)]
     if verbose:
         tag = "总回报" if nav_basis == NAV_BASIS_TOTAL else "累计净值(旧口径)"
         print(f"[data] 基金 {fund_code} {tag} {len(nav)} 行  "
@@ -259,6 +316,13 @@ def load_panel(fund_code: str, start: Optional[str] = None,
         raise ValueError(
             f"{fund_code} 在 {start or '全区间'} ~ {end or '最新'} 内没有可用数据"
             f"（抓取区间 {fs} ~ {end or '最新'}，请放宽分析窗口或检查代码）")
+    if out.shape[1] <= 1:
+        # ★ P1-15：只剩 __FUND__ 说明所有候选指数都没通过覆盖率过滤，
+        #   下游 RBSA 无从拟合，必须明确报错而不是静默返回单列面板。
+        raise ValueError(
+            f"{fund_code} 在 {start or '全区间'} ~ {end or '最新'} 内没有任何候选指数"
+            f"存活（对齐后 {len(out)} 个交易日，覆盖率过滤详见警告："
+            f"{warnings or '无'}）")
     if verbose:
         print(f"[data] 对齐后：{out.shape[0]} 交易日 × {out.shape[1]} 条序列 "
               f"({out.index[0].date()} ~ {out.index[-1].date()})"

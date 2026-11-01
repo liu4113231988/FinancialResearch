@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import pickle
+import time
 
 import market_research.config as C
 import market_research.data.marketdata as D
@@ -10,6 +11,9 @@ import market_research.tasks.sync as sync
 from market_research.tasks.jobs import JOBS
 from market_research.market.analysis import analyze_market
 CACHE_DIR = C.DATA_DIR / "webcache"
+# 当前版本结果缓存按 mtime 淘汰：每次分析都会为新的参数组合写一份 .pkl，
+# 不清理会无限累积（版本清扫只删非当前版本）。
+RESULT_CACHE_TTL_DAYS = 30
 
 def analyze(**arguments):
     from market_research.funds.analysis import analyze as calculate
@@ -22,6 +26,31 @@ def backtest_fund(**arguments):
 def refit_single(**arguments):
     from market_research.funds.analysis import refit_single as calculate
     return calculate(**arguments)
+
+def correlation(**arguments):
+    """滚动相关重算（P1-13）：在任务队列内执行，可取消、占计算名额。
+
+    与 analyze 不同，这里不做结果缓存：数据缓存预热后计算只是毫秒级内存
+    操作，任务结果本身已随 job 落库（TTL 内可重复读取）。
+    """
+    from market_research.funds.payloads import correlation_block
+    jid = arguments.get("job_id")
+    code = arguments["code"]
+    start = arguments.get("start")
+    end = arguments.get("end")
+    win = int(arguments.get("win") or 120)
+    if jid:
+        JOBS.update(jid, stage="加载数据", progress=0.1)
+    panel = D.load_panel(code, start=start or C.START_DATE, end=end,
+                         verbose=False)
+    if jid and JOBS.is_cancelled(jid):
+        # 取消后不再计算；finish() 对已取消任务是无操作（状态机只认 running）
+        return {"ok": False, "cancelled": True}
+    if jid:
+        JOBS.update(jid, stage="计算滚动相关", progress=0.6)
+    result = correlation_block(panel, panel["__FUND__"],
+                               roll_n=max(20, min(win, 750)))
+    return {"ok": True, "code": code, "correlation": result}
 
 from market_research.data.files import _atomic_pickle_dump
 
@@ -36,8 +65,20 @@ def result_cache_path(code, models, params, max_rebal=None, auto_equity=False, d
     return CACHE_DIR / f"result_v{C.CACHE_VERSION}_{code}_{hashlib.md5(key.encode()).hexdigest()[:10]}.pkl"
 
 
+def _fetch_window(params):
+    """复现 load_panel 的取数窗口：抓取起点 + 结束日（含全局配置回落）。"""
+    start = params.get("start") or C.START_DATE
+    end = params.get("end")
+    if end is None:
+        end = C.END_DATE
+    return D.fetch_start_for(start), end
+
+
 def fund_cache_path(params):
-    return result_cache_path(params["code"],params["models"],params["params"],params.get("max_rebal"),params.get("auto_equity",False),D.data_stamp(exclude_stocks=True,fund_code=params["code"]),params.get("start"),params.get("end"))
+    fs, end = _fetch_window(params)
+    return result_cache_path(params["code"],params["models"],params["params"],params.get("max_rebal"),params.get("auto_equity",False),
+                             D.data_stamp(exclude_stocks=True,fund_code=params["code"],fetch_start=fs,end=end),
+                             params.get("start"),params.get("end"))
 
 
 _CLEANED = False
@@ -45,11 +86,12 @@ _CLEANED = False
 
 def _cleanup_stale_results() -> None:
     """
-    删除**非当前版本**的结果缓存。
-
-    ★ config.py 曾同时写着"旧版缓存会被自动清理"和"不会被清扫"，两边都不真：
-      没有任何代码做清理，`webcache` 里长期留着 v7/v8 的 .pkl。
-      只删其它版本前缀，不动当前版本（多进程同时写当前版本是安全的）。
+    结果缓存清理：
+      1. 删除**非当前版本**的 .pkl（config.py 曾声称"旧版缓存会自动清理"
+         但没有任何代码做清理 —— v7/v8 长期滞留）；
+      2. 当前版本超过 `RESULT_CACHE_TTL_DAYS` 未再命中的也删除 ——
+         每次分析都为新的参数组合写一份缓存，不清理会无限累积。
+    结果都可重算，删除只影响下次首跑耗时；数据缓存（fund_nav 等）不在此列。
     """
     global _CLEANED
     if _CLEANED:
@@ -57,9 +99,13 @@ def _cleanup_stale_results() -> None:
     _CLEANED = True
     prefix = f"result_v{C.CACHE_VERSION}_"
     try:
+        now = time.time()
         for path in CACHE_DIR.glob("result_v*.pkl"):
             if not path.name.startswith(prefix):
-                path.unlink(missing_ok=True)
+                path.unlink(missing_ok=True)      # 非当前版本
+            elif (now - path.stat().st_mtime
+                  > RESULT_CACHE_TTL_DAYS * 86400):
+                path.unlink(missing_ok=True)      # 当前版本但长期未用
     except OSError:
         LOG.warning("清理旧结果缓存失败（不影响本次分析）", exc_info=True)
 
@@ -100,6 +146,8 @@ def execute(operation, params, jid):
         return result
     if operation == "market":
         return analyze_market(**params,job_id=jid)
+    if operation == "corr":
+        return correlation(**params, job_id=jid)
     if operation == "refit":
         JOBS.update(jid,stage="重新学习模型",progress=.2)
         arguments=dict(params)

@@ -44,6 +44,10 @@
     <select id="presetSel" title="示例基金">
       <option value="">— 示例 —</option>
     </select>
+    <select id="watchSel" title="自选基金">
+      <option value="">— 自选 —</option>
+    </select>
+    <button type="button" id="btnWatch" class="btn ghost" title="把当前基金加入/移出自选">☆</button>
   </form>
 </header>
 
@@ -194,6 +198,7 @@
         <p class="meta" id="fundMeta">—</p>
       </div>
       <div class="head-actions">
+        <button class="btn ghost" id="btnExport" title="导出本次分析结果与数据口径（JSON，含窗口、模型、参数与重估模式）">⇩ 导出</button>
         <button class="btn ghost" id="btnRefresh" title="强制重新抓取数据并重算">↻ 刷新数据</button>
         <button class="btn ghost" id="btnReLearn" title="用当前模型与参数重新学习">⟳ 重新学习</button>
         <button class="btn primary" id="btnSaveSel" title="把当前所选模型设为分析基准">★ 设为最佳模型</button>

@@ -104,6 +104,24 @@ def add_window_args(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     return ap
 
 
+def _start_from_end(end: str, years: float) -> str:
+    """
+    以显式结束日为锚向前推 `years` 年（P2-19）。
+
+    整数年按日历回退（闰年 2/29 由 pandas DateOffset 自动落到 2/28），
+    小数部分按 365.25 天/年折算成日。没有这个锚点，"年数 + 历史截止日"
+    这组参数无法表达一个固定的历史窗口 —— 旧实现从"今天"回推，
+    `years=2, end=2024-01-01` 会算出晚于 end 的起点然后报错。
+    """
+    e = pd.Timestamp(end)
+    whole = int(years)
+    start = e - pd.DateOffset(years=whole)
+    frac = float(years) - whole
+    if frac > 0:
+        start = start - pd.Timedelta(days=int(round(frac * 365.25)))
+    return start.strftime("%Y-%m-%d")
+
+
 def resolve_window(years: Optional[float] = None,
                    start: Optional[str] = None,
                    end: Optional[str] = None) -> Tuple[str, Optional[str]]:
@@ -111,13 +129,25 @@ def resolve_window(years: Optional[float] = None,
     把窗口参数解析成 `(start, end)`，并校验 2 年下限。
 
     优先级：`start` > `years` > 当前配置（`C.START_DATE`）。
+    年数路径的锚点（P2-19）：
+      * 显式 `end` → 以 `end` 为锚向前推年数（`years=2, end=2024-01-01`
+        即 2022-01-01 ~ 2024-01-01，历史窗口可精确复现）；
+      * 无 `end`   → 锚定今天，或环境变量 `FIL_START_DATE`。
+    `FIL_START_DATE` **只在无显式 `end` 的年数路径生效**：它锁定的是
+    "默认滚动起点"；显式 `end` 是更具体的用户契约，优先于环境变量。
     `end` 为 None 表示取到最新。
     校验不通过抛 `ValueError`（由调用方决定是退出还是转 4xx）。
     """
     if start:
         s = _iso(start, "窗口起始日")
     elif years is not None:
-        s = C._rolling_start(years)
+        years = float(years)
+        if years <= 0:
+            raise ValueError(f"窗口年数需为正数，收到 {years}")
+        if end:
+            s = _start_from_end(_iso(end, "窗口结束日"), years)
+        else:
+            s = C._rolling_start(years)
     else:
         s = C.START_DATE
 

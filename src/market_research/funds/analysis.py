@@ -181,10 +181,13 @@ def analyze(code: str, models: Optional[List[str]] = None,
             "refit": C.RBSA["refit"],
             "max_rebal": (max_rebal if max_rebal is not None
                           else C.RBSA.get("max_rebal")),
-            # 只有不抽稀时，linspace 的历史重估点才前缀稳定。
+            # 前缀稳定性（P0-04/P1 修复轮）：calendar 锚点只由日期决定，
+            # 限流也只从头部丢弃（保留尾部）→ 抽稀与否都稳定；
+            # linspace 只有完全不抽稀（max_rebal=0）时才稳定。
             "rebal_mode": zoo.rebal_mode,
-            "prefix_stable": bool(zoo.rebal_mode == "linspace" and
-                                  not (max_rebal if max_rebal is not None else zoo.max_rebal)),
+            "prefix_stable": bool(zoo.rebal_mode == "calendar" or
+                                  not (max_rebal if max_rebal is not None
+                                       else zoo.max_rebal)),
             "n_rebal": int(len(reps[next(iter(reps))].weights_hist))
             if reps else 0,
             "equity_ratio": C.RBSA["equity_ratio"],

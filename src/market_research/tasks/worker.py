@@ -14,6 +14,25 @@ from market_research.tasks.store import bind_attempt
 LOG=logging.getLogger(__name__)
 
 
+def _prune_stale_windows():
+    """清理与当前抓取窗口不符的重复指数池缓存（监督进程启动时执行一次）。
+
+    显式自定义窗口会在 DuckDB 留下一次性窗口的整份指数缓存；它们可随时
+    重抓、也不会被同步进程刷新，滞留只占空间。当前窗口的缓存永远保留。
+    """
+    try:
+        from market_research.data import storage
+        end = C.END_DATE
+        keep = [f"index_universe_{C.FETCH_START_DATE}"]
+        if end:
+            keep.append(f"index_universe_{C.FETCH_START_DATE}_to{end}")
+        removed = storage.prune_universe_windows(keep)
+        if removed:
+            LOG.info("清理重复窗口的指数池缓存：%s", ", ".join(removed))
+    except Exception:
+        LOG.warning("重复窗口缓存清理失败（不影响计算）", exc_info=True)
+
+
 def execute(jid,token):
     job=JOBS.get(jid)
     if not job or job['token']!=token or job['status']!='running':
@@ -47,6 +66,7 @@ def supervise(once=False):
         if not acquired:
             return
         JOBS.migrate()
+        _prune_stale_windows()
         C.DATA_DIR.joinpath('worker.pid').write_text(str(os.getpid()),encoding='ascii')
         stop_path=C.DATA_DIR/'worker.stop'
         stop_path.unlink(missing_ok=True)

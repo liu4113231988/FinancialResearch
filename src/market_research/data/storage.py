@@ -98,22 +98,61 @@ def update_info(name, info):
         db.execute("UPDATE datasets SET metadata=? WHERE name=?", [json.dumps(meta), name])
 
 
-def stamp(*, exclude_stocks=False, fund_code=None):
+def stamp(*, exclude_stocks=False, fund_code=None, fetch_start=None, end=None):
+    """数据指纹：结果缓存键与运行记录共用的"数据侧版本号"。
+
+    ★ 依赖收窄（P1 修复轮）：传入 `fetch_start`（= fetch_start_for(分析起点)）
+      后，基金命名空间只统计**本基金、本抓取窗口**的缓存，候选指数池只统计
+      **本窗口**的缓存 —— `load_panel` 实际只会读这几个数据集，其它窗口的
+      重复缓存被同步刷新也不该让结果缓存失效。不传时保持旧的保守口径
+      （全部纳入），未知数据集永远保守纳入。
+    """
     with connection() as db:
         rows = db.execute("SELECT name, revision, metadata FROM datasets ORDER BY name").fetchall()
     if exclude_stocks:
         rows = [row for row in rows
                 if not row[0].startswith(("market_v1_stock_", "sync_history_stock_"))]
     if fund_code is not None:
-        # Shared indices/valuation remain conservative dependencies. Only known
-        # fund namespaces can safely be excluded; unknown datasets stay included.
+        if fetch_start:
+            # 只保留本基金本窗口的净值/同步历史（sync_history 无窗口段，
+            # 按基金前缀匹配即可）
+            rows = [row for row in rows
+                    if not row[0].startswith(("fund_nav_", "sync_history_fund_"))
+                    or row[0].startswith((f"fund_nav_{fund_code}_{fetch_start}",
+                                          f"sync_history_fund_{fund_code}_"))]
+        else:
+            rows = [row for row in rows
+                    if not row[0].startswith(("fund_nav_", "sync_history_fund_"))
+                    or row[0].startswith((f"fund_nav_{fund_code}_", f"sync_history_fund_{fund_code}_"))]
+    if fetch_start is not None:
+        # 共享指数池收窄到本抓取窗口对应的具体缓存名（load_panel 的读法一致）
+        keep = {f"index_universe_{fetch_start}"}
+        if end:
+            keep.add(f"index_universe_{fetch_start}_to{end}")
         rows = [row for row in rows
-                if not row[0].startswith(("fund_nav_", "sync_history_fund_"))
-                or row[0].startswith((f"fund_nav_{fund_code}_", f"sync_history_fund_{fund_code}_"))]
+                if not row[0].startswith("index_universe_")
+                or row[0] in keep]
     # Metadata-only basis/version edits must also invalidate dependent results.
     revisions = [(name, revision, {k: v for k, v in json.loads(meta).items() if k != "info"})
                  for name, revision, meta in rows]
     return hashlib.sha256(json.dumps(revisions, sort_keys=True).encode()).hexdigest()
+
+
+def prune_universe_windows(keep) -> list:
+    """删除与当前抓取窗口不符的候选指数池缓存（重复窗口，可随时重抓）。
+
+    load_index_universe 的缓存名带窗口（`index_universe_{start}[_to{end}]`），
+    显式自定义窗口会在 DuckDB 里留下一次性窗口的整份指数缓存。返回被删除的
+    数据集名；只动 `index_universe_` 命名空间，其它数据集一律不碰。
+    """
+    keep = set(keep)
+    with connection() as db:
+        rows = db.execute("SELECT name FROM datasets WHERE starts_with(name, 'index_universe_')").fetchall()
+        stale = [r[0] for r in rows if r[0] not in keep]
+        for name in stale:
+            db.execute("DELETE FROM prices WHERE dataset=?", [name])
+            db.execute("DELETE FROM datasets WHERE name=?", [name])
+    return stale
 
 
 def summary():

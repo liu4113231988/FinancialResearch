@@ -89,19 +89,63 @@ class RouteTests(unittest.TestCase):
         for route in ("analyze", "refit", "backtest"):
             self.assertEqual(self.client.post("/api/" + route, json=[1]).status_code, 400)
 
+    def test_correlation_cold_cache_executes_as_queue_job(self):
+        # P1-13 端到端：冷缓存 → 202 + 队列任务 → worker 执行 corr → 结果可读
+        rng = np.random.default_rng(7)
+        index = pd.date_range("2024-01-01", periods=60, freq="B")
+        panel = pd.DataFrame({"__FUND__": np.exp(np.cumsum(rng.normal(0, .01, 60))),
+                              "801010": np.exp(np.cumsum(rng.normal(0, .01, 60)))},
+                             index=index)
+        # 第一次调用（请求线程，只读）抛 CacheMiss；第二次（队列 worker）拿到面板
+        with patch.object(D, "load_panel",
+                          side_effect=[CacheMiss("冷缓存"), panel]) as load:
+            response = self.client.get("/api/corr",
+                                       params={"code": "110022", "win": 30})
+            self.assertEqual(response.status_code, 202)
+            jid = response.json()["job_id"]
+            self.assertIs(load.call_args_list[0].kwargs["allow_fetch"], False)
+            for thread in threading.enumerate():
+                if thread.name == "job-" + jid:
+                    thread.join(timeout=5)
+            result = self.client.get("/api/result/" + jid)
+        self.assertEqual(result.status_code, 200)
+        self.assertIn("correlation", result.json()["result"])
+        self.assertTrue(self.runner._slots.acquire(False))
+        self.runner._slots.release()
+
 
 class ReadOnlyRouteTests(unittest.TestCase):
-    """请求线程内的端点只读缓存，不替用户联网取数（P1-13 剩余项）。"""
+    """请求线程内的端点只读缓存，不替用户联网取数（P1-13）。"""
 
     def setUp(self):
         self.client = TestClient(app)
 
-    def test_correlation_tells_data_layer_not_to_fetch(self):
-        with patch.object(D, "load_panel", side_effect=CacheMiss("冷缓存")) as load:
-            response = self.client.get("/api/corr", params={"code": "110022", "win": 60})
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("刷新数据", response.json()["error"])
+    def test_correlation_cold_cache_defers_to_queue(self):
+        # 冷缓存不再 409：取数与计算交回任务队列（可取消、占名额），
+        # 请求线程仍然只读（allow_fetch=False），返回 202 + job_id。
+        with patch.object(D, "load_panel", side_effect=CacheMiss("冷缓存")) as load, \
+             patch.object(web, "RUNNER") as runner:
+            # services.submit 解包 RUNNER.submit 的 (jid, merged)
+            runner.submit.return_value = ("job123", False)
+            response = self.client.get("/api/corr",
+                                       params={"code": "110022", "win": 60})
+        self.assertEqual(response.status_code, 202)
+        body = response.json()
+        self.assertEqual(body["job_id"], "job123")
         self.assertIs(load.call_args.kwargs["allow_fetch"], False)
+        self.assertEqual(runner.submit.call_args.args[2], "corr")
+        arguments = runner.submit.call_args.args[3]
+        self.assertEqual(arguments["code"], "110022")
+        self.assertEqual(arguments["win"], 60)
+
+    def test_correlation_reports_queue_exhaustion(self):
+        from market_research.errors import JobsBusy
+        with patch.object(D, "load_panel", side_effect=CacheMiss("冷缓存")), \
+             patch.object(web, "RUNNER") as runner:
+            runner.submit.side_effect = JobsBusy("待处理任务已达上限")
+            response = self.client.get("/api/corr", params={"code": "110022"})
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("上限", response.json()["error"])
 
     def test_correlation_computes_from_already_loaded_panel(self):
         rng = np.random.default_rng(7)

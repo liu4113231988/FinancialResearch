@@ -502,6 +502,108 @@ async function checkName(code, token = fundGeneration) {
   } catch (e) { /* 名录查询失败不阻断主流程 */ }
 }
 
+// ==================================================================== 本地持久化
+// 页面恢复与自选（P1 修复轮关闭项）：纯 localStorage，不依赖后端；
+// 无痕/隐私模式下静默降级为"无记忆"，绝不因存储失败打断分析。
+const LS = {
+  get(key, fallback) {
+    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
+    catch (e) { return fallback; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); }
+    catch (e) { /* 配额满 / 禁用存储：记忆功能失效但页面照常工作 */ }
+  },
+};
+const WATCH_KEY = 'fil_watchlist', LAST_KEY = 'fil_last_run';
+
+function renderWatchlist() {
+  const sel = $('watchSel');
+  if (!sel || !$('btnWatch')) return;          // 兼容旧缓存页面缺控件
+  const codes = LS.get(WATCH_KEY, []);
+  const names = Object.fromEntries((S.cat?.known_funds || []).map(f => [f.code, f.name]));
+  sel.innerHTML = '';
+  const head = document.createElement('option');
+  head.value = '';
+  head.textContent = codes.length ? `— 自选 (${codes.length}) —` : '— 自选 —';
+  sel.appendChild(head);
+  codes.forEach(code => {
+    const opt = document.createElement('option');
+    opt.value = code;
+    opt.textContent = `${code} ${names[code] || ''}`.trim();
+    sel.appendChild(opt);
+  });
+  const current = S.result?.code || $('codeInput').value.trim();
+  $('btnWatch').textContent = codes.includes(current) ? '★' : '☆';
+}
+function toggleWatchlist() {
+  const code = S.result?.code || $('codeInput').value.trim();
+  if (!/^\d{6}$/.test(code)) { showAlert('请先输入有效的 6 位基金代码'); return; }
+  const codes = LS.get(WATCH_KEY, []);
+  const i = codes.indexOf(code);
+  if (i >= 0) { codes.splice(i, 1); showAlert(`已把 ${code} 移出自选。`); }
+  else { codes.push(code); showAlert(`已把 ${code} 加入自选。`); }
+  LS.set(WATCH_KEY, codes);
+  renderWatchlist();
+}
+function saveLastRun(state) { LS.set(LAST_KEY, state); }
+// 页面恢复：只回填表单（代码/区间/模型/精度），不自动触发分析 ——
+// 分析要占任务队列名额，页面打开不应有副作用；用户确认后点「开始分析」。
+function restoreLastRun() {
+  const saved = LS.get(LAST_KEY, null);
+  if (!saved) return;
+  if (saved.code && /^\d{6}$/.test(saved.code) && !$('codeInput').value.trim())
+    $('codeInput').value = saved.code;
+  if (saved.start && saved.end) {
+    $('windowSel').value = 'custom';
+    $('fundStart').value = saved.start;
+    $('fundEnd').value = saved.end;
+  }
+  if (Array.isArray(saved.models) && saved.models.length) applyPreset(saved.models);
+  if (saved.rebal !== undefined && saved.rebal !== null)
+    $('rebalSel').value = String(saved.rebal);
+  if (typeof saved.auto === 'boolean') $('autoEquity').checked = saved.auto;
+  syncFundDates();
+  fundSettingsChanged();
+}
+// 带数据口径的导出：JSON 里同时带结果与复现它所需的一切输入
+// （窗口、模型清单、超参、重估模式与是否前缀稳定），拿到文件的人
+// 可以判断这份结果在什么口径下成立。
+function exportResult() {
+  if (!S.result) { showAlert('还没有可导出的分析结果。'); return; }
+  const r = S.result;
+  const m = r.meta || {};
+  const payload = {
+    tool: 'fund-index-lens',
+    exported_at: new Date().toISOString(),
+    fund: {code: r.code, name: m.fund_name || m.name || r.code},
+    data_provenance: {
+      window: {start: m.start, end: m.end,
+               requested: m.window_requested || null,
+               requested_end: m.window_requested_end || null},
+      models: m.models, params: m.params,
+      best_model: m.best_model,
+      rebal: {mode: m.rebal_mode, max_rebal: m.max_rebal,
+              prefix_stable: m.prefix_stable, n_rebal: m.n_rebal,
+              window_days: m.window, refit_days: m.refit},
+      auto_equity: m.auto_equity, equity_ratio: m.equity_ratio,
+      n_days: m.n_days,
+      from_cache: m.from_cache || false,
+    },
+    result: r,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 1)],
+                        {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `research_${r.code}_${String(m.end || 'latest').replace(/-/g, '')}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  showAlert('已导出本次结果与数据口径（JSON）。');
+}
+
 // ==================================================================== 初始化
 (async function init() {
   try {
@@ -555,6 +657,18 @@ async function checkName(code, token = fundGeneration) {
     if (window.MarketApp && MarketApp.kind !== 'fund') MarketApp.submit(e.target.value);
     else run(e.target.value);
   };
+
+  // 自选与页面恢复（本地持久化）
+  renderWatchlist();
+  $('btnWatch').onclick = toggleWatchlist;
+  $('watchSel').onchange = e => {
+    if (!e.target.value) return;
+    $('codeInput').value = e.target.value;
+    run(e.target.value);
+    e.target.value = '';            // 复位，便于下次从同一入口选择
+  };
+  $('btnExport').onclick = exportResult;
+  restoreLastRun();
 
   $('btnRefresh').onclick = () => S.result && run(S.result.code, { refresh: true });
   $('btnCancelJob').onclick = cancelActiveJob;
@@ -700,9 +814,17 @@ async function updateCorrelation(win) {
   try {
     const r = await api('/api/corr?' + query);
     if (token !== correlationGeneration || S.result !== target) return;
-    S.rollWin = win;
-    target.correlation = r.correlation;
-    renderCorr();
+    if (r.correlation) {          // 暖缓存：请求内即时重算
+      S.rollWin = win;
+      target.correlation = r.correlation;
+      renderCorr();
+      return;
+    }
+    if (r.job_id) {               // 冷缓存：后端已提交队列任务（202）
+      await pollCorrelation(r.job_id, win, target, token);
+      return;
+    }
+    throw Error('意外的响应');
   } catch (error) {
     if (token === correlationGeneration && S.result === target) {
       $('rollWin').value = String(S.rollWin);
@@ -725,6 +847,8 @@ async function run(code, opts = {}) {
   correlationGeneration++;
   checkName(code, token);
   const params = JSON.parse(JSON.stringify(S.params));
+  saveLastRun({code, start: requestedWindow.start, end: requestedWindow.end,
+    models, rebal: selectedRebal(), auto: selectedAuto()});
   setFundBusy(true);
   $('progressWrap').hidden = false;
   setProgress('提交任务…', 0.01, '');
@@ -805,6 +929,37 @@ async function poll(jid, token = fundGeneration) {
   }
 }
 
+// /api/corr 冷缓存返回 202 + job_id（P1-13）：数据抓取与相关重算都在任务
+// 队列里（可取消、占名额）。这里独立轮询到完成后把结果写回当前目标；
+// 节流与上限与 poll() 相同，代次令牌用 correlationGeneration（随切换基金/
+// 新结果失效），不能复用 fundGeneration —— 两条轮询的生命周期不同。
+async function pollCorrelation(jid, win, target, token) {
+  const MAX_POLLS = 1200;   // 900ms × 200 + 2s × 1000 ≈ 35 分钟
+  activeJob = jid;
+  showAlert('数据尚未预热，已提交后台重算任务；完成后本页会自动更新。');
+  try {
+    for (let attempts = 0; attempts < MAX_POLLS; attempts++) {
+      await new Promise(r => setTimeout(r, attempts > 200 ? 2000 : 900));
+      if (token !== correlationGeneration || S.result !== target) return;
+      const j = await api('/api/job/' + jid);
+      if (token !== correlationGeneration || S.result !== target) return;
+      if (j.status === 'done') {
+        const r = await api('/api/result/' + jid);
+        if (token !== correlationGeneration || S.result !== target) return;
+        S.rollWin = win;
+        target.correlation = r.result.correlation;
+        renderCorr();
+        showAlert(null);
+        return;
+      }
+      if (j.status === 'error') throw Error(j.error || '后台任务失败');
+    }
+    throw Error('等待超时（约 35 分钟）。任务可能仍在后台运行，稍后调整窗口会立即命中已预热的数据。');
+  } finally {
+    if (activeJob === jid) activeJob = null;
+  }
+}
+
 async function cancelActiveJob() {
   const jid = activeJob;
   activeJob = null;
@@ -838,6 +993,7 @@ function applyResult(res) {
   $('main').hidden = !visible;
   updateFundStatus();
   renderHead();
+  renderWatchlist();               // ☆/★ 需跟随当前基金刷新
   renderInsights();
   renderDrift();
   renderModelStrip();

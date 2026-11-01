@@ -48,6 +48,25 @@ class ResultCacheCleanupTest(unittest.TestCase):
         services._cleanup_stale_results()
         self.assertTrue(stale.exists())
 
+    def test_current_version_results_expire_after_ttl(self):
+        # 当前版本缓存按 mtime 淘汰：每次分析都为新的参数组合写一份，
+        # 不清理会无限累积。新写的保留，超过 TTL 的删除。
+        from unittest.mock import patch
+        current = self.dir / f"result_v{C.CACHE_VERSION}_110022_1234567890.pkl"
+        current.write_bytes(b"x")
+        services._cleanup_stale_results()
+        self.assertTrue(current.exists())       # 刚写入的不受影响
+        import os
+        stale = self.dir / f"result_v{C.CACHE_VERSION}_110022_fedcba9870.pkl"
+        stale.write_bytes(b"x")
+        old = (services.time.time() - (services.RESULT_CACHE_TTL_DAYS + 1) * 86400)
+        os.utime(stale, (old, old))
+        services._CLEANED = False               # 允许再跑一轮清理
+        with patch.object(services, "RESULT_CACHE_TTL_DAYS", services.RESULT_CACHE_TTL_DAYS):
+            services._cleanup_stale_results()
+        self.assertFalse(stale.exists())
+        self.assertTrue(current.exists())
+
 
 class RunInfoFingerprintTest(unittest.TestCase):
     def test_window_and_dirty_recorded(self):

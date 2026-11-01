@@ -87,6 +87,42 @@ class StorageTests(unittest.TestCase):
             storage.write(name, self.frame * 2, {})
             self.assertNotEqual(previous, stamp(), name)
 
+    def test_fund_stamp_narrows_to_fetch_window(self):
+        # P1 修复轮：传入抓取窗口后，stamp 只统计本基金本窗口的实际依赖 ——
+        # 其它窗口的重复缓存（同步进程会刷新它们）不再让结果缓存失效。
+        for name in ("fund_nav_110022_2016-01-01_total",
+                     "fund_nav_110022_2015-01-01_total",
+                     "index_universe_2016-01-01", "index_universe_2015-01-01",
+                     "pe_panel"):
+            storage.write(name, self.frame, {})
+        stamp = lambda: D.data_stamp(exclude_stocks=True, fund_code="110022",
+                                     fetch_start="2016-01-01")
+        initial = stamp()
+        # 其它窗口的缓存被刷新（同步进程就是这么做的）→ 指纹不变
+        for name in ("fund_nav_110022_2015-01-01_total",
+                     "index_universe_2015-01-01"):
+            storage.write(name, self.frame * 3, {})
+        self.assertEqual(initial, stamp(), name)
+        # 本窗口依赖与共享估值仍然计入
+        for name in ("fund_nav_110022_2016-01-01_total",
+                     "index_universe_2016-01-01", "pe_panel"):
+            previous = stamp()
+            storage.write(name, self.frame * 2, {})
+            self.assertNotEqual(previous, stamp(), name)
+
+    def test_prune_universe_windows_removes_only_stale_windows(self):
+        for name in ("index_universe_2016-01-01", "index_universe_2015-01-01",
+                     "fund_nav_110022_2015-01-01_total", "pe_panel"):
+            storage.write(name, self.frame, {})
+        removed = storage.prune_universe_windows(["index_universe_2016-01-01"])
+        self.assertEqual(removed, ["index_universe_2015-01-01"])
+        self.assertIsNone(storage.read("index_universe_2015-01-01"))
+        self.assertIsNotNone(storage.read("index_universe_2016-01-01"))
+        # 只动 index_universe_ 命名空间
+        self.assertIsNotNone(storage.read("fund_nav_110022_2015-01-01_total"))
+        self.assertIsNotNone(storage.read("pe_panel"))
+        self.assertEqual(storage.summary()["n_index_cache"], 1)
+
     def test_transaction_rollback(self):
         storage.write("x", self.frame, {"v": 1})
         invalid = self.frame.astype(object)
