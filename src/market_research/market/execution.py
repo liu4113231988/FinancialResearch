@@ -197,7 +197,8 @@ def matched_exposure_control(strategy, passive):
 
 
 def execution_summary(result):
-    return {k:v for k,v in result.items() if k not in ('dates','equity','exposure','trades','blocked_orders')}
+    return {k:v for k,v in result.items() if k not in ('dates','equity','exposure','trades','blocked_orders',
+                                                     'equity_cash','cash_path','units_path','closed_cycles')}
 
 
 def execution_diagnostics(bars, targets, calendar=None, detail=False):
@@ -227,7 +228,7 @@ def probability_targets(probability):
     return out
 
 
-def compare_probability_execution(bars, base, candidate, calendar=None):
+def compare_probability_execution(bars, base, candidate, calendar=None, capital_config=None):
     """Paired trading diagnostics without filtering future realized outcomes.
 
     Only current probability availability determines the common start. Missing
@@ -240,6 +241,7 @@ def compare_probability_execution(bars, base, candidate, calendar=None):
                          'candidate': candidate.reindex(bars.index)}, index=bars.index)
     common = pair.notna().all(axis=1)
     report = {'status': 'insufficient', 'n_common_predictions': int(common.sum()),
+              'account_mode': 'capital' if capital_config is not None else 'fractional',
               'sample_sufficient': int(common.sum()) >= 20, 'start': None, 'end': None,
               'entry_probability': ENTRY_PROBABILITY, 'exit_probability': EXIT_PROBABILITY,
               'strategies': {},
@@ -256,9 +258,13 @@ def compare_probability_execution(bars, base, candidate, calendar=None):
     signals['buy_hold'] = pd.Series(1., index=window.index)
     report['strategies'] = {key:[] for key in signals}
     for fee, slip in FEE_SCENARIOS:
-        results = {key:simulate_execution(window, target, fee, slip, calendar) for key,target in signals.items()}
-        for key in ('base','candidate'):
-            results[key]['exposure_control'] = matched_exposure_control(results[key],results['buy_hold'])
+        if capital_config is not None:
+            from market_research.market.capital import simulate_capital
+            results = {key:simulate_capital(window,target,capital_config,fee,slip,calendar) for key,target in signals.items()}
+        else:
+            results = {key:simulate_execution(window, target, fee, slip, calendar) for key,target in signals.items()}
+            for key in ('base','candidate'):
+                results[key]['exposure_control'] = matched_exposure_control(results[key],results['buy_hold'])
         for key,result in results.items():
             report['strategies'][key].append(execution_summary(result))
     report['status'] = 'evaluated'

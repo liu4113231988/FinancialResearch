@@ -17,7 +17,7 @@ from market_research.serialization import _jsafe
 from market_research.validation.window import _iso
 
 VARIANTS = ('base', 'volatility', 'volume', 'relative', 'all')
-VERSION = 7
+VERSION = 8
 
 
 def validate_plan(plan):
@@ -90,7 +90,7 @@ def paired_evidence(bars, base, candidate, horizon, family_size):
     return result
 
 
-def evaluate_asset(bars, reference, plan, family_size, calendar=None):
+def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_config=None):
     bars = bars.loc[plan['start']:plan['end']]
     if bars.empty or not bars.index.is_unique or not bars.index.is_monotonic_increasing:
         raise ValueError('行情为空、日期重复或未升序排列')
@@ -98,7 +98,8 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None):
         raise ValueError('需要有限且正的OHLC价格')
     variants, context = feature_variants(bars, reference)
     cutoff = (pd.Timestamp(plan['holdout_start'])-pd.Timedelta(days=1)).date().isoformat()
-    output = {'training_cutoff': cutoff, 'features': {k: list(v.columns) for k,v in variants.items()}, 'horizons': {}}
+    output = {'training_cutoff': cutoff, 'account_mode':'capital' if capital_config is not None else 'fractional',
+              'features': {k: list(v.columns) for k,v in variants.items()}, 'horizons': {}}
     for horizon in (5, 20):
         forecasts = {key: direction_forecast(bars, values, horizon, bars.index[0], training_end=cutoff)
                      for key, values in variants.items()}
@@ -118,7 +119,7 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None):
                 result['variant'] = variant
                 result['evidence'] = paired_evidence(window, baseline, candidate, horizon, family_size)
                 from market_research.market.execution import compare_probability_execution
-                result['execution'] = compare_probability_execution(window, pair['base'], pair[variant], calendar)
+                result['execution'] = compare_probability_execution(window, pair['base'], pair[variant], calendar, capital_config)
                 rows.append(result)
             stages[stage] = rows
         output['horizons'][str(horizon)] = stages
@@ -176,8 +177,6 @@ def run_plan(plan, root, progress=None, execution_only=False):
         row = {'kind':asset['kind'], 'code':asset['code']}
         try:
             capital_config=capital.parse_capital_config(asset['capital']) if 'capital' in asset else None
-            if capital_config is not None and not execution_only:
-                raise ValueError('资金约束模式本轮仅支持--execution-only规则/持有验证，未混用到方向模型')
             bars = read_bars(asset, plan, root).loc[plan['start']:plan['end']]
             if bars.empty:
                 raise ValueError('清单区间内没有本地行情')
@@ -201,7 +200,8 @@ def run_plan(plan, root, progress=None, execution_only=False):
                 raise ValueError('清单区间内没有本地资产或基准行情')
             row.update(data_sha256=fingerprint(bars), benchmark_sha256=fingerprint(reference),
                        actual_start=bars.index[0].date().isoformat(), actual_end=bars.index[-1].date().isoformat(),
-                       result=evaluate_asset(bars, reference.close, plan, family_size, calendar))
+                       result=evaluate_asset(bars, reference.close, plan, family_size,
+                                             calendar=calendar, capital_config=capital_config))
             row['status'] = 'evaluated' if any(r['n'] for h in row['result']['horizons'].values() for r in h['holdout']) else 'insufficient'
         except (ValueError, KeyError, OSError) as error:
             row.update(status='unavailable', error=str(error))

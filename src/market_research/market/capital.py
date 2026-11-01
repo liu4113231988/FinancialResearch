@@ -4,6 +4,7 @@ All parameters are explicit research assumptions, not exchange/broker rules.
 Daily capacity uses only the previous completed session's volume.
 """
 from dataclasses import asdict, dataclass
+from collections import Counter
 import math
 
 import numpy as np
@@ -125,7 +126,8 @@ def simulate_capital(bars, targets, config, fee_bps=10., slippage_bps=5., calend
             'turnover':float(turnover),'annual_turnover':float(turnover*252/len(frame)),
             'average_exposure':float(np.mean(exposures)), 'fees_cash':float(fees),'slippage_cash':float(impact),
             'fee_bps':fee_bps,'slippage_bps':slippage_bps,'open_position':units>0,
-            'blocked_count':len(blocked),'blocked_orders':blocked,'trades':fills,'closed_cycles':cycles,
+            'blocked_count':len(blocked),'blocked_reasons':dict(Counter(x['reason'] for x in blocked)),
+            'blocked_orders':blocked,'trades':fills,'closed_cycles':cycles,
             'dates':frame.index.strftime('%Y-%m-%d').tolist(),'equity_cash':equity,'cash_path':cash_path,'units_path':quantities,
             'calendar_verified':calendar is not None,'missing_sessions':missing,
             'constraint_coverage':{name:int(frame[name].notna().sum()) if name in frame else 0

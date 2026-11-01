@@ -83,7 +83,7 @@ class ModelExecutionTests(unittest.TestCase):
             with patch('market_research.research.market_validation.read_bars',return_value=frame), \
                  patch('market_research.research.market_validation.evaluate_asset',return_value={'horizons':{'5':{'holdout':[{'n':1}]}}}) as evaluate:
                 out=run_plan(plan,Path(directory))
-            self.assertEqual(evaluate.call_args.args[-1].tolist(),frame.index.tolist())
+            self.assertEqual(evaluate.call_args.kwargs['calendar'].tolist(),frame.index.tolist())
             self.assertIsNotNone(out['assets'][0]['calendar_sha256'])
             self.assertEqual(out['planned_execution_scenarios'],144)
 
