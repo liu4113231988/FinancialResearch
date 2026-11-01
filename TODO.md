@@ -2,6 +2,99 @@
 
 ## 当前状态（2026-11-01）
 
+### 全量功能/逻辑/设计复查（2026-11-01）
+
+**检查方式**：逐文件审查 Web 全入口（基金/股票/指数/数据中心）、API–服务–任务–存储–同步链路、基金 RBSA 与回测、股票技术分析与方向预测、验证框架、研究命令与报告、前端四个 JS 文件；关键结论用仓库内真实缓存与产物复算，不只读注释。基线全部通过：
+
+- `uv run python -m unittest discover -s tests -t . -p 'test_*.py'`：200 项断言通过；唯一 `teardown` 报错来自沙箱回收临时目录（`tests/market/test_validation_io.py`），断言本身已通过，与代码无关。
+- 脚本式回归 `tests/regression/test_p0_fixes.py`、`test_regressions.py`、`tests/integration/test_webapi.py`、`tests/funds/test_holdings.py`、`tests/funds/test_fundpool.py` 退出码均为 0。
+- `node tests/frontend/test_refit.js`、`node tests/frontend/test_ui_async.cjs` 通过。
+
+**总体判断**：链路可跑通，时间前推/共同样本/配对检验/幂等写入这些骨架是合理的。问题集中在两类，且都不是"跑不起来"：
+
+1. **把"未知"渲染成"已知"**：缺失样本外 R² 当 0 判过拟合、缺失月份值当 `'-'` 再 `toFixed`、退化样本当"不显著/结论为负"、未到披露期当已披露。
+2. **文案与实现脱节**：报告和页面仍有硬编码结论（"跑输"、`Σw=0.90`、`+0.341`、"250 日 IC 接近 0"），换窗口/换基金后必然与数据矛盾。
+
+**第一批修复（2026-11-01）**：P0-1～P0-6 全部修复并补回归；P1-1、P1-2、P1-3、P1-5、P1-7、P1-9、P1-12、P1-16、P1-17 已修；P1-4 修了列缺失/NaN 与原子写，`{...:.0%}` 直接输出 `nan%` 的几处仍在。其余 P1/P2 未动。
+
+**第二批修复（2026-11-01）**：P1-4 补齐（4 处 `nan%` 全部走 `_safe`）、P1-6（前端轮询上限 + 退避 + 取消按钮，接上后端 `/api/job/{jid}/cancel`）、P1-8（ICIR 分块长度随前瞻期变化，块数 <4 返回 NaN）、P1-10（未覆盖仓位按 1.5% 年化计息，替换原来的 0 收益）、P1-13（`/api/corr` 加非阻塞锁，并发第二条返回 429）、P1-14（价格覆盖降级写进 `meta.data_warnings` 并在基金头部显示"口径降级 N 项"）、P1-15（总回报校准改为只用已公布锚点前向填充，丢弃首锚点之前的日期）。P1-10 的**价格指数 vs 总回报**偏差只能标注、无法离线修复；P1-13 仍是请求线程内取数，只是限流。P1-11 未动（需要历史申万成分，离线不可得）。
+
+验收：`unittest discover` **220 项**、5 个脚本式回归、2 个前端回归全绿。新增 `tests/funds/test_payloads.py`、`tests/research/{test_degenerate,test_report_render,test_experiments}.py`、`tests/market/test_nav_calibration.py`。
+
+注意：残差口径变化把 `CACHE_VERSION` 提到 **9**；净值校准变化把 `DATA_CACHE_VERSION` 提到 **3**。两处旧缓存都不会再被命中。
+
+#### P0 必须修（直接产出错误数字或相反结论）
+
+| # | 位置 | 问题与证据 | 修复与验收 |
+|---|---|---|---|
+| P0-1 已修 | `funds/payloads.py:273-275`、`325-329`；`api/static/app.js:1266-1285` | 残差序列 `fund_aligned - syn_nav` 用的是**未归一化**净值（基金净值自 2016 起点 1.0，样本外起点约 2~3）减从 1.0 起的合成基准。用缓存 `output/data/webcache/result_v7_110022_*.pkl` 复算：pcr 残差 min 1.65 / max 3.28，图上另两条线却都归一到 1.0，且无零线、按符号全红 → 用户看到"长期正偏离"的假象 | 改用已归一的 `fund_line - syn_line`；页面加 `markLine y=0`。验收：任选模型，残差以 0 为中心正负交替，单测断言 `abs(mean(residual))` 远小于 1 |
+| P0-2 已修 | `research/report.py:630-637`、`749-757` | `n_neg=_n_neg or None` 在"没有任何基金跑输"时把真值 0 当缺失 → 走 fallback 输出"多数基金跑输"；749-757 无论 `tc['年化收益']` 正负都写"策略跑输恒定仓位对照…（年化）"，且把带正号的数插在"跑输"后面 | 显式区分 `None/0`；按符号三态（跑赢/持平/跑输）措辞。验收：构造 `n_neg=0` 与 `tc>0` 的假数据，文字必须变"跑赢" |
+| P0-3 已修 | `research/report.py:686-691`、`727`；`config.py:208,229` | 正文硬写"最新一期权重…权重和为 0.90"。实际 `auto_equity=True`（默认）逐窗口估计 Σw（注释自述 0.25~0.30），`equity_ratio` 仅在该开关为 False 时才是目标值 | 数字从 `C.RBSA` 与 `weights_hist.sum(1)` 生成。验收：改 `equity_ratio` 或关掉 `auto_equity`，报告数字随之变化 |
+| P0-4 已修 | `funds/holdings.py:50`、`344-366` | `DISCLOSURE_LAG_DAYS=45` 被用于 Q2/Q4 **完整持仓**。完整持仓只在半年报（法定 8/31，约 62 天）与年报（次年 3/31，约 90 天）出现；45 天把可用时点分别提前 17/45 天，`holding_benchmark` 因此用到了当时不可得的信息 | Q2→62 天、Q4→90 天（或改用公告日）；lag 写入输出 meta 与文档。验收：模拟公告日前一交易日，基准不得使用该期持仓 |
+| P0-5 已修 | `research/robustness.py:51`、`164-172`、`333`；`research/walkforward.py:199-203`、`415-420`；`research/commands/robustness.py:57-60` | 退化样本被渲染成负结论：`effective_sample_size` 早退只返回 `n_funds/n_eff`，命令侧直接取 `avg_corr/pc1_share/n_eff_ratio` → `KeyError`；block bootstrap 在 `n < block*3` 返回 NaN p，`nan<0.05` 为 False → 打印"不显著"且 `ok=True`；全 NaN 时 `max(..., key=nan)` 静默返回第一个配置当"全体最优" | 统一 `ok/reason/n_valid` 字段；非有限值走"样本不足，无结论"分支。验收：把窗口压到 <750 天，三条命令必须输出"无结论"而非负结论 |
+| P0-6 已修 | `api/static/app.js:1483-1484`、`1491`、`1502` | 月度热力图缺值写 `'-'`，但两个 formatter 判的是 `p.value[0]`（月份索引），永远不为 `'-'` → 缺值走到 `p.value[2].toFixed(1)` 抛 `TypeError`；tooltip 也把 `'-'` 交给 `colOf` 并显示 `-%` | 判 `p.value[2] === '-'`（tooltip 与 label 各一处）。验收：构造缺月数据，控制台无异常、缺月格留空 |
+
+#### P1 应当修（口径偏差、稳健性、误导性展示）
+
+| # | 位置 | 问题 | 修复方向 |
+|---|---|---|---|
+| P1-1 已修 | `app.js:1006`、`1018-1020` vs `app.js:948-951`、`955-957` | 详情卡 `gap = (fit_r2_mean ?? 0) - (oos_r2 ?? 0)`：样本外 R² 失败（null）时 gap≈0.9 → 判"过拟合明显"、`cls:warn`。同一文件排名表在 948-949 明确注释"NaN/缺失不得当 0"并用 `hasGap` 保护，两处口径冲突。另详情卡 `1010` 用 `Math.abs(beta)`，而表格 955-957 已刻意去掉绝对值以警示负 beta | `oos_r2 == null` 时不判 gap；beta 统一有符号，负 beta 单独告警 |
+| P1-2 已修 | `research/report.py:547-553`；`output/results/E3_参数敏感性.csv`（108 行） | "共 108 组参数组合"实为 4 只基金 × 27 组合的**行数**；"随机取最大值必然为正"的论证分母被放大 4 倍 | 按 `(trend_slope,w_trend,kappa)` 去重计数，行数另列 |
+| P1-3 已修 | `research/report.py:647`、`652`、`675`、`759-764` | 仍硬编码"250 日 IC 接近 0 甚至为负"、"过拟合代价 0.77"、"横截面迁移 IR +0.341"、"分组前瞻收益不单调"、"多头胜率（≈随机）" | 全部改从 E1/E4/E9b 取数，缺数据时改为不含数字的定性句 |
+| P1-4 已修 | `research/report.py:266-271`、`436`、`715`、`729`、`453` | 只校验一列就无条件取另两列 → `KeyError`；`round(nan/nan)` → `ValueError`；多处 `f"{...:.0%}"` 直接输出 `nan%`；稳定态用 `_cls="good"` 而 CSS 只有 `.lead.ok` | 列存在性 + `to_numeric().dropna()`；统一 `_safe`；`"good"→"ok"` |
+| P1-5 已修 | `research/runinfo.py:94-99`、`129-135` | 指纹记 `DEFAULT_WINDOW_YEARS` 而非本次 `--window-years/--window-end`，`END_DATE` 完全不记 → "同指纹同结果"不成立；tmp 文件名固定 `run_fingerprint.json.tmp`，并发写会串 | 指纹接收本次窗口与 end；tmp 用唯一名 |
+| P1-6 已修 | `app.js:766-787`、`1682-1690`；`api/routes/tasks.py` 已有 cancel | 轮询无上限、无退避、无取消入口；服务重启导致 job 404 时会无限循环（`api()` 抛错后直接 return，尚可，但 404 期间无提示） | 加最大次数/退避；接 `/api/job/{jid}/cancel` 按钮 |
+| P1-7 已修 | `app.js:1604` | 滚动相关图 `yAxis min:0,max:1`，负相关被截断显示为 0 —— 负相关恰是分散化证据 | `min:-1` 或按数据范围自适应 |
+| P1-8 已修 | `research/experiments.py:52-57` | ICIR 固定 60 日分块，而 `h=250` 时块内外重叠 4 重 → `std(ic)` 低估、ICIR 高估；同时 `t=ic*sqrt(n/h)` 与分块口径互不相容 | 按 `h` 的不重叠步长分块，或统一用 NW t |
+| P1-9 已修 | `research/walkforward.py:167-182`、`222` | `mean_ir` 对不同配置使用**不同基金子集**，IR 不可比且 oracle 被抬高；`"选择一致性"` 输出 `{len(set(picks))}/{len(picks)} 折选出同一配置`，实际是"不同配置数/折数"，3 折各选不同配置会读成"3/3 一致" | 先取配置×基金共同可用集再求均值；文案改为"选出 N 种不同配置" |
+| P1-10 部分已修 | `funds/holdings.py:363-370`、`349-350`；`market/capital.py:63,140` | 持仓基准用**价格指数**（不含股息）对比**总回报**净值，未覆盖部分记 0 收益，而回测给空仓 1.5% 现金；docstring 却称"与基金真实收益口径一致"。另：资金情景 `side='buy' if target==1`（不判是否已持仓），部分成交后每个 target=1 的交易日都会继续补仓，与假设文本"仅在后续有新目标时继续尝试"不符 | 基准改全收益或补现金腿；明确偏差方向；资金情景二选一：改代码或改假设文本 |
+| P1-11 | `funds/holdings.py:57-106`、`224-233` | 行业映射由**当前**申万成分股并集构造并长期缓存（无失效），回溯 3 年以上存在幸存者偏差；未映射权重被"归一到 100%"吸收，"真实暴露合计 87~91%"无法区分现金与抓不到行业 | 缓存记抓取日/覆盖率并定期重建；输出 `unmapped_weight`，覆盖不足的期次不参与对比 |
+| P1-12 已修 | `tasks/sync.py::synchronize` 增量分支 | 增量合并用 `old.loc[old.index < incoming.index[0]]`，若数据源回补不足，旧区间中间行会被静默丢弃；`index_universe` 目标每次整表重写，`info` 用 setdefault 合并会留旧口径 | 改为按索引并集合并并断言差值；记录丢弃行数 |
+| P1-13 部分已修 | `api/routes/analysis.py:39-50`、`27-36` | `/api/corr` 在请求线程内直接 `load_panel`（可能触发 40+ 指数的联网抓取），绕过任务队列与 `max_jobs`，无法取消；`/api/name` 在缓存未命中时同样可能在请求内联网 | 首次取数走队列或至少加超时与并发上限 |
+| P1-14 已修 | `data/panels.py::align_prices` | 覆盖率不足时只 `print`，降级口径不写入结果 meta → 页面与报告看不到"价格被放宽/前向填充" | 降级信息进 meta 与 `warnings` |
+| P1-15 已修 | `data/providers/funds.py::calibrate_total_return` | 用 `interpolate(method="time")` 在**未来锚点**之间插值，严格说引入轻微前瞻（虽用于口径校准） | 改 `ffill`（只用当时及以前锚点），或在文档明确这是事后校准 |
+| P1-16 已修 | `research/charts.py:203-229`、`44-48`、`56-58` | 正收益柱用绿色 `DOWN`（与文件头"红涨绿跌"相反）；`_b64` 无 `try/finally: plt.close`；`_rebase` 空序列 `iloc[0]` 抛 `IndexError`，`build_all` 只 print 跳过而报告仍输出空 `<img>` | 正收益用 `UP`；补 `finally`；空序列返回 None 并在报告侧给文字说明 |
+| P1-17 已修 | `research/report.py:854-857` | `write_text` 非原子，失败留半截 HTML；路径固定 `report/回测报告.html`，多窗口/多基金并行互相覆盖 | tmp + `os.replace`，路径带窗口/基金 |
+
+#### P2 可延后（体验、一致性与清理）
+
+- `funds/payloads.py:522-528`：`corr['layers'][0]` 未防空，候选池为空时 `IndexError`；`n_zero` 实为"低于展示阈值"的数量，命名误导。
+- `funds/holdings.py:142`：`if d is None or len(d)` 逻辑写反（None 也进 `frames`）；`holdings.py:209/218` 的 `only_full=False` 因上游已 `dropna(季度)` 而无效；`research/universe.py` 的 `refresh` 形参在函数体内从未使用。
+- `funds/universe.py:283-290`：池文件损坏时静默回退 14 只便利样本（docstring 说明是有意回退，但调用方无告警）；`enrich([])`/全排除时 `KeyError` 而非空表。
+- `tasks/sync.py::start()` 无任何调用方（同步实际由 worker 以子进程启动），属死代码；`config.py:22` 注释称"旧版缓存文件会被自动清理"，但 `:28` 同段又写"不会被清扫"，且 `output/data/webcache` 仍留有 4 个 `result_v7_*` 文件（当前 `CACHE_VERSION=8`），无清理逻辑。
+- `app.js:996-1000`：`renderSelected()` 无结果时静默 return（当前调用路径安全，但无提示）；`drawResid` 的 `mx` 计算后未使用。
+- `report.py:723/745`：同一张 `figs['equity']` 被嵌入两次；`report.py:76-80` 的 `_verdict_badge` 与 `commands/report.py:143-156` 的 `_read_json_cols` 是死代码；`PCT_COLS` 中 `"正贡献比例"` 重复。
+- `runinfo.py:27-30`：`subprocess.run(text=True)` 未指定 encoding，Windows 中文 locale 下 git 输出解码失败会被吞成"（非 git 环境）"；`runinfo.py:36-44` 用 `__import__` 导入 duckdb/matplotlib 有副作用，缺失依赖记 `None` 后在报告里被过滤掉，看不出缺哪个。
+- `pyproject.toml:29`：`include` 里的 `src`、`webapp`、`webapp.api` 指向遗留空脚手架（`src/__init__.py`、空的 `src/migrations/`、`webapp/__init__.py`），打包会装出两个无意义的顶层包。
+- `cli/serve.py:13`：docstring 示例写作 `--host0.0.0.0`（缺空格，argparse 会报错），且路径写的是 `webapp/serve.py`；`Dockerfile:42` 设 `FIL_HOST=0.0.0.0` 但全项目无鉴权/反代说明，README 未声明"禁止直接暴露到公网"。
+- 测试计数不一致：本文件第 95 行"130 项回归"、第 111 行"78 项 unittest"与当前 200 项（另有 5 个脚本式回归不计入 `unittest discover`）不一致；`tests/README.md` 也未说明后者需单独运行。
+
+#### 复核后判定不成立（避免后续重复排查）
+
+- **CSV 的 UTF-8 BOM 导致报告 E1 静默跳过**：实测 `pd.DataFrame(...).to_csv(encoding='utf-8-sig')` 后用默认 `pd.read_csv` 读取，列名为 `基金`/`值`，BOM 已被 pandas C 解析器剥离。`commands/report.py:35` 无需改 `encoding`；但 `_e1_cols` 仍应加数值列白名单，防止长表格式下把 `前瞻期` 当数值列（列入 P1-3 的同类修复）。
+- **前端未检查 `res.ok`**：`app.js:475-483` 已检查非 2xx/202 并抛出后端 `error` 字段，不成立。
+- **`renderSelected()` 早退导致点击卡片错乱**：模型卡片只在结果渲染后生成，此时 `S.sel` 必有值，不成立（仅保留"静默 return 无提示"的 P2 观察）。
+
+#### 下一批待修（按优先级）
+
+1. **P1-10 剩余** 行业指数是价格指数（不含股息），对比总回报净值时每年低估 1.5~2.5%，目前只能在 docstring/meta 标注；要真正消除偏差需要全收益行业指数或股息率数据。另外 `market/capital.py` 的补仓口径与假设文本仍需二选一。
+2. **P1-11** 行业映射的时点性（当前用最新申万成分回溯，3 年以上存在幸存者偏差；需要历史成分数据，离线不可得）。
+3. **P1-13 剩余** `/api/corr` 仍在请求线程内取数（已加锁限流返回 429），彻底方案是并入任务队列。
+4. **P2** 全部：死代码/死参数（`only_full`、`universe.refresh`、`sync.start`、`_verdict_badge`、`_read_json_cols`）、`CACHE_VERSION` 注释自相矛盾且旧缓存未清理、`good` vs `ok`、打包脚手架 `src/`+`webapp/`、`--host0.0.0.0` 文档笔误、Docker 无鉴权说明、测试计数过期。
+
+#### 建议执行顺序
+
+1. P0-2/P0-3/P0-5：先把"结论文字"和"退化样本"修到不撒谎——它们直接决定这个工具能不能被引用。
+2. P0-1/P0-6：残差图与热力图是用户每天看的东西，错误展示比缺少功能更伤。
+3. P0-4、P1-10/P1-11：持仓基准的前瞻偏差与口径不一致，会影响 H3 的全部结论。
+4. P1-2/P1-3/P1-8/P1-9：重算报告前必须先修分母、硬编码与 ICIR 口径，否则报告数字仍不可复现。
+5. P1-6/P1-7/P1-1：前端交互与展示口径，最后统一。
+6. P2 随手清理，不单独开轮次。
+
+**验收要求**：每条修复都要有对应回归（P0 用构造数据断言文字/数值符号，P1 用最小样本断言字段与口径），并在 `docs/` 对应记录里写明"修的是哪条、被哪条测试固定"。本轮只做审查，未修改任何代码，未重算历史 E0–E9 数值。
+
+**本次未覆盖**：真实联网抓取（akshare 限流/字段变更）、真实浏览器渲染与 390px 布局、长时间运行与并发压力、Windows 回收站导致的测试 teardown 异常（已确认与代码无关）。
+
 ### 股票与指数优化架构（2026-10-31）
 
 目标：衡量新增信息能否改善样本外判断；上涨方向准确率、概率质量和扣费交易收益分别评估。原规则作为固定基线保留，不按本次展示区间的排名自动选择策略。
