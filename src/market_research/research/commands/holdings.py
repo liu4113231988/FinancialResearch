@@ -120,7 +120,8 @@ def main(argv=None, *, prog=None):
             codes = list(C.EXTENDED_FUNDS.keys())
 
     print(f"[holdings] 分析窗口 {win_start} 起 · 只用半年报/年报（完整持仓）· "
-          f"披露滞后 {H.DISCLOSURE_LAG_DAYS} 天")
+          f"披露滞后按法定时限：Q2 {H.disclosure_lag_days('2024-06-30')} 天（8/31）、"
+          f"Q4 {H.disclosure_lag_days('2024-12-31')} 天（次年 3/31）")
 
     industry_map = H.load_industry_map(refresh=args.refresh)
     if industry_map.empty:

@@ -200,7 +200,14 @@ def synchronize(asset, current):
             raise ValueError("数据源缺失已有历史交易日，拒绝部分覆盖")
         frame = incoming
     else:
-        frame = pd.concat([old.loc[old.index < incoming.index[0]], incoming])
+        # 增量：数据源可能只回补最近若干天。旧写法 `old.index < incoming.index[0]`
+        # 会把「旧末段与 incoming 起点之间」的行一起丢掉（数据源少回补几天即可触发）。
+        # 这里保留三段：incoming 之前 / incoming / incoming 之后。
+        head = old.loc[old.index < incoming.index[0]]
+        tail = old.loc[old.index > incoming.index[-1]]
+        frame = pd.concat([head, incoming, tail]).sort_index()
+        if len(frame) < len(old):
+            raise ValueError("增量合并后行数减少，保留旧数据")
     meta = {"kind": asset["kind"], "code": asset["code"], "basis": asset["basis"], "through": end,
             "info": {**incoming.attrs, "fetched_at": current.isoformat(), "data_end": frame.index[-1].date().isoformat()}}
     storage.write(name, frame, meta)

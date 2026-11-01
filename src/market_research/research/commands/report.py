@@ -130,8 +130,13 @@ def main(argv=None, *, prog=None):
         ).round(4).reset_index()
         g["参数组合数"] = g["参数组合数"].astype(int)
         experiments["E3_参数敏感性"] = g
+        # 行数 ≠ 组合数：E3 产物是「基金 × 组合」长表（4 基金 × 27 组合 = 108 行），
+        # 报告正文说"108 组参数组合"会把参数规模放大 4 倍。
+        _keys = [c for c in ("趋势窗口", "趋势权重", "kappa") if c in e3.columns]
+        combos = (int(e3[_keys].drop_duplicates().shape[0]) if _keys else len(e3))
         experiments["_e3_stat"] = {
             "n": len(e3),
+            "combos": combos,
             "pos": float((e3["超额夏普"] > 0).mean()),
             "mean": float(e3["超额夏普"].mean()),
             "median": float(e3["超额夏普"].median()),

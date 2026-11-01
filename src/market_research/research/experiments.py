@@ -49,12 +49,16 @@ def ic_term_structure(sig: pd.DataFrame, nav: pd.Series,
                              "RankIC": np.nan, "ICIR": np.nan, "t值": np.nan})
                 continue
             ic = float(v["s"].corr(v["f"], method="spearman"))
-            # 分块 IC（每块 60 日）用于算 ICIR
-            blocks = [v.iloc[i:i + 60] for i in range(0, len(v) - 59, 60)]
+            # ★ 分块长度必须 ≥ 前瞻期：固定 60 日时，h=250 的标签在相邻块间
+            #   重叠 4 重，std(ic) 被低估、ICIR 被高估。分块数不足 4 时不给 ICIR。
+            block = max(int(h), 20)
+            blocks = [v.iloc[i:i + block]
+                      for i in range(0, len(v) - block + 1, block)]
             ics = [float(b["s"].corr(b["f"], method="spearman")) for b in blocks
                    if len(b) > 20]
-            icir = float(np.mean(ics) / np.std(ics)) if np.std(ics) > 1e-9 else np.nan
-            t = ic * np.sqrt(len(v) / max(h, 1))     # 重叠样本的粗略 t 值
+            icir = (float(np.mean(ics) / np.std(ics))
+                    if len(ics) >= 4 and np.std(ics) > 1e-9 else np.nan)
+            t = ic * np.sqrt(len(v) / max(h, 1))     # 按非重叠块数的粗略 t 值
             rows.append({"信号": label, "前瞻期": f"{h}日", "样本": len(v),
                          "RankIC": ic, "ICIR": icir, "t值": t})
     return pd.DataFrame(rows)

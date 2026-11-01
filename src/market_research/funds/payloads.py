@@ -323,9 +323,12 @@ def model_payload(rep: ModelReport, nav_oos: pd.Series,
         },
         "alpha": alpha_stats["stats"],
         "residual": {
+            # ★ 残差必须与图上两条线同尺度：fund/synth 都已归一到起点 1，
+            #   若这里用未归一的 fund_aligned - syn_nav，得到的是「净值水平差」
+            #   （实测 1.65~3.28，全部为正），图上会被误读成"长期正偏离"。
             "dates": _dates(syn.index[::step]),
             "value": [_jnum(v, 5) for v in
-                      (fund_aligned - syn_nav).reindex(
+                      (fund_line - syn_line).reindex(
                           syn.index[::step]).values],
         },
     }

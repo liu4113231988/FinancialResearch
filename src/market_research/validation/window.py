@@ -135,6 +135,15 @@ def apply_window(args, verbose: bool = True) -> Tuple[str, Optional[str]]:
                           getattr(args, "window_end", None))
     C.START_DATE = s
     C.END_DATE = e
+    # ★ 运行指纹记录的是 DEFAULT_WINDOW_YEARS，而不是这次实际用的窗口。
+    #   不写回的话，`--window-years 2` 跑出来的报告会声称自己是 5 年窗口。
+    try:
+        from datetime import date
+        start_d = date.fromisoformat(s)
+        end_d = date.fromisoformat(e) if e else date.today()
+        C.DEFAULT_WINDOW_YEARS = round((end_d - start_d).days / 365.25, 2)
+    except Exception:                                        # noqa: BLE001
+        pass
     if verbose:
         print(f"[窗口] 分析窗口 {s} ~ {e or '最新'}"
               + (f"（{getattr(args, 'window_years', None)} 年）"

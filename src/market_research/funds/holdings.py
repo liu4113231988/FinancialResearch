@@ -45,9 +45,22 @@ import pandas as pd
 import market_research.config as C
 from market_research.data.files import _atomic_csv_write
 
-# 披露滞后的保守取值（自然日）。季末 → 公布：Q2 约 7 月下旬、Q4 约 1 月下旬，
-# 法定披露截止分别是 7/31 与 1/31。取 45 天留出余量。
-DISCLOSURE_LAG_DAYS = 45
+# 披露滞后（自然日）。★ 完整持仓（全部持仓明细）只出现在**半年报**与**年报**：
+#   半年报法定 8/31 前披露（季末 +62 天），年报次年 3/31 前（季末 +90 天）。
+#   旧实现统一用 45 天，等于让 Q2/Q4 的持仓提前 17/45 天可用 —— 会引入前瞻偏差。
+#   Q1/Q3 只有前十大（季报，季末后 15 个工作日内），用 31 天保守代替。
+DISCLOSURE_LAG_DAYS = 45  # 仅当季末月份无法识别时的兜底
+
+_LAG_BY_MONTH = {6: 62, 12: 90, 3: 31, 9: 31}
+
+
+def disclosure_lag_days(qend) -> int:
+    """某期持仓的法定披露滞后（自然日）。"""
+    try:
+        month = pd.Timestamp(qend).month
+    except Exception:                                        # noqa: BLE001
+        return DISCLOSURE_LAG_DAYS
+    return _LAG_BY_MONTH.get(month, DISCLOSURE_LAG_DAYS)
 
 # 缓存版本：改行业口径或持仓列解析方式时必须 +1
 HOLDINGS_CACHE_VERSION = 1
@@ -292,7 +305,7 @@ def align_vs_rbsa(weights: pd.DataFrame, exposure: pd.DataFrame,
         dev = (ws - es)
         rows.append({
             "季末": qend,
-            "披露约": qend + pd.Timedelta(days=DISCLOSURE_LAG_DAYS),
+            "披露约": qend + pd.Timedelta(days=disclosure_lag_days(qend)),
             "RBSA重估日": weights.index[weights.index.searchsorted(
                 qend, side="right") - 1],
             "共同行业数": len(common),
@@ -341,17 +354,24 @@ def align_vs_rbsa(weights: pd.DataFrame, exposure: pd.DataFrame,
 
 # ====================================================================== 持仓基准
 def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
-                      lag_days: int = DISCLOSURE_LAG_DAYS) -> pd.Series:
+                      lag_days: Optional[int] = None,
+                      cash_rate: float = 0.015) -> pd.Series:
     """
     只用真实持仓构造的基准组合**日收益**序列（index=交易日）。
 
-    做法：每期行业暴露 × 对应行业指数日收益，加权求和。
-    暴露是"占净值比例"（含现金），所以未覆盖部分按现金（0 收益）处理 ——
-    这让它天然比"满仓指数组合"低一部分收益，与基金的真实收益口径一致。
+    做法：每期行业暴露 × 对应行业指数日收益，加权求和；未覆盖部分
+    （现金/债券/未映射行业）按 `cash_rate` 年化计息 —— 旧实现记 0 收益，
+    比"空仓也有货币收益"的真实口径更差，会把基金经理的现金管理算成 alpha。
 
-    ★ **披露滞后必须处理**：Q2 持仓季末 6/30，但要到 7 月中下旬才公布。
-      因此该期暴露从 `季末 + lag_days` 起生效，而不是 6/30。
+    ★ 指数口径：panel 里的行业指数是**价格指数**（不含股息），
+      而基金净值是**总回报**。因此本基准每年系统性低估约 1.5~2.5% 股息，
+      与基金对比时该部分会被误判为"选股/择时能力"。输出 meta 已标注，
+      报告中也应把这段偏差说明清楚。
+    ★ **披露滞后必须处理**：Q2 完整持仓见半年报（8/31，季末 +62 天），
+      Q4 见年报（次年 3/31，季末 +90 天）。因此该期暴露从
+      `季末 + disclosure_lag_days(季末)` 起生效，而不是 6/30。
       否则等于用未来信息构造历史基准，比出来的收益不可信。
+      `lag_days` 显式传入时对所有期使用同一数值（仅用于敏感性分析）。
     """
     if exposure is None or exposure.empty or panel is None or panel.empty:
         return pd.Series(dtype=float)
@@ -363,7 +383,8 @@ def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
     rets = np.log(panel[cols].astype(float)).diff()
     parts = []
     for qend in exposure.index:
-        start = qend + pd.Timedelta(days=int(lag_days))
+        lag = int(lag_days) if lag_days is not None else disclosure_lag_days(qend)
+        start = qend + pd.Timedelta(days=lag)
         # ★ 单位换算：exposure 的"占净值比例"是**百分点**（37.03 = 37.03%），
         #   而 rets 是小数日收益。不除 100 会让每日收益被放大近百倍
         #   （实测症状：年化 −95%、年化波动 1650%）。
@@ -373,9 +394,14 @@ def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
         seg = rets.loc[rets.index >= start]
         if seg.empty:
             continue
+        # 未覆盖部分（现金/债券/未映射行业）按年化 cash_rate 计息，
+        # 否则空仓期记 0 收益，等于把货币收益白送成基金经理的 alpha。
+        cash_weight = max(0.0, 1.0 - float(w.sum()))
+        daily_cash = (1.0 + float(cash_rate)) ** (1.0 / 252.0) - 1.0
         # 该期暴露从披露日一直生效，直到被**更晚一期**覆盖（下方按期末顺序赋值，
         # 后者覆盖前者）—— 这正是"每半年按最新披露调仓"的行为。
-        parts.append((seg.index, (seg * w).sum(axis=1)))
+        parts.append((seg.index,
+                      (seg * w).sum(axis=1) + cash_weight * daily_cash))
     if not parts:
         return pd.Series(dtype=float)
     idx = pd.DatetimeIndex(sorted(set().union(*[p[0] for p in parts])))

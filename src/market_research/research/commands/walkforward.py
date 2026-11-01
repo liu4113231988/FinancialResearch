@@ -76,6 +76,10 @@ def main(argv=None, *, prog=None):
     print("\n" + "=" * 108)
     print("E9 · 按管理人分折的 walk-forward 验证（3×4 = 12 个候选配置，纯趋势通道）")
     print("=" * 108)
+    if not res.get("ok", True):
+        print(f"\n无结论：{res.get('reason')}")
+        print("这表示'没有验证'，不能读成'验证后为负'。")
+        return 1
     print(f"\n候选配置：{len(default_grid())} 个（信号窗口 {sorted({g['win'] for g in default_grid()})} "
           f"× 再平衡 {sorted({g['reb'] for g in default_grid()})}）")
     print("\n[逐折结果]")
@@ -95,23 +99,27 @@ def main(argv=None, *, prog=None):
     cost = s["参数选择过拟合代价"]
     mig = s["迁移配置在测试集均值IR"]
     print("\n[判定]")
-    if mig > 0 and cost < 0.10:
+    if not (isinstance(mig, float) and np.isfinite(mig)) \
+            or not (isinstance(cost, float) and np.isfinite(cost)):
+        print(f"  无结论：有效折数 {s.get('有效折数', 0)}，"
+              "测试集 IR 不足以计算迁移/过拟合代价")
+        ok = None
+    elif mig > 0 and cost < 0.10:
         verdict = ("★ 参数选择基本没有过拟合，且迁移后仍为正 —— "
                    "这条线索值得在独立样本上继续验证")
         ok = True
+        print(f"  {verdict}")
     elif mig > 0:
         verdict = (f"★ 迁移后仍为正，但过拟合代价 {cost:+.3f} 不小 —— "
                    "全样本选参的结论打了折扣")
         ok = None
+        print(f"  {verdict}")
     else:
         verdict = ("★ 迁移后不再为正 —— E4 的结论是参数选择过拟合的产物，"
                    "不能作为候选线索")
         ok = False
-    print(f"  {verdict}")
-    print(f"  对照：全体样本直接选最优的 IR = "
-          f"{max([res['table'][c][(int(g[0]), int(g[1]))]['超额夏普'] for c in res['table'] for g in [(k[0], k[1])]] if False else [0.0]):+.3f}"
-          if False else
-          f"  （E4 报告的 +0.352 是全样本口径，这里的固定配置迁移 IR 才是可实现值）")
+        print(f"  {verdict}")
+    print("  对照：E4 报告的是全样本口径；这里的固定配置迁移 IR 才是可实现值")
 
     # ---- E9b：真正的时间向前验证（P0-03）
     # walk_forward 的每一折都覆盖了同一段时间，只隔离了管理人；

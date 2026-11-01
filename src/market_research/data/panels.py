@@ -27,15 +27,23 @@ def align_prices(px: pd.DataFrame, nav: pd.Series, max_ffill: int = 5,
     df["__FUND__"] = nav.reindex(df.index)
 
     # 覆盖率过滤：优先剔除"中途停编"的指数，避免整段历史被截断
+    warnings = []
     cov = df.notna().mean()
     dropped = cov[(cov < min_coverage) & (df.columns != "__FUND__")].index.tolist()
     if dropped:
-        print(f"[data] 覆盖率不足已剔除 {len(dropped)} 个：" +
-              ", ".join(f"{c}({C.NAME_OF.get(c, c)})" for c in dropped))
+        message = (f"覆盖率不足已剔除 {len(dropped)} 个：" +
+                   ", ".join(f"{c}({C.NAME_OF.get(c, c)})" for c in dropped))
+        # 库函数不要用 print 打日志：调用方（Web/CLI）需要拿到这句话放进 meta
+        LOG.warning("%s", message)
+        warnings.append(message)
     df = df.drop(columns=dropped)
 
     # 掐头去尾并剔除中间缺失日（连续缺失超过 max_ffill 的交易日直接放弃）
-    return df.dropna()
+    out = df.dropna()
+    # ★ 降级必须留痕：否则前端/报告只看到"对齐后的干净表"，
+    #   不知道口径已经从"全候选池"变成了"剔除后的子集"。
+    out.attrs["warnings"] = warnings
+    return out
 
 
 def to_log_returns(df: pd.DataFrame) -> pd.DataFrame:
@@ -224,12 +232,14 @@ def load_panel(fund_code: str, start: Optional[str] = None,
               f"{nav.index[0].date()} ~ {nav.index[-1].date()}")
     px = load_index_universe(fs, end, refresh=refresh, verbose=verbose)
     out = align_prices(px, nav)
+    warnings = list(out.attrs.get("warnings") or [])
 
     # 裁剪到分析窗口
     if start:
         out = out.loc[out.index >= pd.Timestamp(start)]
     if end:
         out = out.loc[out.index <= pd.Timestamp(end)]
+    out.attrs["warnings"] = warnings
     if out.empty:
         raise ValueError(
             f"{fund_code} 在 {start or '全区间'} ~ {end or '最新'} 内没有可用数据"

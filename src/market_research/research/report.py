@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html as _html
+import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -164,7 +165,8 @@ def _top_holdings(exposure: pd.DataFrame, n: int = 3, thr: float = 0.03) -> str:
         d = exposure[exposure["权重"] > thr].head(n)
         if d.empty:
             d = exposure.head(n)
-        return "、".join(f"{r['名称']} {r['权重']:.0%}" for _, r in d.iterrows())
+        return "、".join(f"{r['名称']} {_safe(r['权重'], '.0%')}"
+                        for _, r in d.iterrows())
     except Exception:      # noqa: BLE001
         return "—"
 
@@ -180,6 +182,38 @@ def _dd_comment(delta) -> str:
     if d < -0.005:
         return (f"<b>回撤方面策略反而更深（比对照深 {abs(d):.1%}）</b>。")
     return "回撤与对照组基本持平。"
+
+
+def timing_comparison(tc: dict) -> tuple:
+    """
+    择时净贡献的三态措辞：(css, 正文, 结论)。
+
+    ★ 旧版无条件写"策略跑输恒定仓位对照"，换窗口/换基金后与数据相反；
+      缺失值又被当成负结论。这里按 `年化收益` 的符号分支，非有限值走"无法计算"。
+    """
+    try:
+        ret = float((tc or {}).get("年化收益"))
+        if not np.isfinite(ret):
+            ret = None
+    except Exception:                                        # noqa: BLE001
+        ret = None
+    fmt = _safe((tc or {}).get("年化收益"), "+.2%")
+    ir = _safe((tc or {}).get("夏普"), "+.3f")
+    if ret is None:
+        return ("", f"相对恒定仓位对照的净贡献无法计算（{fmt}）。",
+                "对照结论取决于跨基金分布，单只基金不足以判断。")
+    if ret > 0:
+        return ("ok",
+                f"策略<b>跑赢</b>恒定仓位对照 <b>{fmt}</b>（年化），超额日收益 IR {ir}。",
+                "但单只基金的领先不足以证明择时能力——仍需看信号质量与跨基金"
+                "分布/多重检验。")
+    if ret < 0:
+        return ("bad",
+                f"策略<b>跑输</b>恒定仓位对照 <b>{fmt}</b>（年化），超额日收益 IR {ir}。",
+                "这说明不仅没有择时能力，还在交易噪声与费用上产生了额外损失。")
+    return ("",
+            f"策略与恒定仓位对照<b>持平</b>（{fmt}，年化），超额日收益 IR {ir}。",
+            "两者表现相当，说明策略的全部差异都来自「仓位水平」，而非「择时能力」。")
 
 
 def _mget(m: pd.DataFrame, label: str, col: str, spec: str = ".4f") -> str:
@@ -198,6 +232,20 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     ctrl = main["backtest"]["control_name"]
     tc = main["backtest"]["timing_contrib"]
     top_holdings = _top_holdings(main["exposure"])
+    # 最新一期权重和 = 该期估计的股票仓位。auto_equity=True（默认）时它逐窗口
+    # 变化，报告里不能再写死 0.90（旧文案与 config 注释自相矛盾）。
+    try:
+        _w_latest = pd.to_numeric(main["exposure"]["权重"], errors="coerce").dropna()
+        _sumw = float(_w_latest.sum()) if len(_w_latest) else None
+    except Exception:                                        # noqa: BLE001
+        _sumw = None
+    _sumw_s = _safe(_sumw, ".0%")
+    _bounds = C.RBSA.get("equity_bounds", (0.20, 1.00))
+    _bounds_txt = f"{float(_bounds[0]):.2f}~{float(_bounds[1]):.2f}"
+    _eq_txt = f"{float(C.RBSA.get('equity_ratio', 0.90)):.2f}"
+
+    # ---- 择时净贡献的方向：三态措辞，不能无条件写"跑输"
+    _cmp_cls, _cmp_text, _timing_tail = timing_comparison(tc)
 
     # ---------------- 结论数字一律从数据算，不硬编码（P0-07 收尾）
     # 旧版在这里写死了"13 只跑输""28.7% 为正贡献""+0.147 / 86% 为正"等数字。
@@ -218,6 +266,10 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     _e3 = experiments.get("_e3_stat") or {}
     _e3_pos = _e3.get("pos")
     _e3_n = _e3.get("n")
+    # 组合数（趋势窗口×趋势权重×kappa）与行数不同：E3 产物是「基金 × 组合」长表，
+    # 直接用 len() 会把 4 只基金的行数说成 4 倍参数组合。
+    _e3_combos = _e3.get("combos") or _e3_n
+    _e3_n_txt = f"{_e3_combos} 组" if _e3_combos else "多组"
     _e4 = experiments.get("E4_周期匹配")
     _e4_mean = _e4_pos = _e4_win = _e4_reb = None
     if isinstance(_e4, pd.DataFrame) and not _e4.empty \
@@ -263,12 +315,21 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     _e9b_mig = _e9b.get("迁移配置在测试期均值IR")
     _e9b_cost = _e9b.get("参数选择过拟合代价")
     _osp = _ev.get("overfit_split")
-    if isinstance(_osp, pd.DataFrame) and not _osp.empty and "运气部分(oracle−均值)" in _osp.columns:
-        _tot = float(pd.to_numeric(_osp["总代价(oracle−迁移)"], errors="coerce").mean())
-        _luck = float(pd.to_numeric(_osp["运气部分(oracle−均值)"], errors="coerce").mean())
-        _over = float(pd.to_numeric(_osp["过拟合部分(均值−迁移)"], errors="coerce").mean())
-        _luck_pct = round(_luck / _tot * 100) if _tot else None
-        _over_pct = round(_over / _tot * 100) if _tot else None
+    _osp_cols = ("运气部分(oracle−均值)", "总代价(oracle−迁移)",
+                 "过拟合部分(均值−迁移)")
+    if (isinstance(_osp, pd.DataFrame) and not _osp.empty
+            and all(c in _osp.columns for c in _osp_cols)):
+        def _finite_mean(col):
+            v = pd.to_numeric(_osp[col], errors="coerce")
+            v = v.replace([np.inf, -np.inf], np.nan).dropna()
+            return float(v.mean()) if len(v) else float("nan")
+        _tot, _luck, _over = map(_finite_mean, _osp_cols)
+        # 总代价为 0/非有限时不能算占比（旧写法 round(nan/nan) 会直接抛 ValueError）
+        _ok_ratio = np.isfinite(_tot) and abs(_tot) > 1e-12
+        _luck_pct = (round(_luck / _tot * 100)
+                     if _ok_ratio and np.isfinite(_luck) else None)
+        _over_pct = (round(_over / _tot * 100)
+                     if _ok_ratio and np.isfinite(_over) else None)
     else:
         _luck_pct = _over_pct = None
     _power = _ev.get("power")
@@ -300,6 +361,31 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
             _dev_max_abs = float(vals.abs().max()) if len(vals) else None
     _val_250 = _ic_of("赛道估值通道", "250日")
     _val_120 = _ic_of("赛道估值通道", "120日")
+    _trend_ic250 = _ic_of("趋势通道", "250日")
+    _trend_ic_txt = (f"{_trend_ic250:+.4f}" if _trend_ic250 is not None
+                     else "未从 E1 取得")
+    # 分组单调性与多头胜率也必须从数据判断，不能写死
+    _mono_txt = "未计算"
+    try:
+        _gv = pd.to_numeric(main["backtest"]["groups"]["平均前瞻收益"],
+                            errors="coerce").dropna().values
+        if len(_gv) >= 2:
+            _d = np.diff(_gv)
+            if np.all(_d > 0):
+                _mono_txt = "单调递增"
+            elif np.all(_d < 0):
+                _mono_txt = "单调递减"
+            else:
+                _mono_txt = "不单调"
+    except Exception:                                        # noqa: BLE001
+        pass
+    _win = main.get("backtest", {}).get("win_long")
+    try:
+        _win = float(_win) if _win is not None else None
+    except Exception:                                        # noqa: BLE001
+        _win = None
+    _win_txt = ("随机附近" if _win is not None and 0.45 <= _win <= 0.55
+                else "明显偏离随机" if _win is not None else "未计算")
     # 综合分（融合信号）各前瞻期 IC —— 旧版只描述单个通道，漏掉了这条最有力的证据
     _fused_neg = None
     _fused_worst = None
@@ -583,7 +669,7 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
                    + _table((cell_pos * 100).round(0).reset_index(), index=False)
                    + f'<div class="lead ok">最优格子为 <b>{bw} 日信号窗口 + '
                      f'{br} 日再平衡</b>，跨基金平均超额夏普 <b>{bmean:+.3f}</b>，'
-                     f'<b>{bpos:.0%}</b> 的基金为正。表面上看，"周期错配"的假设被证实了。</div>'
+                     f'<b>{_safe(bpos, ".0%")}</b> 的基金为正。表面上看，"周期错配"的假设被证实了。</div>'
                    + '<div class="lead warn"><b>但这个结论经不起三重反证：</b>'
                      '① E1 的 IC 期限结构并不支持——趋势通道在该窗口上的前瞻 IC '
                      '接近 0 甚至为负，收益预测层面找不到对应信息；'
@@ -629,27 +715,29 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
   <div class="card"><div class="h">❌ 不成立：日频择时</div><div class="b">
     {_t("{n_fund} 只基金中 <b>{n_neg} 只</b>在默认参数下跑输「恒定仓位对照」，"
         "RankIC 有 <b>{n_rk_neg}/{n_fund}</b> 只为负，"
-        "{e3_n} 组参数网格中 <b>{e3_pos:.1%}</b> 为正贡献。",
-        "默认参数下多数基金跑输「恒定仓位对照」，RankIC 以负为主，"
-        "参数网格的正贡献比例接近随机。",
-        n_fund=_n_fund or None, n_neg=_n_neg or None,
+        "{e3_combos} 组参数组合中 <b>{e3_pos:.1%}</b> 为正贡献。",
+        "当前没有完整的跨基金汇总，无法给出跑输只数与网格正贡献比例；"
+        "下方实验表只反映本次输入的样本。",
+        n_fund=_n_fund or None,
+        n_neg=_n_neg if _n_fund else None,
         n_rk_neg=_n_rk_neg if _n_fund else None,
-        e3_n=_e3_n, e3_pos=_e3_pos)}
+        e3_combos=_e3_combos, e3_pos=_e3_pos)}
     病因：交易噪声 + 短期反转 + 平均仓位被压低到
     {_safe(main['backtest']['avg_position'], '.0%')}
     （★ 这是**该方案的时间平均仓位**，不是基金真实股票仓位；后者看 β 隐含仓位）。</div></div>
 
   <div class="card"><div class="h">⚠️ 存疑：长周期线索</div><div class="b">
     {_t("{w} 日信号窗口 + {r} 日再平衡的平均超额夏普 <b>{mean:+.3f}</b>"
-        "（{pos:.0%} 基金为正），",
+        "（{pos} 基金为正），",
         "长周期（约半年再平衡）格子出现了正超额夏普，",
-        w=_e4_win, r=_e4_reb, mean=_e4_mean, pos=_e4_pos)}
-    但 <b>四重反证</b>：IC 期限结构不支持（250 日 IC 接近 0 甚至为负）、
+        w=_e4_win, r=_e4_reb, mean=_e4_mean,
+        pos=_safe(_e4_pos, ".0%") if _e4_pos is not None else None)}
+    但 <b>四重反证</b>：IC 期限结构不支持（趋势通道 250 日 IC <b>{_trend_ic_txt}</b>）、
     是 12 格网格里的最优格子（选择偏差）、
     相邻格子无连续参数高原、
     <b>E9b 时间向前验证给出迁移 IR {_t(_e9b_mig_s, "为负（详见 E9b 输出）", v=_e9b_mig_s)}</b>
     ——训练期选出的参数在未来不再为正。<b>只能算候选假设。</b><br/>
-    <span style="font-size:12px;color:#64748b">注意别把"过拟合代价 {_t(_e9b_cost_s, '0.77', v=_e9b_cost_s)}"读成
+    <span style="font-size:12px;color:#64748b">注意别把"过拟合代价 {_t(_e9b_cost_s, '—', v=_e9b_cost_s)}"读成
     "参数选择过拟合"：拆解后其中 <b>{_t(_luck_s, '大部分', v=_luck_s)} 来自"从 12 个候选里挑最大值"的抽签运气，
     真实过拟合为 {_t(_over_s, '很小甚至为负', v=_over_s)}</b>（即训练期选择相对平均水平甚至略好）。
     真正的问题是<b>整个候选集在测试期的 IR 均值为负</b>，不是选参选错了。</span></div></div>
@@ -672,7 +760,7 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
 这批基金会<b>几乎全部显示为正超额收益</b>。
 那是 3×4 网格搜索的产物，不是能力。任何只给出"最优参数回测曲线"的研究
 都应当被高度警惕——本报告因此明确给出<b>固定参数的跨基金分布</b>与<b>网格正贡献比例</b>，
-并额外给出<b>时间向前验证（E9b）</b>：横截面迁移 IR +0.341 看似成立，
+并额外给出<b>时间向前验证（E9b）</b>：按管理人分组的横截面迁移看似成立，
 但时间维度迁移 IR 为 {_t('<b>' + _e9b_mig_s + '</b>' if _e9b_mig_s else '负值', '负值', v=_e9b_mig_s)}；
 且该代价里 {_t(_luck_s, '大部分', v=_luck_s)} 是挑最大值的运气，
 真实过拟合为 {_t(_over_s, '很小甚至为负', v=_over_s)}
@@ -685,9 +773,12 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
 <p>假设基金日收益 r<sub>f,t</sub> 可以被一组指数的线性组合解释：</p>
 <p style="text-align:center;font-size:16px;color:#1e293b">
 r<sub>f,t</sub> = Σ w<sub>i</sub> · r<sub>i,t</sub> + ε<sub>t</sub>
-&nbsp;&nbsp;s.t.&nbsp; w<sub>i</sub> ≥ 0, &nbsp; Σw<sub>i</sub> = 0.90</p>
+&nbsp;&nbsp;s.t.&nbsp; w<sub>i</sub> ≥ 0, &nbsp; Σw<sub>i</sub> = w<sub>t</sub></p>
 <p>三个约束都有现实含义：<span class="tag">非负</span>公募不能做空指数；
-<span class="tag">和为股票仓位</span>主动权益基金约九成仓运作；
+<span class="tag">和为股票仓位</span>w<sub>t</sub> 逐窗口估计（<code>auto_equity=True</code>，
+裁剪区间 {_bounds_txt}；本基金最新一期为 <b>{_sumw_s}</b>）。
+只有固定仓位模式才把 w<sub>t</sub> 固定为 <code>equity_ratio={_eq_txt}</code>，
+不能用它代替实际仓位；
 <span class="tag">稀疏</span>投资者只需要知道 3~6 个关键指数。</p>
 <p>实现上是两阶段：先用<b>非负 ElasticNet</b> 在四十余个候选指数上做
 滚动原点交叉验证选正则强度，筛出稀疏支撑集；再在支撑集上做
@@ -712,7 +803,7 @@ r<sub>f,t</sub> = Σ w<sub>i</sub> · r<sub>i,t</sub> + ε<sub>t</sub>
 收益天然更低、回撤天然更小。只和「买入持有」比，会把
 <b>“仓位降低”误认为“择时能力”</b>。</p>
 <p>因此我们构造对照组：<b>恒定仓位 = 策略的时间平均仓位
-（本基金为 {main['backtest']['avg_position']:.0%}）</b>。
+（本基金为 {_safe(main['backtest'].get('avg_position'), '.0%')}）</b>。
 只有当策略<b>跑赢同一平均仓位下的恒定持仓</b>，才说明择时真的创造了价值。</p>
 <p>信号质量用四类指标衡量：RankIC / ICIR（秩相关及其稳定性）、
 五分组前瞻收益单调性、择时胜率、年化双边换手率。</p>
@@ -724,7 +815,8 @@ r<sub>f,t</sub> = Σ w<sub>i</sub> · r<sub>i,t</sub> + ε<sub>t</sub>
 
 <h3>3.1 风格分解：这只基金到底在赌什么</h3>
 {_fig(figs.get('exposure',''), '风格暴露演变——滚动 RBSA 权重堆叠图')}
-<p>最新一期权重（每 20 日重估，权重和为股票仓位假设 0.90）：</p>
+<p>最新一期权重（每 {C.RBSA['refit']} 个交易日重估，权重和 <b>{_sumw_s}</b>
+= 该期估计的股票仓位，逐期变化）：</p>
 {exp_tbl}
 <p>R² 长期维持在 {main['fit_diag']['r2'].min():.2f}~{main['fit_diag']['r2'].max():.2f}，
 说明这只基金<b>几乎可以被少数几个行业指数完全复制</b>——
@@ -746,21 +838,19 @@ r<sub>f,t</sub> = Σ w<sub>i</sub> · r<sub>i,t</sub> + ε<sub>t</sub>
 {metrics_tbl}
 {_fig(figs.get('variants',''), '对照实验：各方案横向对比（灰=单通道，橙=恒定仓位对照，红=融合策略，蓝=买入持有）')}
 {_fig(figs.get('drawdown',''), '回撤对比')}
-<div class="lead bad">策略年化 {_mget(m,'择时策略(融合)','年化收益','.2%')}，
+<div class="lead {_cmp_cls}">策略年化 {_mget(m,'择时策略(融合)','年化收益','.2%')}，
 买入持有 {_mget(m,'买入持有(100%)','年化收益','.2%')}，恒定仓位对照
-{_mget(m,ctrl,'年化收益','.2%')}。<b>策略跑输恒定仓位对照
-{_safe(tc.get('年化收益'), '+.2%')}（年化），夏普 {_safe(tc.get('夏普'), '+.3f')}</b>。
+{_mget(m,ctrl,'年化收益','.2%')}。{_cmp_text}
 {_dd_comment(tc.get('最大回撤'))}
-<b>而这正是关键</b>：恒定对照组只是把仓位固定在策略的平均水平
+<b>对照设计</b>：恒定对照组只是把仓位固定在策略的平均水平
 （{_safe(main['backtest']['avg_position'], '.0%')}，★ 同上：这是方案的平均仓位，
-不是基金真实股票仓位），
-并没有做任何"择时"。<b>两者表现相当，说明策略的全部差异都来自"仓位水平"，而非"择时能力"。</b></div>
+不是基金真实股票仓位），并没有做任何"择时"。{_timing_tail}</div>
 
 <h3>3.4 信号有效性</h3>
 {_fig(figs.get('ic',''), '五分组前瞻收益与滚动 RankIC')}
-<p>分组前瞻收益<b>不单调</b>，RankIC = {_safe(main['backtest']['ic'], '+.3f')}，
+<p>分组前瞻收益<b>{_mono_txt}</b>，RankIC = {_safe(main['backtest']['ic'], '+.3f')}，
 ICIR = {_safe(main['backtest']['icir'], '.2f')}，
-多头胜率 {_safe(main['backtest']['win_long'], '.1%')}（≈随机），
+多头胜率 {_safe(main['backtest']['win_long'], '.1%')}（{_win_txt}），
 年化换手 {_safe(main['backtest']['turnover'], '.2f')} 倍。
 <b>信号与未来收益之间没有可用的线性关系。</b></p>
 
@@ -802,13 +892,13 @@ ICIR = {_safe(main['backtest']['icir'], '.2f')}，
       用「当前生效」的指数回溯历史，会带入轻微的前瞻偏差。</li>
   <li><b>估值通道的数据错配。</b>免费 PE 历史只覆盖 10 个宽基指数（月度、2005 年起），
       而基金的风格可能由申万行业主导。用宽基 PE 代理行业估值会削弱甚至反转信号。</li>
-  <li><b>多重检验。</b>E3 扫描了 108 组参数，best 组合的漂亮结果很可能来自过拟合。
+  <li><b>多重检验。</b>E3 扫描了 {_e3_n_txt}参数，best 组合的漂亮结果很可能来自过拟合。
       <b>任何在网格里挑出来的参数都必须在独立样本上重新验证。</b></li>
   <li><b>样本量。</b>14 只基金 × 约 8 年样本外（每只 2116 个交易日），
       对日频择时而言统计功效仍然偏低，且基金之间高度相关（同一市场、同一时期），
       **有效独立样本数远小于表面的 14 只**。</li>
   <li><b>网格搜索的选择偏差。</b>E4 的"最优格子"与 E3 的"最优参数"都来自穷举搜索。
-      在 12 个格子里取最大值、在 108 组参数里取最大值，本身就会得到一个正数，
+      在 12 个格子里取最大值、在 {_e3_n_txt}参数里取最大值，本身就会得到一个正数，
       与策略是否真的有效无关。<b>报告最优值而不报告分布，是量化研究里最常见的自欺。</b></li>
 </ul>
 </section>
@@ -853,6 +943,9 @@ ICIR = {_safe(main['backtest']['icir'], '.2f')}，
 
     path = Path(path or (C.ROOT / "report" / "回测报告.html"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(html, encoding="utf-8")
+    # 原子写：中途失败不留半截 HTML；Windows 下 os.replace 可覆盖已有文件。
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(html, encoding="utf-8")
+    os.replace(tmp, path)
     print(f"[report] 已生成 {path}")
     return path

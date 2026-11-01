@@ -54,10 +54,14 @@ def _report(res: dict, label: str = "") -> None:
 
     eff = res["effective"]
     print("\n[1] 横截面独立性与有效样本量")
-    print(f"  平均两两相关系数      {eff['avg_corr']:+.3f}")
-    print(f"  第一主成分解释方差    {eff['pc1_share']:.1%}")
-    print(f"  ★ 有效独立样本量 n_eff = {eff['n_eff']:.2f}"
-          f"  ({eff['n_eff_ratio']:.0%} of {eff['n_funds']})")
+    if not res.get("effective_ok", True):
+        print(f"  样本不足（有效基金 {eff['n_funds']} 只 / 共同样本 "
+              f"{eff.get('n_days', 0)} 天）—— 无法估计，不给出结论")
+    else:
+        print(f"  平均两两相关系数      {eff['avg_corr']:+.3f}")
+        print(f"  第一主成分解释方差    {eff['pc1_share']:.1%}")
+        print(f"  ★ 有效独立样本量 n_eff = {eff['n_eff']:.2f}"
+              f"  ({eff['n_eff_ratio']:.0%} of {eff['n_funds']})")
 
     fac = res.get("factor")
     if fac:
@@ -70,13 +74,17 @@ def _report(res: dict, label: str = "") -> None:
 
     b = res["bootstrap"]
     print("\n[3] 移动块 bootstrap（60 日块 × 2000 次，所有基金共用重采样日期）")
-    print(f"  观测到的'净贡献为正'比例  {b['share_pos']:.1%}")
-    print(f"  零假设分布                均值 {b['boot_mean']:.1%}"
-          f"，90% 区间 [{b['boot_p05']:.1%}, {b['boot_p95']:.1%}]")
-    print(f"  ★ p 值 = {b['p_value']:.3f}")
-    v = ("显著" if b["p_value"] < 0.05
-         else "边缘" if b["p_value"] < 0.10 else "不显著")
-    print(f"  判定：{v}")
+    if not res.get("bootstrap_ok", True) or not np.isfinite(b.get("p_value", np.nan)):
+        print("  ★ 样本不足（可用交易日 < 3×块长）：p 值不可计算 —— 无结论，"
+              "不得读作'不显著'")
+    else:
+        print(f"  观测到的'净贡献为正'比例  {b['share_pos']:.1%}")
+        print(f"  零假设分布                均值 {b['boot_mean']:.1%}"
+              f"，90% 区间 [{b['boot_p05']:.1%}, {b['boot_p95']:.1%}]")
+        print(f"  ★ p 值 = {b['p_value']:.3f}")
+        v = ("显著" if b["p_value"] < 0.05
+             else "边缘" if b["p_value"] < 0.10 else "不显著")
+        print(f"  判定：{v}")
 
     # [4] 敏感性：结论不应依赖某个拍出来的块长 / HAC 滞后（P1-03）
     ex = res["excess"]

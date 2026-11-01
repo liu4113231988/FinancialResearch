@@ -38,6 +38,24 @@ import pandas as pd
 import market_research.config as C
 
 
+def _label_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    把基金代码换成展示名，但**避免重名**。
+
+    同一只基金的 A/C 份额简称相同，直接映射会产生重复列名：
+    `excess[c]` 会返回 DataFrame、`d.corr()` 形状错乱、lam 计算失真。
+    重名时追加代码后缀（如「易方达消费行业(110022)」）。
+    """
+    names, seen = [], {}
+    for c in df.columns:
+        n = C.EXTENDED_FUNDS.get(c, c)
+        seen[n] = seen.get(n, 0) + 1
+        names.append(n if seen[n] == 1 else f"{n}({c})")
+    df = df.copy()
+    df.columns = names
+    return df
+
+
 # ====================================================================== 1. 有效样本量
 def effective_sample_size(excess: pd.DataFrame) -> dict:
     """
@@ -48,7 +66,12 @@ def effective_sample_size(excess: pd.DataFrame) -> dict:
     cols = [c for c in excess.columns if excess[c].notna().sum() > 30]
     d = excess[cols].dropna()
     if len(cols) < 2 or len(d) < 60:
-        return {"n_funds": len(cols), "n_eff": float("nan")}
+        # ★ 早退也必须返回**完整**键：调用方直接取 avg_corr/pc1_share/
+        #   n_eff_ratio，缺键会 KeyError（近 5 年窗口下很容易命中）。
+        nan = float("nan")
+        return {"n_funds": int(len(cols)), "n_days": int(len(d)),
+                "n_eff": nan, "n_eff_ratio": nan, "pc1_share": nan,
+                "avg_corr": nan, "ok": False}
     corr = d.corr().values
     corr = np.nan_to_num(corr)
     lam = np.linalg.eigvalsh(corr)
@@ -64,6 +87,7 @@ def effective_sample_size(excess: pd.DataFrame) -> dict:
         "n_eff_ratio": n_eff / len(cols),
         "pc1_share": top1,
         "avg_corr": float(np.nanmean(corr[np.triu_indices(len(cols), 1)])),
+        "ok": True,
     }
 
 
@@ -328,12 +352,19 @@ def assess_positions(nav_by_fund: Dict[str, pd.Series],
     if not excess:
         return {"ok": False, "diag": diag, "label": label}
     df = pd.concat(excess, axis=1)
-    df.columns = [C.EXTENDED_FUNDS.get(c, c) for c in df.columns]
+    df = _label_columns(df)
     df = df.dropna()
+    eff = effective_sample_size(df)
+    boot = block_bootstrap(df)
     out = {"ok": True, "label": label, "per_fund": pd.DataFrame(diag).T,
            "excess": df,
-           "effective": effective_sample_size(df),
-           "bootstrap": block_bootstrap(df)}
+           "effective": eff,
+           "bootstrap": boot,
+           # ★ 退化样本不能只靠 ok=True 表达"结构完整"：这两个标记用于
+           #   区分"检验做了但没有结论"与"检验给出了负结论"。
+           "effective_ok": bool(eff.get("ok", True)),
+           "bootstrap_ok": bool(np.isfinite(boot.get("p_value", np.nan))),
+           }
     if market is not None:
         out["factor"] = common_factor_analysis(df, market)
     return out
@@ -405,15 +436,19 @@ def assess_signal_edge(nav_by_fund: Dict[str, pd.Series],
     if not excess:
         return {"ok": False, "diag": diag}
     df = pd.concat(excess, axis=1)
-    df.columns = [C.EXTENDED_FUNDS.get(c, c) for c in df.columns]
+    df = _label_columns(df)
     df = df.dropna()
 
+    eff = effective_sample_size(df)
+    boot = block_bootstrap(df)
     out = {
         "ok": True,
         "per_fund": pd.DataFrame(diag).T,
         "excess": df,
-        "effective": effective_sample_size(df),
-        "bootstrap": block_bootstrap(df),
+        "effective": eff,
+        "bootstrap": boot,
+        "effective_ok": bool(eff.get("ok", True)),
+        "bootstrap_ok": bool(np.isfinite(boot.get("p_value", np.nan))),
     }
     if market is not None:
         out["factor"] = common_factor_analysis(df, market)

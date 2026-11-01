@@ -164,21 +164,41 @@ def walk_forward(per_fund: Dict[str, dict], grid: Optional[List[dict]] = None
     if not keys:
         raise ValueError("所有 (基金 × 配置) 组合都失败了")
 
+    def ir_panel(codes_: List[str]) -> pd.DataFrame:
+        """
+        配置 × 基金的 IR 面板，**只保留在所有配置上都有结果的基金**。
+
+        旧实现按配置各自可用的基金求均值：某配置少跑出一只基金时，
+        它的均值与其它配置不同口径，oracle 在"不等样本"上取 max 会被系统性抬高。
+        没有共同可用子集时才退回逐配置可用（并在 summary 里标注）。
+        """
+        common = [c for c in codes_ if all(k in table[c] for k in keys)]
+        if len(common) < 2:
+            common = codes_
+        return pd.DataFrame({k: {c: table[c][k]["超额夏普"]
+                                 for c in common if k in table[c]}
+                             for k in keys})
+
     def mean_ir(codes_: List[str], key) -> float:
-        vals = [table[c][key]["超额夏普"] for c in codes_ if key in table[c]]
-        return float(np.mean(vals)) if vals else float("nan")
+        mat = ir_panel(codes_)
+        col = mat[key].dropna() if key in mat.columns else pd.Series(dtype=float)
+        return float(col.mean()) if len(col) else float("nan")
 
     rows, picks = [], []
     for fi, (train, test, mgrs) in enumerate(manager_folds(codes), 1):
-        # 训练集上选最优
-        best_key = max(keys, key=lambda k: (mean_ir(train, k)
-                                            if np.isfinite(mean_ir(train, k))
-                                            else -9e9))
+        train_mat = ir_panel(train)
+        test_mat = ir_panel(test)
+        # 训练集上选最优（同口径：共同可用基金上的均值）
+        train_score = train_mat.mean()
+        train_finite = train_score[np.isfinite(train_score)]
+        if train_finite.empty:
+            raise ValueError(f"第 {fi} 折训练集没有任何有效配置（IR 全为 NaN）")
+        best_key = train_finite.idxmax()
         # 测试集上的三个数
         ir_train_pick = mean_ir(test, best_key)
-        oracle_key = max(keys, key=lambda k: (mean_ir(test, k)
-                                              if np.isfinite(mean_ir(test, k))
-                                              else -9e9))
+        test_score = test_mat.mean()
+        test_finite = test_score[np.isfinite(test_score)]
+        oracle_key = test_finite.idxmax() if not test_finite.empty else best_key
         ir_oracle = mean_ir(test, oracle_key)
         rows.append({
             "折": fi,
@@ -196,15 +216,31 @@ def walk_forward(per_fund: Dict[str, dict], grid: Optional[List[dict]] = None
     df = pd.DataFrame(rows)
 
     # ---- 固定配置在每折测试集上的表现（E4 的说法就是这个）
-    global_best = max(keys, key=lambda k: (np.nanmean(
-        [table[c][k]["超额夏普"] for c in codes if k in table[c]])
-        if any(k in table[c] for c in codes) else -9e9))
-    fixed_ir = float(np.mean([mean_ir(test, global_best)
-                              for _, test, _ in manager_folds(codes)]))
+    # ★ 全 NaN 时不能再用 max(key=nan)：nan 比较恒为 False，会静默返回第一个
+    #   配置并当成"全体最优"。必须显式判无结论。
+    means_all = ir_panel(codes).mean()
+    finite_all = means_all[np.isfinite(means_all)]
+    if finite_all.empty:
+        return {
+            "ok": False,
+            "reason": "所有配置在所有基金上的样本外 IR 都是 NaN"
+                      "（共同样本过短或拟合全部失败），无法比较",
+            "folds": df, "picks": picks, "table": table,
+            "global_best": None, "summary": {},
+        }
+    global_best = finite_all.idxmax()
+    fixed_vals = [mean_ir(test, global_best)
+                  for _, test, _ in manager_folds(codes)]
+    fixed_ir = float(np.nanmean(fixed_vals)) if fixed_vals else float("nan")
     migrated_ir = float(np.nanmean(df["测试集IR(迁移)"]))
     oracle_ir = float(np.nanmean(df["测试集IR(oracle)"]))
+    n_valid = int(np.isfinite(df["测试集IR(迁移)"]).sum())
+    n_distinct = len(set(picks))
+    consistency = (f"选出 {n_distinct} 种不同配置（{len(picks)} 折）"
+                   if picks else "无有效折")
 
     return {
+        "ok": True,
         "folds": df,
         "global_best": f"{global_best[0]}/{global_best[1]}",
         "picks": picks,
@@ -219,7 +255,8 @@ def walk_forward(per_fund: Dict[str, dict], grid: Optional[List[dict]] = None
             "迁移配置在测试集均值IR": round(migrated_ir, 3),
             "oracle在测试集均值IR": round(oracle_ir, 3),
             "参数选择过拟合代价": round(oracle_ir - migrated_ir, 3),
-            "选择一致性": f"{len(set(picks))}/{len(picks)} 折选出同一配置",
+            "有效折数": n_valid,
+            "选择一致性": consistency,
         },
         "table": table,
     }
@@ -318,9 +355,20 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
                     tb[c][(g["win"], g["reb"])] = r
         return tb
 
+    def _panel(tb: Dict[str, Dict[tuple, dict]]) -> pd.DataFrame:
+        """配置 × 基金的 IR 面板，只保留在所有配置上都有结果的基金。"""
+        all_keys = sorted({k for c in tb for k in tb[c]})
+        common = [c for c in tb if all(k in tb[c] for k in all_keys)]
+        if len(common) < 2:
+            common = list(tb)
+        return pd.DataFrame({k: {c: tb[c][k]["超额夏普"]
+                                 for c in common if k in tb[c]}
+                             for k in all_keys})
+
     def _mean_ir(tb: Dict[str, Dict[tuple, dict]], key) -> float:
-        vals = [tb[c][key]["超额夏普"] for c in tb if key in tb[c]]
-        return float(np.mean(vals)) if vals else float("nan")
+        mat = _panel(tb)
+        col = mat[key].dropna() if key in mat.columns else pd.Series(dtype=float)
+        return float(col.mean()) if len(col) else float("nan")
 
     rows, oos_parts, cand_rows, fund_rows = [], [], [], []
     for fi, (s0, s1, t0, t1) in enumerate(folds, 1):
@@ -338,12 +386,17 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
                                   f"{len(te)}/{len(codes)} 只基金满足 ≥160 交易日"
                                   f"（测试区间约 {(t1 - t0).days} 天）")})
             continue
-        best_key = max(keys, key=lambda k: (_mean_ir(tr, k)
-                                            if np.isfinite(_mean_ir(tr, k))
-                                            else -9e9))
-        oracle_key = max(keys, key=lambda k: (_mean_ir(te, k)
-                                              if np.isfinite(_mean_ir(te, k))
-                                              else -9e9))
+        tr_score = pd.Series({k: _mean_ir(tr, k) for k in keys})
+        tr_fin = tr_score[np.isfinite(tr_score)]
+        if tr_fin.empty:
+            rows.append({"折": fi, "训练区间": f"{s0.date()}~{s1.date()}",
+                         "测试区间": f"{t0.date()}~{t1.date()}",
+                         "备注": "训练期所有配置的 IR 都是 NaN（样本过短），无结论"})
+            continue
+        te_score = pd.Series({k: _mean_ir(te, k) for k in keys})
+        te_fin = te_score[np.isfinite(te_score)]
+        best_key = tr_fin.idxmax()
+        oracle_key = te_fin.idxmax() if not te_fin.empty else best_key
         migrated = _mean_ir(te, best_key)
         oracle = _mean_ir(te, oracle_key)
         rows.append({
@@ -400,8 +453,17 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
                            "时间向前验证无法进行 —— 请放宽分析窗口或减少折数"),
                 "folds": df}
     oos = pd.concat(oos_parts, axis=1) if oos_parts else pd.DataFrame()
-    mig = df.get("测试集IR(迁移)", pd.Series(dtype=float))
-    orc = df.get("测试集IR(oracle)", pd.Series(dtype=float))
+    mig = pd.to_numeric(df.get("测试集IR(迁移)", pd.Series(dtype=float)),
+                        errors="coerce")
+    orc = pd.to_numeric(df.get("测试集IR(oracle)", pd.Series(dtype=float)),
+                        errors="coerce")
+    _n_valid = int(mig.notna().sum())
+    if _n_valid == 0:
+        return {"ok": False,
+                "reason": "所有折的测试期 IR 都是 NaN（样本不足或全部拟合失败），无法汇总",
+                "folds": df}
+    _mig_v = float(mig.mean())
+    _orc_v = float(orc.mean())
     return {
         "ok": True,
         "检验类型": "外层按时间扩展的时间向前验证（内层仅用训练期选参）",
@@ -411,12 +473,11 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
         "oos_excess": oos,
         "summary": {
             "折数": len(df),
+            "有效折数": _n_valid,
             "purge(交易日)": int(purge_days),
-            "迁移配置在测试期均值IR": (round(float(np.nanmean(mig)), 3)
-                                if len(mig) else np.nan),
-            "oracle在测试期均值IR": (round(float(np.nanmean(orc)), 3)
-                               if len(orc) else np.nan),
-            "参数选择过拟合代价": (round(float(np.nanmean(orc) - np.nanmean(mig)), 3)
-                          if len(mig) and len(orc) else np.nan),
+            "迁移配置在测试期均值IR": round(_mig_v, 3),
+            "oracle在测试期均值IR": round(_orc_v, 3),
+            "参数选择过拟合代价": (round(_orc_v - _mig_v, 3)
+                          if np.isfinite(_orc_v) and np.isfinite(_mig_v) else np.nan),
         },
     }

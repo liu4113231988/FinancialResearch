@@ -125,10 +125,11 @@ def t4():
         f"若不除 100 会到几十，实测曾出现年化 −95%）")
     # 披露滞后：首个生效日必须晚于最早季末 + lag
     first_q = exp.index[0]
-    chk(hr.index[0] >= first_q + pd.Timedelta(days=H.DISCLOSURE_LAG_DAYS)
+    lag = H.disclosure_lag_days(first_q)
+    chk(hr.index[0] >= first_q + pd.Timedelta(days=lag)
         or hr.index[0] >= pd.Timestamp(C.START_DATE),
         f"基准起点 {hr.index[0].date()} 不早于 {first_q.date()} + "
-        f"{H.DISCLOSURE_LAG_DAYS} 天（或受分析窗口起点约束）")
+        f"{lag} 天（或受分析窗口起点约束）")
 
 
 # ============================================================ T5 空输入

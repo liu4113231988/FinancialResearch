@@ -43,8 +43,11 @@ C_FUND, C_SYN, C_STRAT = "#2563eb", "#94a3b8", "#d92b37"
 
 def _b64(fig) -> str:
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
-    plt.close(fig)
+    try:
+        fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
+    finally:
+        # 保存失败也必须释放 figure，否则重复运行会累积打开的画布
+        plt.close(fig)
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
@@ -55,6 +58,9 @@ def _pct(ax, axis="y"):
 
 def _rebase(s: pd.Series) -> pd.Series:
     s = s.dropna()
+    if s.empty:
+        # 空序列（日期/频率对不上导致 reindex 全 NaN）不能 iloc[0]，调用方需判空
+        return s
     return s / s.iloc[0]
 
 
@@ -208,7 +214,8 @@ def chart_ic(res: dict) -> Optional[str]:
                             gridspec_kw={"width_ratios": [1.15, 1]})
     ax = axes[0]
     vals = g["平均前瞻收益"].values
-    colors = [DOWN if v >= 0 else UP for v in vals]
+    # 红涨绿跌：正收益用 UP（红），负收益用 DOWN（绿）。旧写法正好相反。
+    colors = [UP if v >= 0 else DOWN for v in vals]
     ax.bar(range(len(vals)), vals, color=colors, alpha=0.85)
     ax.set_xticks(range(len(vals)))
     ax.set_xticklabels(g.index, fontsize=8.5)

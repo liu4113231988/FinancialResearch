@@ -200,6 +200,9 @@ def analyze(code: str, models: Optional[List[str]] = None,
             "window_default_years": C.DEFAULT_WINDOW_YEARS,
             "window_min_years": C.MIN_WINDOW_YEARS,
             "data_basis": "事后月度锚点校准；尚非历史时点可得数据",
+            # 价格覆盖降级（剔除停编指数、连续缺失截断）必须透传到界面，
+            # 否则用户会以为用的是完整候选池
+            "data_warnings": list(getattr(panel, "attrs", {}).get("warnings") or []),
             "window_requested_end": win_end,
             "window_requested": win_start,     # None = 用默认滚动窗口
             # 抓取起点与分析起点解耦：缓存名带 start，跟着窗口滚动会让缓存全 miss

@@ -92,8 +92,10 @@ def data_summary() -> Dict[str, Any]:
             "data_stamp": D.data_stamp(),
             **storage.summary(),
             "start_date": getattr(C, "START_DATE", None),
+            "end_date": getattr(C, "END_DATE", None),
             # ★ 分析窗口（2026-10-12）：START_DATE 是**滚动**的，只记录它无法
             #   判断"这次跑的是几年窗口"。复现需要窗口年数与抓取起点一起记。
+            #   `apply_window` 会把本次实参写回 DEFAULT_WINDOW_YEARS。
             "window_years": getattr(C, "DEFAULT_WINDOW_YEARS", None),
             "min_window_years": getattr(C, "MIN_WINDOW_YEARS", None),
             "fetch_start": getattr(C, "FETCH_START_DATE", None),

@@ -162,8 +162,12 @@ def calibrate_total_return(cum_nav: pd.Series, unit_nav: pd.Series,
     因此先用累计净值与单位净值的**组合**还原真实日收益
            r_t = (C_t − C_{t−1}) / U_{t−1}
     （除息日 C 连续、U 下跌，这个比值恰好消掉分红），再用月频
-    「累计收益率」作锚点，按时间线性插值一个日频缩放系数，
-    以吸收拆分与数据源差异。
+    「累计收益率」作锚点，得到日频缩放系数，以吸收拆分与数据源差异。
+
+    ★ **缩放系数只用「当时已公布的锚点」前向填充**，不对相邻未来锚点插值：
+      旧实现 `interpolate(method="time")` 会让 t 日的系数取决于 t+1 月的
+      累计收益率，属于轻微前瞻。首个锚点之前的交易日则直接丢弃
+      （分析窗口通常远晚于它，不影响结果）。
 
     实测：14/14 只基金在校准锚点上的偏差为 0.0000%。
     """
@@ -188,9 +192,14 @@ def calibrate_total_return(cum_nav: pd.Series, unit_nav: pd.Series,
                 scale[d] = (1.0 + float(v) / 100.0) / fm
         if len(scale) >= 2:
             s = pd.Series(scale).sort_index()
-            sc = (s.reindex(F.index).interpolate(method="time")
-                   .ffill().bfill())
-            sc = sc.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(1.0)
+            sc = s.reindex(F.index).replace([np.inf, -np.inf], np.nan).ffill()
+            first = sc.first_valid_index()
+            if first is not None and first > F.index[0]:
+                # 首个锚点之前没有"当时已知"的系数，丢弃这段（旧实现用 bfill
+                # 拿未来锚点回填）。分析窗口起点通常比抓取起点晚数年。
+                F = F.loc[first:]
+                sc = sc.loc[first:]
+            sc = sc.ffill().fillna(1.0)
             F = F * sc
         elif len(anchors) >= 2:
             # ★ 复查发现：锚点存在但全部落在净值区间之外时，这里会**静默**
@@ -250,7 +259,13 @@ def verify_nav_basis(code: str, start: Optional[str] = None) -> dict:
     cum = _fetch_nav(code, "累计净值走势", start)
     unit = fetch_fund_unit_nav(code, start)
     rr = fetch_cum_return_curve(code, start)
-    end = min([s.index[-1] for s in (cum, unit, rr) if len(s)])
+    missing = [n for n, s in (("累计净值", cum), ("单位净值", unit),
+                              ("累计收益率", rr)) if s is None or len(s) == 0]
+    if missing:
+        # 旧实现直接 min(...) / iloc[-1]，序列为空时抛 IndexError，
+        # 错误信息完全看不出缺的是哪一路数据。
+        raise ValueError(f"{code} 缺少 {'/'.join(missing)}，无法核对口径")
+    end = min(s.index[-1] for s in (cum, unit, rr))
     cum, unit, rr = (s[s.index <= end] for s in (cum, unit, rr))
     truth = 1.0 + float(rr.iloc[-1]) / 100.0
     a = float(cum.iloc[-1] / cum.iloc[0])
