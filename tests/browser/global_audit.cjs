@@ -28,6 +28,7 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
   };
   try {
     await cmd('Runtime.enable'); await cmd('Page.enable');
+    await cmd('Network.enable'); await cmd('Network.setCacheDisabled',{cacheDisabled:true});
     await cmd('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
     await cmd('Page.navigate',{url:process.argv[2] || 'http://127.0.0.1:8877'});
     await until("window.MarketApp && document.querySelector('#marketStart').value");
@@ -61,6 +62,20 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
       assert.equal(await evaluate("document.querySelectorAll('#technicalContext>div').length"),5);
       assert.match(await evaluate("document.querySelector('#technicalValidation').textContent"),/平均预测/);
       if(stock.technical.forecasts[0].comparison.regimes) assert.match(await evaluate("document.querySelector('#technicalValidation').textContent"),/基准偏强/);
+    }
+    if(stock.technical?.execution) {
+      assert.equal(await evaluate("document.querySelectorAll('#technicalExecution>article').length"),2);
+      assert.match(await evaluate("document.querySelector('#technicalExecution').textContent"),/年化双边换手/);
+      assert.match(await evaluate("document.querySelector('#technicalExecution').textContent"),stock.technical.execution.strategies.rules[0].calendar_verified?/已提供日历/:/未核对交易日历/);
+      if(stock.technical.execution.strategies.rules[0].exposure_control) assert.match(await evaluate("document.querySelector('#technicalExecution').textContent"),/仓位匹配被动对照/);
+      assert.ok(await evaluate("parseFloat(getComputedStyle(document.querySelector('#technicalExecution strong')).fontSize)<=14"));
+    }
+    if(stock.technical?.forecasts[0]?.execution_comparison) {
+      assert.equal(await evaluate("document.querySelectorAll('#technicalModelExecution>article').length"),2);
+      assert.match(await evaluate("document.querySelector('#technicalModelExecution').textContent"),/共同预测/);
+      assert.match(await evaluate("document.querySelector('#technicalModelExecution').textContent"),/新增特征候选/);
+      if(stock.technical.forecasts[0].execution_comparison.strategies.base[0].exposure_control) assert.match(await evaluate("document.querySelector('#technicalModelExecution').textContent"),/仓位匹配对照/);
+      assert.ok(await evaluate("parseFloat(getComputedStyle(document.querySelector('#technicalModelExecution strong')).fontSize)<=14"));
     }
     await click('[data-chart="line"]');
     assert.equal(await evaluate("document.querySelector('[data-chart=line]').getAttribute('aria-pressed')"),'true');
@@ -100,6 +115,8 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
       await click(`[data-asset="${kind}"]`); await delay(200);
       if (stock.technical?.context && kind==='stock') {
         await evaluate("document.querySelector('#technicalValidation').parentElement.open=true;document.querySelector('#technicalContext').scrollIntoView({block:'start'})");
+        if(stock.technical.execution) await evaluate("document.querySelector('#technicalExecution').parentElement.open=true;document.querySelector('#technicalExecution').scrollIntoView({block:'start'})");
+        if(stock.technical.forecasts[0]?.execution_comparison) await evaluate("document.querySelector('#technicalModelExecution').parentElement.open=true;document.querySelector('#technicalModelExecution').scrollIntoView({block:'start'})");
         const contextShot = await cmd('Page.captureScreenshot',{format:'png'});
         fs.writeFileSync('output/ui-evidence/context-mobile.png',Buffer.from(contextShot.data,'base64'));
       }

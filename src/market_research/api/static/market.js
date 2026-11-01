@@ -152,6 +152,50 @@ window.MarketApp = (() => {
       ['成交确认',values.volume_ratio==null?'—':num(values.volume_ratio)+' 倍',`成交额比 ${num(values.amount_ratio)} · 换手率比 ${num(values.turnover_ratio)}`],
     ].map(([label,value,note])=>{const box=part('div','');box.append(part('span',label),part('strong',value),part('small',note));return box;}) : []));
     el('technicalContextNote').textContent = context ? context.note + ' 缺失数据以 — 显示；相对比较本身时强弱为零。' : '';
+    const execution = t.execution;
+    el('technicalExecutionNote').textContent = execution?.note || '历史结果未包含成交诊断，请重新分析。';
+    if(execution?.calendar_source) {
+      const c=execution.calendar_source;
+      el('technicalExecutionNote').textContent += ` 会话来源：${c.source} · 版本 ${c.version || '未知'} · 覆盖 ${c.coverage_start || '未知'} 至 ${c.coverage_end || '未知'}。`;
+    }
+    el('technicalExecution').replaceChildren(...Object.entries(execution?.strategies || {}).map(([key,rows])=>{
+      const box=part('article','','forecast-block');box.append(part('h5',key==='rules'?'原技术规则':'同区间买入持有'));
+      for(const row of rows) {
+        box.append(part('strong',`单边费用 ${row.fee_bps} bp · 滑点 ${row.slippage_bps} bp`),
+          part('p',`净收益 ${pct(row.net_return)} · 最大回撤 ${pct(row.max_drawdown)}`),
+          part('p',`成交 ${row.fills} 次 · 闭合交易 ${row.closed_trades} 笔 · 胜率 ${pct(row.win_rate)} · 盈亏比 ${num(row.payoff_ratio)}`),
+          part('p',`年化双边换手 ${num(row.annual_turnover)} 倍 · 平均仓位 ${pct(row.average_exposure)} · 未成交 ${row.blocked_count} 次`),
+          part('p',row.open_position?'期末仍持有，未计未来卖出费用；未闭合交易不计胜率。':'期末无持仓。'));
+        if(row.exposure_control?.matched)box.append(part('p',`仓位匹配被动对照 · 净收益 ${pct(row.exposure_control.net_return)} · 策略收益差 ${pct(row.exposure_control.excess_net_return)} · 事后诊断，不是可执行配置`));
+      }
+      if(rows.length){
+        const r=rows[0], n=r.n_sessions, coverage=r.constraint_coverage;
+        box.append(part('p',`${n} 个会话 · ${r.calendar_verified?'已提供日历':'未核对交易日历'} · 成交量覆盖 ${coverage.volume}/${n} · 涨停价覆盖 ${coverage.limit_up}/${n} · 跌停价覆盖 ${coverage.limit_down}/${n}`));
+        for(const note of r.assumptions)box.append(part('p',note));
+      }
+      return box;
+    }));
+    el('technicalModelExecution').replaceChildren(...t.forecasts.map(f=>{
+      const box=part('article','','forecast-block'), comparison=f.execution_comparison;
+      box.append(part('h5',`${f.horizon}日概率 · 原模型 / 候选 / 持有`));
+      if(comparison?.status!=='evaluated') {box.append(part('p','缺少共同预测或后续成交会话，暂不比较。'));return box;}
+      box.append(part('p',`${comparison.start} — ${comparison.end} · 共同预测 ${comparison.n_common_predictions} 日 · 区间内无共同预测 ${comparison.missing_prediction_sessions} 日`));
+      for(let i=0;i<comparison.strategies.base.length;i++) {
+        const standard=comparison.strategies.base[i];
+        box.append(part('strong',`单边费用 ${standard.fee_bps} bp · 滑点 ${standard.slippage_bps} bp`));
+        for(const [key,name] of [['base','原模型'],['candidate','新增特征候选'],['buy_hold','买入持有']]) {
+          const row=comparison.strategies[key][i];
+          box.append(part('p',`${name} · 净收益 ${pct(row.net_return)} · 回撤 ${pct(row.max_drawdown)} · 成交 ${row.fills} 次 · 闭合 ${row.closed_trades} 笔 · 胜率 ${pct(row.win_rate)} · 平均仓位 ${pct(row.average_exposure)}`));
+          if(row.exposure_control?.matched)box.append(part('p',`${name}仓位匹配对照 · 净收益 ${pct(row.exposure_control.net_return)} · 收益差 ${pct(row.exposure_control.excess_net_return)} · 事后匹配，不证明未来择时能力`));
+          if(row.open_position)box.append(part('small',`${name}期末未平仓，未计未来卖出成本。`));
+        }
+      }
+      if(!comparison.sample_sufficient)box.append(part('p','共同预测不足20日，仅展示账户路径，不判断模型优劣。'));
+      const sample=comparison.strategies.base[0];
+      box.append(part('p',sample.calendar_verified?'使用已提供的会话日历；仍需核对历史成交约束。':'未核对交易日历；缺失涨跌停/权限信息按可成交假设。'));
+      box.append(part('p',comparison.note));
+      return box;
+    }));
     el('technicalValidation').replaceChildren(...t.forecasts.map(f=>{
       const box=part('article','','forecast-block'), c=f.comparison;
       box.append(part('h5',`${f.horizon}日 · 原模型 / 候选模型`));
@@ -202,6 +246,7 @@ window.MarketApp = (() => {
       const q = data.quality;
       el('marketMeta').textContent += ` · 请求 ${q.requested_start} — ${q.requested_end}`;
       if (q.fetched_at) el('marketMeta').textContent += ` · 抓取于 ${q.fetched_at}`;
+      if (q.calendar_verified) el('marketMeta').textContent += ' · 已对照供应商日历';
     }
     el('marketKpis').replaceChildren(...[
       [kind === 'stock' ? '最新收盘价' : '最新收盘点位', num(s.latest), `最近交易日 ${pct(s.change)}`],

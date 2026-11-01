@@ -189,7 +189,7 @@ def compare_forecasts(bars, base, candidate, horizon, display_start, context=Non
     return result
 
 
-def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, benchmark=""):
+def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, benchmark="", calendar=None, calendar_info=None):
     display_start = display_start or bars.index[0]
     # Bound CPU and memory while keeping ~5 years for rolling model warm-up.
     truncated = len(bars) > 1500
@@ -230,6 +230,9 @@ def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, be
                             "label": "买入条件首次满足" if row.buy_event else "减仓条件首次满足",
                             "close": bars.close.loc[date], "score": row.score})
     visible = ind.loc[display_start:]
+    from market_research.market.execution import execution_diagnostics, rule_targets, compare_probability_execution
+    execution = execution_diagnostics(bars.loc[visible.index], rule_targets(visible), calendar)
+    execution['calendar_source'] = calendar_info
     notices = ["日线收盘后更新，条件首次满足是观察信号，不假设能在信号日收盘价成交。",
                "预测周期按该证券的有效日线计数，停牌或缺失日线会延长实际日期间隔。",
                "模型估计未来收盘相对当前收盘上涨的概率；不预测精确价格，不含交易费用，未单独校准。",
@@ -250,11 +253,15 @@ def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, be
                                   if candidate else {'n': 0, 'ok': False, 'note': '新增特征覆盖不足，保留原模型。'})
         forecast['candidate'] = ({'ok': candidate['ok'], 'probability': candidate['probability'],
                                   'features': available} if candidate else None)
+        forecast['execution_comparison'] = compare_probability_execution(
+            bars.loc[visible.index], pd.Series(forecast['series'], index=visible.index),
+            pd.Series(candidate['series'] if candidate else np.nan, index=visible.index), calendar)
     disagreements = [str(f["horizon"]) for f in forecasts if f["ok"] and ready and
                      ((latest.score >= 60 and f["probability"] < .4) or (latest.score <= -60 and f["probability"] > .6))]
     conflict = ("规则趋势与 " + " / ".join(disagreements) + " 日模型方向存在分歧，请结合验证表现等待确认。") if disagreements else None
     return {"as_of": bars.index[-1].date().isoformat(), "ready": ready, "trend": trend, "action": action, "conflict": conflict,
             'context': context_payload(extra, benchmark),
+            'execution': execution,
             "score": latest.score, "reasons": reasons,
             "latest": latest.to_dict(),
             "levels": {"support": latest.support, "resistance": latest.resistance,

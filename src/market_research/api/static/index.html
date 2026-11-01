@@ -119,6 +119,8 @@
       <div class="forecast-heading"><h4>未来方向 · 5 / 20 个交易日</h4><span>滚动逻辑回归 · 仅使用已成熟标签</span></div>
       <div id="stockForecasts" class="stock-forecasts"></div>
       <details class="technical-details"><summary>候选模型对比与概率校准</summary><p class="note">原模型与新增量价、波动和相对强弱特征的固定候选，在共同成熟日期上比较。正的 Brier 改善表示候选误差更小；样本不足20笔不判断优劣。该比较不代表统计显著性或扣费交易收益。</p><div id="technicalValidation"></div></details>
+      <details class="technical-details"><summary>规则信号 · 次会话成交与费用诊断</summary><p id="technicalExecutionNote" class="note"></p><div id="technicalExecution"></div></details>
+      <details class="technical-details"><summary>方向模型 · 固定概率阈值成交对比</summary><p class="note">当前页面按滚动训练历史展示；离线报告另冻结留出期训练。使用5/20日概率逐日检查60%买入、40%退出的固定阈值，不按测试收益调参。共同预测日数不等于独立交易数；成交区间也不要求预测标签已成熟。</p><div id="technicalModelExecution"></div></details>
       <details class="technical-details"><summary>规则、模型验证与使用边界</summary><p id="technicalRules"></p><p>方向模型每 21 个交易日更新，最多使用最近 756 个已成熟样本；标准化仅拟合训练数据。历史评估每隔预测周期抽取一笔，减少标签重叠。基准为当时训练集的上涨频率；Brier 越小越好。样本少于 20 笔时不判断有效性；预测概率未单独校准。</p><ul id="technicalNotices"></ul><p><a href="https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/overview" target="_blank" rel="noopener">技术指标参考 ↗</a></p></details>
     </section>
     <section class="panel market-price-panel"><div class="sec-head"><h3>价格与均线</h3><div class="seg" id="marketChartType" aria-label="价格图类型"><button type="button" data-chart="candlestick" aria-pressed="true">K 线</button><button type="button" data-chart="line" aria-pressed="false">收盘线</button></div></div><div id="marketPrice" class="chart tall" role="img" aria-label="历史价格与20、60、120日均线"></div><p class="note" id="marketPriceNote"></p></section>

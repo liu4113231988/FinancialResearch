@@ -15,7 +15,9 @@ from market_research.cli.registry import COMMAND_SPECS, COMMANDS, LEGACY_COMMAND
 class CliTests(unittest.TestCase):
     def test_command_and_legacy_names_are_unique(self):
         self.assertEqual(len(COMMAND_SPECS),len(COMMANDS))
-        self.assertEqual(len(COMMAND_SPECS),len(LEGACY_COMMANDS))
+        self.assertEqual(sum(bool(c.legacy_script) for c in COMMAND_SPECS),len(LEGACY_COMMANDS))
+        self.assertNotIn(None,LEGACY_COMMANDS)
+        self.assertTrue({'market-snapshot','market-validate'}.issubset(COMMANDS))
 
     def test_explicit_arguments_leave_process_arguments_untouched(self):
         original=sys.argv

@@ -141,6 +141,16 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
     if job_id:
         JOBS.update(job_id, stage="计算收益、风险与基准比较", progress=0.8)
     technical = None
+    calendar, calendar_info = None, None
+    try:
+        from market_research.data.providers.calendar import bundled_calendar
+        sessions, info = bundled_calendar(start, end)
+        if bars.index.isin(sessions).all():
+            calendar, calendar_info = sessions, info
+        else:
+            warnings.append('行情包含供应商日历之外的日期，已保留价格分析，成交诊断未使用该日历。')
+    except (ValueError, OSError, ImportError):
+        warnings.append('供应商日历不可用或未覆盖请求区间，成交诊断仅按有效日线推进。')
     if kind in ("stock", "index"):
         from market_research.market.technical import analyze_technical
         import market_research.tasks.sync as sync
@@ -172,12 +182,13 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
                 if len(overlap) == len(reference) and np.allclose(cached_reference.loc[overlap, 'close'], reference.loc[overlap]):
                     reference_context = cached_reference.close
         technical = analyze_technical(context, display_start=bars.index[0], adjust=adjust,
-                                      reference=reference_context, benchmark=benchmark)
+                                      reference=reference_context, benchmark=benchmark,
+                                      calendar=calendar, calendar_info=calendar_info)
         if kind == 'index':
             technical['notices'] = [n for n in technical['notices'] if '复权' not in n]
             technical['notices'].append('指数为价格指数；技术条件未在实际ETF成交、费用与跟踪偏差上验证。')
     payload = market_payload(kind, code, bars, reference, benchmark, adjust, warnings)
-    payload["quality"] = market_quality(bars, reference, start, end)
+    payload["quality"] = market_quality(bars, reference, start, end, calendar, calendar_info)
     quality = payload["quality"]
     payload["warnings"].append(
         f"请求区间 {start} 至 {end}；实际行情 {quality['actual_start']} 至 {quality['actual_end']}。"
@@ -185,23 +196,30 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
     if quality["reference_missing_count"]:
         payload["warnings"].append(
             f"实际行情区间内有 {quality['reference_missing_count']} 个基准有行情而本资产无日线的日期；"
-            "可能为停牌或数据缺口，尚未核对交易日历，请在数据中心检查。")
+            + ('已对照供应商日历，仍可能为停牌或数据缺口。' if calendar is not None else '可能为停牌或数据缺口，尚未核对交易日历，请在数据中心检查。'))
+    if quality['calendar_missing_count']:
+        payload['warnings'].append(f"实际区间内缺少 {quality['calendar_missing_count']} 个供应商交易日的行情；成交诊断保留不可成交会话，尚不能区分停牌或漏抓。")
     if technical is not None:
         payload["technical"] = _jsafe(technical)
     return payload
 
 
-def market_quality(bars, reference, start, end):
-    """Coverage evidence only; a benchmark is not an exchange trading calendar."""
+def market_quality(bars, reference, start, end, calendar=None, calendar_info=None):
+    """Report vendor-calendar and benchmark coverage without inferring suspensions."""
     first, last = bars.index[0], bars.index[-1]
     missing = pd.DatetimeIndex([])
     if reference is not None:
         dates = reference.dropna().index
         missing = dates[(dates >= first) & (dates <= last)].difference(bars.index).sort_values()
+    calendar_missing = (calendar[(calendar >= first) & (calendar <= last)].difference(bars.index)
+                        if calendar is not None else pd.DatetimeIndex([]))
     return {"requested_start": start, "requested_end": end,
             "actual_start": first.date().isoformat(), "actual_end": last.date().isoformat(),
             "end_gap_calendar_days": max(0, (pd.Timestamp(end) - last).days),
-            "calendar_verified": False, "reference_checked": reference is not None,
+            "calendar_verified": calendar is not None, 'calendar_source':calendar_info,
+            'calendar_missing_count':len(calendar_missing),
+            'calendar_missing_dates':calendar_missing[:10].strftime('%Y-%m-%d').tolist(),
+            "reference_checked": reference is not None,
             "reference_missing_count": len(missing),
             "reference_missing_dates": missing[:10].strftime("%Y-%m-%d").tolist(),
             "fetched_at": bars.attrs.get("fetched_at")}

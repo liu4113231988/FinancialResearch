@@ -17,7 +17,7 @@ from market_research.serialization import _jsafe
 from market_research.validation.window import _iso
 
 VARIANTS = ('base', 'volatility', 'volume', 'relative', 'all')
-VERSION = 2
+VERSION = 7
 
 
 def validate_plan(plan):
@@ -31,6 +31,13 @@ def validate_plan(plan):
     keys = []
     for asset in plan['assets']:
         code = normalize_code(asset['kind'], asset['code'])
+        if asset.get('adjust','qfq') not in ('qfq','hfq',''):
+            raise ValueError('adjust需为qfq、hfq或空字符串')
+        if 'capital' in asset:
+            from market_research.market.capital import parse_capital_config
+            parse_capital_config(asset['capital'])
+            if asset['kind']!='stock' or asset.get('adjust','qfq')!='':
+                raise ValueError('资金账户需显式不复权股票报价（kind=stock, adjust=""），不能使用复权价或指数点位')
         if code != asset['code']:
             raise ValueError('清单代码需使用规范市场前缀')
         normalize_code('index', asset.get('benchmark', 'sh000300'))
@@ -83,7 +90,7 @@ def paired_evidence(bars, base, candidate, horizon, family_size):
     return result
 
 
-def evaluate_asset(bars, reference, plan, family_size):
+def evaluate_asset(bars, reference, plan, family_size, calendar=None):
     bars = bars.loc[plan['start']:plan['end']]
     if bars.empty or not bars.index.is_unique or not bars.index.is_monotonic_increasing:
         raise ValueError('行情为空、日期重复或未升序排列')
@@ -110,6 +117,8 @@ def evaluate_asset(bars, reference, plan, family_size):
                 result = compare_forecasts(window, {'series': baseline}, {'series': candidate}, horizon, start, context) if len(window) else {'n': 0, 'ok': False}
                 result['variant'] = variant
                 result['evidence'] = paired_evidence(window, baseline, candidate, horizon, family_size)
+                from market_research.market.execution import compare_probability_execution
+                result['execution'] = compare_probability_execution(window, pair['base'], pair[variant], calendar)
                 rows.append(result)
             stages[stage] = rows
         output['horizons'][str(horizon)] = stages
@@ -132,23 +141,57 @@ def fingerprint(frame):
     return hashlib.sha256(pd.util.hash_pandas_object(frame, index=True).values.tobytes() + '|'.join(frame.columns).encode()).hexdigest()
 
 
-def run_plan(plan, root, progress=None):
+def evaluate_execution_asset(bars, plan, calendar=None, capital_config=None):
+    from market_research.market.execution import execution_diagnostics, rule_targets
+    targets = rule_targets(indicators(bars))
+    stages = {}
+    for key, start, end in (
+        ('development', plan['development_start'], (pd.Timestamp(plan['holdout_start'])-pd.Timedelta(days=1)).date().isoformat()),
+        ('holdout', plan['holdout_start'], plan['end'])):
+        window = bars.loc[start:end]
+        if len(window) and capital_config is not None:
+            from market_research.market.capital import capital_diagnostics
+            stages[key]=capital_diagnostics(window, indicators(bars).reindex(window.index), capital_config, calendar)
+        else:
+            stages[key] = (execution_diagnostics(window, targets.reindex(window.index), calendar) if len(window) else {'strategies': {}, 'note': '区间无行情'})
+    return stages
+
+
+def run_plan(plan, root, progress=None, execution_only=False):
     validate_plan(plan)
     family_size = len(plan['assets']) * 4 * 2 * 2
-    report = {'version': VERSION, 'manifest': plan, 'manifest_sha256': hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest(),
+    report = {'version': VERSION, 'mode': 'execution_only' if execution_only else 'direction', 'manifest': plan, 'manifest_sha256': hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest(),
               'runtime': {'python': platform.python_version(), 'pandas': pd.__version__, 'numpy': np.__version__, 'sklearn': sklearn.__version__},
-              'planned_comparisons': family_size, 'assets': [],
+              'planned_comparisons': 0 if execution_only else family_size,
+              'planned_execution_scenarios': len(plan['assets'])*(2*2*3 if execution_only else 4*2*2*3*3), 'assets': [],
+              'planned_exposure_controls': sum('capital' not in a for a in plan['assets'])*(2*3 if execution_only else 4*2*2*3*2),
               'limitations': ['当前数据版本回放，不是时点可得数据证明。', '同一测试区间反复查看后不再是未触碰的最终测试集。',
                               'HAC正态近似及Bonferroni为探索性诊断，小样本不报p值；不能证明可交易收益。']}
-    from market_research.market import technical, context
+    from market_research.market import technical, context, execution, capital
     report['source_sha256'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-                               for p in (Path(__file__), Path(technical.__file__), Path(context.__file__))}
+                               for p in (Path(__file__), Path(technical.__file__), Path(context.__file__), Path(execution.__file__), Path(capital.__file__))}
     for asset in plan['assets']:
         if progress:
             progress(asset['code'])
         row = {'kind':asset['kind'], 'code':asset['code']}
         try:
+            capital_config=capital.parse_capital_config(asset['capital']) if 'capital' in asset else None
+            if capital_config is not None and not execution_only:
+                raise ValueError('资金约束模式本轮仅支持--execution-only规则/持有验证，未混用到方向模型')
             bars = read_bars(asset, plan, root).loc[plan['start']:plan['end']]
+            if bars.empty:
+                raise ValueError('清单区间内没有本地行情')
+            calendar = None
+            if asset.get('calendar_csv'):
+                calendar = pd.DatetimeIndex(pd.read_csv(root/asset['calendar_csv'], parse_dates=['date'])['date'])
+            row['calendar_sha256'] = hashlib.sha256(calendar.asi8.tobytes()).hexdigest() if calendar is not None else None
+            if execution_only:
+                row.update(data_sha256=fingerprint(bars), calendar_sha256=hashlib.sha256(calendar.asi8.tobytes()).hexdigest() if calendar is not None else None,
+                           actual_start=bars.index[0].date().isoformat(), actual_end=bars.index[-1].date().isoformat(),
+                           result=evaluate_execution_asset(bars, plan, calendar, capital_config))
+                row['status'] = 'evaluated' if row['result']['holdout']['strategies'] else 'insufficient'
+                report['assets'].append(row)
+                continue
             benchmark = asset.get('benchmark', 'sh000300')
             ref_asset = {'kind':'index','code':benchmark}
             if asset.get('benchmark_csv'):
@@ -158,7 +201,7 @@ def run_plan(plan, root, progress=None):
                 raise ValueError('清单区间内没有本地资产或基准行情')
             row.update(data_sha256=fingerprint(bars), benchmark_sha256=fingerprint(reference),
                        actual_start=bars.index[0].date().isoformat(), actual_end=bars.index[-1].date().isoformat(),
-                       result=evaluate_asset(bars, reference.close, plan, family_size))
+                       result=evaluate_asset(bars, reference.close, plan, family_size, calendar))
             row['status'] = 'evaluated' if any(r['n'] for h in row['result']['horizons'].values() for r in h['holdout']) else 'insufficient'
         except (ValueError, KeyError, OSError) as error:
             row.update(status='unavailable', error=str(error))
@@ -171,13 +214,14 @@ def main(argv=None, *, prog=None):
     parser = argparse.ArgumentParser(description=__doc__, prog=prog)
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--execution-only', action='store_true', help='仅评估固定技术规则的次会话成交与费用情景，不重训方向模型')
     args = parser.parse_args(argv)
     path = Path(args.manifest)
     if Path(args.output).exists():
         parser.error('输出已存在，请使用新的报告文件名以保留既有试验记录')
     plan = json.loads(path.read_text(encoding='utf-8'))
     try:
-        report = run_plan(plan, path.parent, progress=lambda code: print(f'评估 {code}…', flush=True))
+        report = run_plan(plan, path.parent, progress=lambda code: print(f'评估 {code}…', flush=True), execution_only=args.execution_only)
     except (ValueError, KeyError) as error:
         parser.error(str(error))
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)

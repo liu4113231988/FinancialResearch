@@ -7,7 +7,7 @@ class Command:
     name: str
     module: str
     summary: str
-    legacy_script: str
+    legacy_script: str | None = None
 
 
 COMMAND_SPECS = (
@@ -25,7 +25,9 @@ COMMAND_SPECS = (
     Command('selection', 'research.commands.selection', '选择偏差检验', 'run_selection.py'),
     Command('verify-basis', 'research.commands.verify_basis', '核对基金收益口径', 'run_verify_basis.py'),
     Command('walkforward', 'research.commands.walkforward', '时间向前验证', 'run_walkforward.py'),
+    Command('market-snapshot', 'research.market_snapshot', '固定证券验证快照与日历准备'),
+    Command('market-validate', 'research.market_validation', '股票指数方向与成交验证'),
 )
 
 COMMANDS = {command.name: command.module for command in COMMAND_SPECS}
-LEGACY_COMMANDS = {command.legacy_script: command.name for command in COMMAND_SPECS}
+LEGACY_COMMANDS = {command.legacy_script: command.name for command in COMMAND_SPECS if command.legacy_script}

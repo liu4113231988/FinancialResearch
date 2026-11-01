@@ -55,6 +55,8 @@ class ValidationTests(unittest.TestCase):
         for horizon in (5,20):
             for row in out['horizons'][str(horizon)]['development']:
                 self.assertLessEqual(pd.Timestamp(row['end']), bars.index[119-horizon])
+                self.assertEqual(pd.Timestamp(row['execution']['end']),bars.index[119])
+                self.assertEqual(row['execution']['strategies']['base'][0]['fills'],1)
 
     def test_invalid_manifest_and_missing_assets_are_retained(self):
         plan = dict(start='2021-01-01', development_start='2023-01-01', holdout_start='2025-01-01', end='2026-10-30',
