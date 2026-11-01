@@ -138,7 +138,10 @@
 <!-- ================= 进度条 ================= -->
 <div class="progress-wrap" id="progressWrap" hidden>
   <div class="progress-box">
-    <div class="p-title"><span id="pStage">准备中…</span><span id="pPct">0%</span></div>
+    <div class="p-title"><span id="pStage">准备中…</span>
+      <span class="p-right"><span id="pPct">0%</span>
+        <button type="button" class="btn ghost btn-mini" id="btnCancelJob" hidden
+                title="停止等待并放弃本次任务结果">取消</button></span></div>
     <div class="p-track"><div class="p-fill" id="pFill"></div></div>
     <div class="p-detail" id="pDetail"></div>
   </div>

@@ -51,6 +51,27 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   assert.equal(btPending[2].url,'/api/result/second');
   btContext.fundGeneration++;
   btPending[2].resolve({result:{}}); await btSecond;
+  // 取消按钮：必须真的打到后端，并且递增代次让在途轮询退出。
+  const cancelled = [];
+  let invalidated = 0;
+  const cancelContext = {
+    activeJob: 'job-7',
+    api: (url, opts) => {cancelled.push([url, opts && opts.method]); return Promise.resolve({});},
+    invalidateFund() {invalidated++;}, $: () => ({}), showAlert() {},
+  };
+  vm.createContext(cancelContext);
+  vm.runInContext(source.slice(source.indexOf('async function cancelActiveJob('),
+                               source.indexOf('function applyResult(res)')),
+                  cancelContext);
+  await cancelContext.cancelActiveJob();
+  assert.deepEqual(cancelled, [['/api/job/job-7/cancel', 'POST']]);
+  assert.equal(invalidated, 1);
+  assert.equal(cancelContext.activeJob, null);
+  const html = fs.readFileSync('src/market_research/api/static/index.html', 'utf8');
+  assert.match(html, /id="btnCancelJob"/);
+  assert.match(source, /\$\('btnCancelJob'\)\.onclick = cancelActiveJob/);
+  assert.match(source, /attempts > 200 \? 2000/);
+  console.log('Cancel button wired, polling capped and backoff applied: OK');
   console.log('Correlation window, response ordering, replaced fund and stale polling: OK');
   console.log('Backtest stale error and late result fencing: OK');
 })().catch(error => {console.error(error); process.exitCode=1;});

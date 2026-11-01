@@ -556,6 +556,7 @@ async function checkName(code, token = fundGeneration) {
   };
 
   $('btnRefresh').onclick = () => S.result && run(S.result.code, { refresh: true });
+  $('btnCancelJob').onclick = cancelActiveJob;
   $('btnReLearn').onclick = () => S.result && run(S.result.code, { force: true });
   $('btnSaveSel').onclick = () => {
     if (!S.sel) return;
@@ -667,9 +668,14 @@ function updateRunHint() {
 
 let fundGeneration = 0;
 let correlationGeneration = 0;
+let activeJob = null;          // 当前正在轮询的任务，供"取消"按钮使用
+// 轮询上限写在各自函数内部（前端回归用 vm 单函数求值，不共享模块常量）：
+// 前 200 次快查，之后退避到 2s，总量约 35 分钟。
 function setFundBusy(busy) {
   for (const id of ['runBtn', 'fundApply', 'btnRefresh', 'btnReLearn', 'btnApplyParams', 'btRun']) $(id).disabled = busy;
   $('runBtn').setAttribute('aria-busy', String(busy));
+  const cancel = $('btnCancelJob');
+  if (cancel) cancel.hidden = !busy;
 }
 function invalidateFund() {
   fundGeneration++;
@@ -746,12 +752,14 @@ async function run(code, opts = {}) {
       $('progressWrap').hidden = true;
       return;
     }
+    activeJob = r.job_id;
     await poll(r.job_id, token);
   } catch (e) {
     if (token !== fundGeneration) return;
     showAlert('分析失败：' + e.message);
     $('progressWrap').hidden = true;
   } finally {
+    activeJob = null;
     if (token === fundGeneration) setFundBusy(false);
   }
 }
@@ -764,8 +772,18 @@ function setProgress(stage, pct, detail) {
 }
 
 async function poll(jid, token = fundGeneration) {
+  const MAX_POLLS = 1200;   // 900ms × 200 + 2s × 1000 ≈ 35 分钟
+  activeJob = jid;
+  let attempts = 0;
   while (token === fundGeneration) {
-    await new Promise(r => setTimeout(r, 900));
+    // 前 3 分钟 900ms 一查，之后放慢到 2s（长任务不必持续打满后端）
+    await new Promise(r => setTimeout(r, attempts > 200 ? 2000 : 900));
+    if (token !== fundGeneration) return;
+    if (++attempts > MAX_POLLS) {
+      $('progressWrap').hidden = true;
+      showAlert('等待超时（约 35 分钟）。任务可能仍在后台运行，可点"刷新数据"或稍后重新分析。');
+      return;
+    }
     let j;
     try { j = await api('/api/job/' + jid); }
     catch (e) { if (token !== fundGeneration) return; showAlert('任务查询失败：' + e.message); $('progressWrap').hidden = true; return; }
@@ -784,6 +802,19 @@ async function poll(jid, token = fundGeneration) {
       return;
     }
   }
+}
+
+async function cancelActiveJob() {
+  const jid = activeJob;
+  activeJob = null;
+  if (jid) {
+    try { await api('/api/job/' + jid + '/cancel', { method: 'POST' }); }
+    catch (e) { /* 任务可能刚好结束，忽略 */ }
+  }
+  // 递增代次让所有在途轮询立即退出，并隐藏进度条
+  invalidateFund();
+  $('progressWrap').hidden = true;
+  showAlert(jid ? '已取消当前任务；后端收尾完成后结果会被丢弃。' : '没有正在运行的任务。');
 }
 
 function applyResult(res) {
@@ -823,6 +854,16 @@ function renderHead() {
     (m.window_years ? ` · 分析窗口 ${m.window_years} 年` : '') +
     (m.from_cache ? ' · 缓存' : '') +
     (m.data_basis ? ' · ' + m.data_basis : '');
+  // 价格覆盖降级透传：后端 align_prices 剔除/截断过数据时，别让用户以为
+  // 用的是完整候选池。用 textContent/title，不拼 innerHTML。
+  const dataWarns = m.data_warnings || [];
+  if (dataWarns.length) {
+    const badge = document.createElement('span');
+    badge.className = 'meta-warn';
+    badge.textContent = ` · ⚠ 口径降级 ${dataWarns.length} 项`;
+    badge.title = dataWarns.join('\n');
+    $('fundMeta').appendChild(badge);
+  }
 
   const bm = r.models[S.best];
   const kpi = [
@@ -1003,24 +1044,29 @@ function renderSelected() {
   $('selTime').textContent = `用时 ${fmtNum(m.metrics.elapsed, 1)}s`;
   $('selDesc').textContent = m.desc;
 
-  const gap = (m.metrics.fit_r2_mean ?? 0) - (m.metrics.oos_r2 ?? 0);
+  // ★ 缺失不得当 0：样本外 R² 失败（null）时若按 0 计算，gap≈窗口内 R²，
+  //   会被判成"过拟合明显"，与排名表 hasGap 的口径冲突。
+  const has = v => v !== null && v !== undefined && !isNaN(v);
+  const gap = has(m.metrics.oos_r2) && has(m.metrics.fit_r2_mean)
+    ? m.metrics.fit_r2_mean - m.metrics.oos_r2 : null;
   const beta = m.metrics.beta, vr = m.metrics.vol_ratio;
   const eq = S.cat?.rbsa?.equity_ratio ?? 0.9;
-  const betaLow = beta !== null && beta !== undefined &&
-    Math.abs(beta) < eq * 0.7;
+  // 负 beta 意味着合成基准与基金方向相反，必须单独提示（与排名表一致）
+  const betaNeg = has(beta) && beta < 0;
+  const betaLow = has(beta) && beta >= 0 && beta < eq * 0.7;
   const kpi = [
     { lb: mh('oos_r2', '样本外 R²'), vl: fmtNum(m.metrics.oos_r2, 4),
-      sb: '排序依据', cls: 'good' },
+      sb: has(m.metrics.oos_r2) ? '排序依据' : '本模型未产出', cls: 'good' },
     { lb: mh('oos_te', '年化跟踪误差'), vl: fmtPct(m.metrics.oos_te, 1),
       sb: '越低越贴合' },
     { lb: mh('fit_r2', '窗口内 R²'), vl: fmtNum(m.metrics.fit_r2_mean, 4),
       sb: '训练集拟合度' },
-    { lb: mh('gap', '训练−样本外'), vl: fmtSign(gap, 3),
-      sb: gap > 0.08 ? '过拟合明显' : '差距可控',
-      cls: gap > 0.08 ? 'warn' : '' },
+    { lb: mh('gap', '训练−样本外'), vl: gap === null ? '—' : fmtSign(gap, 3),
+      sb: gap === null ? '缺少样本外结果' : (gap > 0.08 ? '过拟合明显' : '差距可控'),
+      cls: gap !== null && gap > 0.08 ? 'warn' : '' },
     { lb: mh('beta', '隐含股票仓位'), vl: fmtPct(beta, 0),
-      sb: `${mh('vol_ratio', '基准波动/基金')} ${fmtNum(vr, 1)}×`,
-      cls: betaLow ? 'warn' : '' },
+      sb: betaNeg ? '负 beta：基准与基金反向' : `${mh('vol_ratio', '基准波动/基金')} ${fmtNum(vr, 1)}×`,
+      cls: betaNeg || betaLow ? 'warn' : '' },
     { lb: mh('win', '方向一致率'), vl: fmtPct(m.metrics.win, 1), sb: '涨跌方向命中' },
     { lb: mh('n_weights', '有效权重数'), vl: m.metrics.n_weights,
       sb: `更新于 ${m.weights_last_date || '—'}` },
@@ -1031,7 +1077,13 @@ function renderSelected() {
 
   // 仓位失配时给一句提示，避免用户误以为模型失效
   const noteEl = $('selNote');
-  if (betaLow) {
+  if (betaNeg) {
+    noteEl.innerHTML = `<div class="lead bad" style="margin:0 0 14px">
+      <b>警告：</b>该模型隐含仓位为 <b>${fmtPct(beta, 0)}（负值）</b>，
+      意味着把基金当作"做空该组合"来解释——这在公募基金上不成立。
+      该模型的 R²/残差不可用于判断风格，请换一个模型或检查数据区间。</div>`;
+    noteEl.hidden = false;
+  } else if (betaLow) {
     noteEl.innerHTML = `<div class="lead warn" style="margin:0 0 14px">
       <b>提示：</b>该基金隐含股票仓位仅 ${fmtPct(beta, 0)}，而合成基准按
       ${fmtPct(eq, 0)} 满仓构建（基准波动是基金的 ${fmtNum(vr, 1)} 倍）。
@@ -1265,8 +1317,6 @@ function drawCurve(m) {
 
 function drawResid(m) {
   const d = m.residual;
-  const vals = (d.value || []).filter(v => v !== null);
-  const mx = vals.length ? Math.max(...vals.map(Math.abs)) : 1;
   chart('chartResid', {
     grid: { left: 52, right: 18, top: 18, bottom: 34 },
     tooltip: { trigger: 'axis', backgroundColor: '#1b2431', borderColor: '#2f3b4d',
@@ -1281,6 +1331,9 @@ function drawResid(m) {
       type: 'bar', data: (d.value || []).map(v =>
         v === null ? null : { value: v, itemStyle: { color: colOf(v) } }),
       barMaxWidth: 2.2,
+      markLine: { silent: true, symbol: 'none',
+        lineStyle: { color: '#64748b', type: 'dashed', width: 1 },
+        label: { show: false }, data: [{ yAxis: 0 }] },
     }]
   });
 }
@@ -1488,7 +1541,12 @@ function drawMonthly(monthly, years) {
     grid: { left: 52, right: 18, top: 12, bottom: 46 },
     tooltip: { position: 'top', backgroundColor: '#1b2431', borderColor: '#2f3b4d',
       textStyle: { color: '#e6edf6', fontSize: 12 },
-      formatter: p => p.value[0] === '-' ? '' : `${yearsR[p.value[1]]}-${String(p.value[0] + 1).padStart(2, '0')}<br/><b style="color:${colOf(p.value[2])}">${p.value[2]}%</b>` },
+      formatter: p => {
+        const m = String(p.value[0] + 1).padStart(2, '0');
+        const head = `${yearsR[p.value[1]]}-${m}`;
+        return p.value[2] === '-' ? `${head}<br/><b>无数据</b>`
+          : `${head}<br/><b style="color:${colOf(p.value[2])}">${p.value[2]}%</b>`;
+      } },
     xAxis: { type: 'category', data: Array.from({ length: 12 }, (_, i) => i + 1 + '月'),
       ...AX, splitArea: { show: true, areaStyle: { color: ['rgba(255,255,255,.015)', 'transparent'] } } },
     yAxis: { type: 'category', data: yearsR, ...AX,
@@ -1499,7 +1557,7 @@ function drawMonthly(monthly, years) {
       inRange: { color: ['#12b886', '#0f8f68', '#1b2431', '#c0392b', '#ef4a4a'] } },
     series: [{ type: 'heatmap', data,
       label: { show: true, fontSize: 9.5, color: '#dbe4f0',
-        formatter: p => p.value[0] === '-' ? '' : p.value[2].toFixed(1) },
+        formatter: p => p.value[2] === '-' ? '' : p.value[2].toFixed(1) },
       itemStyle: { borderColor: '#0d1117', borderWidth: 1.5 } }]
   });
 }
@@ -1601,7 +1659,7 @@ function drawRollCorr(roll) {
       top: 0, itemWidth: 14, itemHeight: 7, type: 'scroll' },
     xAxis: { type: 'category', data: roll[keys[0]].dates, ...AX,
       axisLabel: { ...AX.axisLabel, hideOverlap: true } },
-    yAxis: { type: 'value', min: 0, max: 1, ...AX },
+    yAxis: { type: 'value', min: -1, max: 1, ...AX },
     dataZoom: [{ type: 'inside' }, { type: 'slider', height: 14, bottom: 4,
       borderColor: '#2f3b4d', fillerColor: 'rgba(74,158,255,.12)',
       handleStyle: { color: '#4a9eff' }, textStyle: { color: '#6f7f96', fontSize: 9 } }],
@@ -1669,21 +1727,33 @@ async function runBacktest() {
       })
     });
     if (token !== fundGeneration) return;
+    activeJob = r.job_id;
     await pollBacktest(r.job_id, token);
   } catch (e) {
     if (token !== fundGeneration) return;
     $('progressWrap').hidden = true;
     showAlert('回测失败：' + e.message);
   } finally {
+    activeJob = null;
     if (token === fundGeneration) setFundBusy(false);
   }
 }
 
 async function pollBacktest(jid, token = fundGeneration) {
+  const MAX_POLLS = 1500;   // 800ms × 200 + 2s × 1300 ≈ 35 分钟
+  activeJob = jid;
+  let attempts = 0;
   while (token === fundGeneration) {
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, attempts > 200 ? 2000 : 800));
     if (token !== fundGeneration) return;
-    const j = await api('/api/job/' + jid);
+    if (++attempts > MAX_POLLS) {
+      $('progressWrap').hidden = true;
+      showAlert('回测等待超时（约 35 分钟）。任务可能仍在后台运行，可稍后重试。');
+      return;
+    }
+    let j;
+    try { j = await api('/api/job/' + jid); }
+    catch (e) { if (token !== fundGeneration) return; showAlert('回测查询失败：' + e.message); $('progressWrap').hidden = true; return; }
     if (token !== fundGeneration) return;
     setProgress(j.stage, j.progress, j.detail);
     if (j.status === 'done') {
