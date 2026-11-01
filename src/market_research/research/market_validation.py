@@ -23,7 +23,7 @@ from market_research.serialization import _jsafe
 from market_research.validation.window import _iso
 
 VARIANTS = ('base', 'volatility', 'volume', 'relative', 'all')
-VERSION = 14
+VERSION = 15
 
 
 def validate_plan(plan):

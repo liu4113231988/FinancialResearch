@@ -4,8 +4,9 @@ import pandas as pd
 
 
 def percentile(series, window=252, minimum=60):
-    return series.rolling(window, min_periods=minimum).apply(
-        lambda x: np.mean(x <= x[-1]), raw=True)
+    values=series.replace([np.inf,-np.inf],np.nan)
+    return values.rolling(window, min_periods=minimum).apply(
+        lambda x: np.mean(x[~np.isnan(x)] <= x[-1]) if not np.isnan(x[-1]) else np.nan, raw=True)
 
 
 def context_features(bars, ind, reference=None):
@@ -55,4 +56,4 @@ def context_payload(features, benchmark):
                    '偏弱' if gap < 0 and momentum < 0 else '分歧 / 震荡')
     return {'benchmark': benchmark, 'environment': environment,
             'latest': last.to_dict(),
-            'note': '环境为基准相对 MA60 与20日动量的规则描述；ADX衡量趋势强度、不代表方向。分位使用最多252日历史、至少60个有效值。相对强弱为价格比率变化，未含分红。'}
+            'note': '环境为基准相对 MA60 与20日动量的规则描述；ADX衡量趋势强度、不代表方向。分位只使用最多252条日线内的有限观测，至少60个，当日缺失不输出。相对强弱为价格比率变化，未含分红。'}
