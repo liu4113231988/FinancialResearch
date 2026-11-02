@@ -4,7 +4,8 @@ window.MarketApp = (() => {
   const el = id => document.getElementById(id);
   const views = { stock: {}, index: {}, fund: {} };
   const charts = new Map();
-  let kind = 'stock', catalog, fund, requestData, alert, generation = 0, result = null, chartType = 'candlestick';
+  let activeTask = null;
+  let kind = 'stock', catalog, fund, requestData, alert, result = null, chartType = 'candlestick';
   const pct = value => value == null ? '—' : (value * 100).toFixed(2) + '%';
   const num = value => value == null ? '—' : Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
   const date = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -18,10 +19,10 @@ window.MarketApp = (() => {
     views[kind] = { code: el('codeInput').value, result,
       start: el('marketStart').value, end: el('marketEnd').value,
       adjust: el('marketAdjust').value, benchmark: el('marketBenchmark').value };
-    generation++;
     if (fund.invalidate) fund.invalidate();
     kind = next;
     result = views[kind].result || null;
+    if (fund.renderWatchlist) fund.renderWatchlist();
     charts.forEach(c => c.dispose()); charts.clear();
     document.querySelectorAll('[data-asset]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.asset === kind)));
     el('marketView').hidden = kind === 'fund';
@@ -34,6 +35,7 @@ window.MarketApp = (() => {
     el('fundApply').disabled = false;
     el('runBtn').removeAttribute('aria-busy');
     alert(null); status(null);
+    setBusy(!!activeTask);
     el('codeInput').value = views[kind].code || '';
     el('codeInput').placeholder = kind === 'fund' ? '基金代码，如 110022' : kind === 'stock' ? '股票代码，如 600519' : '指数代码，如 sh000300';
     const items = kind === 'fund' ? catalog.known_funds : kind === 'stock' ? catalog.assets.stocks : catalog.assets.indices;
@@ -64,42 +66,82 @@ window.MarketApp = (() => {
     el('marketEmpty').hidden = !!result; el('marketResult').hidden = !result;
     if (result) render(result);
   }
+  function setBusy(busy) {
+    el('marketCancel').hidden = !busy;
+    el('marketRecalculate').disabled = el('marketRefresh').disabled = busy;
+    if (kind !== 'fund') {
+      el('runBtn').disabled = busy;
+      el('runBtn').setAttribute('aria-busy', String(busy));
+    }
+  }
+  async function request(path, options = {}, retry = false) {
+    for (let attempt = 0; ; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      try { return await requestData(path, {...options, signal: controller.signal}); }
+      catch (error) {
+        if (!retry || attempt >= 2) throw error;
+      } finally { clearTimeout(timer); }
+      await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+    }
+  }
+  async function cancel() {
+    const task = activeTask;
+    if (!task) return;
+    task.cancelRequested = true;
+    if (!task.id) { status('正在等待任务编号，收到后将取消…'); return; }
+    try {
+      await request('/api/job/' + task.id + '/cancel', {method: 'POST'});
+      if (activeTask !== task) return;
+      activeTask = null; setBusy(false); status('任务已取消。');
+    } catch (error) {
+      task.cancelRequested = false;
+      if (kind !== 'fund') status('取消失败：' + error.message + '；可再次点击取消。', true);
+    }
+  }
   async function submit(code, refresh = false) {
+    if (kind === 'fund') return;
+    if (activeTask) { status('已有市场分析任务在运行，请等待完成或取消。', true); return; }
     code = code.trim();
     if (!/^(?:(?:sh|sz|bj))?\d{6}$/i.test(code)) { status('请输入正确的证券代码，例如 600519 或 sh000300。', true); return; }
     const form = el('marketFilters');
     if (!form.reportValidity()) return;
     if (el('marketStart').value >= el('marketEnd').value) { status('开始日期需早于结束日期。', true); return; }
     if (Date.parse(el('marketEnd').value) - Date.parse(el('marketStart').value) < 30 * 86400000) { status('分析区间最短需 30 个自然日，请扩大区间。', true); return; }
-    const token = ++generation;
     const body = {kind, code, start: el('marketStart').value, end: el('marketEnd').value,
       adjust: el('marketAdjust').value, benchmark: el('marketBenchmark').value, refresh};
-    el('runBtn').disabled = true; el('runBtn').setAttribute('aria-busy', 'true');
-    el('marketRecalculate').disabled = el('marketRefresh').disabled = true;
+    const task = {id: null, cancelRequested: false};
+    activeTask = task; setBusy(true);
     status(`正在读取 ${code} 的日线行情…`);
     try {
-      const request = await requestData('/api/market/analyze', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-      while (token === generation) {
-        if (token !== generation) return;
-        await new Promise(resolve => setTimeout(resolve, 700));
-        if (token !== generation) return;
-        const job = await requestData('/api/job/' + request.job_id);
-        if (token !== generation) return;
-        if (job.status === 'error') throw new Error(job.error);
-        status(`${code} · ${job.stage} · ${Math.round((job.progress || 0) * 100)}%`);
+      const submission = await request('/api/market/analyze', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      task.id = submission.job_id;
+      if (task.cancelRequested) await cancel();
+      for (let polls = 0; polls < 1200 && activeTask === task; polls++) {
+        await new Promise(resolve => setTimeout(resolve, polls > 200 ? 2000 : 700));
+        if (activeTask !== task) return;
+        const job = await request('/api/job/' + task.id, {}, true);
+        if (activeTask !== task) return;
+        if (job.status === 'error') { activeTask = null; throw new Error(job.error); }
+        if (kind === body.kind) status(`${code} · ${job.stage} · ${Math.round((job.progress || 0) * 100)}%`);
         if (job.status === 'done') {
-          const response = await requestData('/api/result/' + request.job_id);
-          if (token !== generation) return;
+          const response = await request('/api/result/' + task.id, {}, true);
+          if (activeTask !== task) return;
+          activeTask = null;
+          if (kind !== body.kind) { views[body.kind].result = response.result; return; }
           result = response.result; render(result);
           const changed = body.start !== el('marketStart').value || body.end !== el('marketEnd').value
             || body.adjust !== el('marketAdjust').value || body.benchmark !== el('marketBenchmark').value;
           status(changed ? '设置已更改，当前图表对应提交时的设置；点击「应用区间」更新结果。' : null); return;
         }
       }
+      if (activeTask === task) throw new Error('等待超时；任务可能仍在后台运行，可取消后重试。');
     } catch (error) {
-      if (token === generation) status('分析失败：' + error.message, true);
+      if (task.cancelRequested && activeTask !== task) return;
+      if (!task.id && activeTask === task) activeTask = null;
+      if (kind !== 'fund') status('分析失败：' + error.message + (activeTask === task ? '；可取消任务后重试。' : ''), true);
     } finally {
-      if (token === generation) { el('runBtn').disabled = false; el('runBtn').removeAttribute('aria-busy'); el('marketRecalculate').disabled = el('marketRefresh').disabled = false; }
+      setBusy(!!activeTask);
     }
   }
   function plot(id, dates, series, percent = false, extra = {}) {
@@ -279,6 +321,7 @@ window.MarketApp = (() => {
     document.querySelectorAll('[data-asset]').forEach(button => {button.onclick = () => switchKind(button.dataset.asset);});
     document.querySelectorAll('[data-chart]').forEach(button => {button.onclick = () => {chartType = button.dataset.chart; if (result) price();};});
     el('marketFilters').onsubmit = event => {event.preventDefault(); submit(el('codeInput').value);};
+    el('marketCancel').onclick = cancel;
     el('marketRefresh').onclick = () => result && submit(result.code, true);
     el('marketFilters').onchange = () => {if (result) status('区间或口径已更改，点击「应用区间」更新结果。');};
     window.addEventListener('resize', () => charts.forEach(c => c.resize()));

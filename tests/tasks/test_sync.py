@@ -14,6 +14,9 @@ import market_research.tasks.sync as sync
 
 class SyncTests(unittest.TestCase):
     def setUp(self):
+        valuation = patch.object(sync, "_accumulate_valuation")
+        valuation.start()
+        self.addCleanup(valuation.stop)
         self.directory = tempfile.TemporaryDirectory(dir=C.ROOT / "output")
         self.config = patch.object(C, "DATA_DIR", Path(self.directory.name))
         self.config.start()

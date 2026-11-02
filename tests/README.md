@@ -24,9 +24,12 @@ uv run python tests/regression/test_p0_fixes.py
 uv run python tests/regression/test_regressions.py
 node tests/frontend/test_refit.js
 node tests/frontend/test_ui_async.cjs
+node tests/frontend/test_market_async.cjs
 ```
 
 unittest 使用 `-t .` 按 `tests.*` 加载，避免分组目录遮蔽第三方包。自动发现不会调用研究脚本的 main，也不等于执行全部真实行情/完整模型验证。Windows ASGI 测试需要允许本机 socketpair；受限沙箱可能阻止该操作。
+
+`test_market_async.cjs` 使用现有 jsdom，覆盖市场任务重入、提交返回前取消、跨入口取消/结果恢复、自选显隐、读取重试、轮询上限和请求超时。同步任务测试已隔离估值下载，估值每日累积由 `tests/data/test_valuation.py` 独立覆盖。
 
 ## 浏览器检查
 

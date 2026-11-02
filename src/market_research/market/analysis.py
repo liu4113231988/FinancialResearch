@@ -187,7 +187,7 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
         if kind == 'index':
             technical['notices'] = [n for n in technical['notices'] if '复权' not in n]
             technical['notices'].append('指数为价格指数；技术条件未在实际ETF成交、费用与跟踪偏差上验证。')
-    payload = market_payload(kind, code, bars, reference, benchmark, adjust, warnings)
+    payload = market_payload(kind, code, bars, reference, benchmark, adjust, warnings, context.tail(1500))
     payload["quality"] = market_quality(bars, reference, start, end, calendar, calendar_info)
     quality = payload["quality"]
     payload["warnings"].append(
@@ -225,11 +225,12 @@ def market_quality(bars, reference, start, end, calendar=None, calendar_info=Non
             "fetched_at": bars.attrs.get("fetched_at")}
 
 
-def market_payload(kind, code, bars, reference=None, benchmark="sh000300", adjust="qfq", warnings=None):
+def market_payload(kind, code, bars, reference=None, benchmark="sh000300", adjust="qfq", warnings=None, history=None):
     close = bars.close
     returns = close.pct_change().dropna()
     metrics = perf_metrics(returns, rf=0)
-    ma = {str(n): close.rolling(n).mean() for n in (20, 60, 120)}
+    warm_close = history.close if history is not None else close
+    ma = {str(n): warm_close.rolling(n).mean().reindex(close.index) for n in (20, 60, 120)}
     comparison = {"ok": False, "name": INDICES.get(benchmark, benchmark)}
     if reference is not None:
         pair = pd.concat([close.rename("asset"), reference.rename("benchmark")], axis=1).dropna()

@@ -704,6 +704,7 @@ function exportResult() {
   renderWatchlist();
   $('btnWatch').onclick = toggleWatchlist;
   $('watchSel').onchange = e => {
+    if (currentKind() !== 'fund') return;
     if (!e.target.value) return;
     $('codeInput').value = e.target.value;
     run(e.target.value);
@@ -734,7 +735,7 @@ function exportResult() {
   $('btRun').onclick = runBacktest;
   if (window.MarketApp) MarketApp.init(S.cat, {
     request: api, alert: showAlert,
-    fund: {invalidate: invalidateFund, hasResult: () => !!S.result, show: showFundResult},
+    fund: {invalidate: invalidateFund, hasResult: () => !!S.result, show: showFundResult, renderWatchlist},
   });
 })();
 

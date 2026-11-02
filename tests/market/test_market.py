@@ -114,6 +114,20 @@ class MarketTests(unittest.TestCase):
         pd.testing.assert_frame_equal(technical.call_args.args[0],current)
         self.assertFalse(result["technical"]["ready"])
 
+    def test_display_moving_averages_share_technical_warmup(self):
+        history = bars(420)
+        visible = history.tail(30)
+        with patch("market_research.market.analysis.load_bars", return_value=visible), \
+             patch("market_research.tasks.sync.cached", return_value=history), \
+             patch("market_research.data.providers.calendar.bundled_calendar", return_value=(history.index, {})):
+            result = analyze_market("stock", "600519", str(visible.index[0].date()), str(visible.index[-1].date()))
+        ma60 = result["technical"]["latest"]["ma60"]
+        self.assertEqual(result["series"]["ma"]["60"][-1], ma60)
+        self.assertAlmostEqual(result["stats"]["ma60_gap"], visible.close.iloc[-1] / ma60 - 1, places=6)
+        self.assertIsNotNone(result["series"]["ma"]["20"][0])
+        self.assertEqual(len(result["series"]["ma"]["120"]), len(visible))
+        self.assertAlmostEqual(result["stats"]["total_return"], visible.close.iloc[-1] / visible.close.iloc[0] - 1, places=6)
+
     def test_market_api_validation_and_shared_runner(self):
         client = TestClient(app)
         for body in ([1], {"kind": "stock", "code": "sh000001"}, {"kind": "stock", "code": "600519", "adjust": "bad"}, {"kind": "index", "code": "sh000300", "start": "2024/01/01"}):
