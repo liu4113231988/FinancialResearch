@@ -44,6 +44,19 @@ class DurableJobStore:
         with storage.connection() as db:
             _schema(db)
 
+    def stats(self):
+        """队列深度与状态分布（供 /api/ready，不创建 schema）。"""
+        try:
+            with storage.connection(timeout=2.0) as db:
+                rows = db.execute(
+                    "SELECT status, count(*) FROM analysis_jobs GROUP BY status").fetchall()
+        except Exception:                                  # noqa: BLE001
+            with storage.connection() as db:
+                _schema(db)
+                rows = db.execute(
+                    "SELECT status, count(*) FROM analysis_jobs GROUP BY status").fetchall()
+        return {str(status): int(count) for status, count in rows}
+
     def enqueue(self, code, models, operation, arguments, key=None):
         settings, current = Settings.load(), time.time()
         with storage.connection() as db:

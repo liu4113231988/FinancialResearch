@@ -20,7 +20,11 @@ def result(jid:str):
         return JSONResponse({'error':job['error']},status_code=500)
     if job['status']!='done':
         return JSONResponse({'error':'尚未完成','status':job['status']},status_code=202)
-    return {'ok':True,'result':job['result']}
+    payload = job['result'] or {}
+    # P2-31：任务成功 ≠ 结果完整；把完整性契约一并返回，调用方可区分部分成功
+    return {'ok': True, 'status': payload.get('status', 'ok'),
+            'completeness': payload.get('completeness') or {},
+            'result': payload}
 
 
 @router.post('/api/job/{jid}/cancel')

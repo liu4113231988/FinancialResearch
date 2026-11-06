@@ -113,6 +113,11 @@ class BacktestRequest(FundWindow):
         return value
 
 
+class HoldingsRequest(FundWindow):
+    """真实持仓拟合：只依赖基金代码，刷新开关控制是否重抓持仓/成分股。"""
+    refresh: StrictBool = False
+
+
 class MarketRequest(WindowRequest):
     kind: Literal["stock", "index"] = "stock"
     code: str

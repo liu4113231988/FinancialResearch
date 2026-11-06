@@ -3,9 +3,9 @@ from fastapi.responses import JSONResponse
 import market_research.config as C
 import market_research.data.marketdata as D
 from market_research.validation.window import parse_window
-from market_research.errors import CacheMiss, JobsBusy
+from market_research.errors import CacheMiss, JobsBusy, StorageBusy
 import market_research.services.analysis as services
-from market_research.api.schemas import AnalysisRequest, RefitRequest, BacktestRequest, SubmissionResponse
+from market_research.api.schemas import AnalysisRequest, RefitRequest, BacktestRequest, HoldingsRequest, SubmissionResponse
 
 router=APIRouter()
 
@@ -30,6 +30,11 @@ def refit(payload:RefitRequest):
 @router.post('/api/backtest',response_model=SubmissionResponse,response_model_exclude_none=True)
 def backtest(payload:BacktestRequest):
     return services.submit('backtest',payload.model_dump())
+
+
+@router.post('/api/holdings',response_model=SubmissionResponse,response_model_exclude_none=True)
+def holdings(payload:HoldingsRequest):
+    return services.submit('holdings',payload.model_dump())
 
 
 @router.get('/api/name/{code}')
@@ -66,6 +71,9 @@ def correlation(code:str,win:int=120,start:str|None=None,end:str|None=None):
         except JobsBusy as error:
             return JSONResponse({'error':str(error)},status_code=429)
         return JSONResponse(dict(submission),status_code=202)
+    except StorageBusy:
+        # P2-30：交给全局异常处理映射为 503，不要在这里退化成通用 500。
+        raise
     except Exception as error:
         return JSONResponse({'error':f'{type(error).__name__}: {str(error)[:200]}'},status_code=500)
     try:

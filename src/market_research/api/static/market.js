@@ -272,6 +272,10 @@ window.MarketApp = (() => {
       box.append(part('small',`训练 ${f.training_rows} 个已成熟样本；概率未单独校准。`)); return box;
     }));
     el('technicalRules').textContent=t.rules;
+    const sigTotal = (t.signal_total === undefined) ? t.signals.length : t.signal_total;
+    const sigCut = t.signals_truncated || 0;
+    el('stockSignalNote').textContent = '收盘后首次满足时记录；连续满足不会每天重复。记录不代表已成交。'
+      + `当前观察窗口共 ${sigTotal} 次` + (sigCut ? `，其中 ${sigCut} 次因展示上限未列出（非数据缺失）。` : '，均已列出。');
     el('technicalNotices').replaceChildren(...t.notices.map(text=>part('li',text)));
     const series=t.series;
     plot('stockMacd',series.dates,[line('DIF',series.dif),line('DEA',series.dea),{name:'MACD',type:'bar',data:series.macd.map(v=>({value:v,itemStyle:{color:v>=0?'#c88869':'#558d7e'}}))}]);

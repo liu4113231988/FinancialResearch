@@ -15,6 +15,41 @@ from market_research.api.app import app
 from fastapi.testclient import TestClient
 
 
+class HealthTests(unittest.TestCase):
+    """P2-25：存活探针与就绪探针必须区分。"""
+
+    def setUp(self):
+        self.client = TestClient(app)
+        from market_research.api.routes import meta as meta_route
+        self.meta = meta_route
+
+    def test_liveness_does_not_depend_on_storage(self):
+        response = self.client.get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["probe"], "liveness")
+
+    def test_ready_fails_503_when_dependency_unavailable(self):
+        with patch.object(self.meta, "_storage_check",
+                          return_value={"ok": False, "reason": "TimeoutError"}):
+            response = self.client.get("/api/ready")
+        self.assertEqual(response.status_code, 503)
+        body = response.json()
+        self.assertEqual(body["status"], "unhealthy")
+        self.assertFalse(body["checks"]["storage"]["ok"])
+
+    def test_ready_is_degraded_when_sync_is_stale(self):
+        with patch.object(self.meta, "_storage_check", return_value={"ok": True}), \
+             patch.object(self.meta, "_worker_check", return_value={"ok": True}), \
+             patch.object(self.meta, "_jobs_check", return_value={"ok": True}), \
+             patch.object(self.meta, "_sync_check",
+                          return_value={"ok": False, "reason": "30 天未同步"}):
+            response = self.client.get("/api/ready")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "degraded")
+        self.assertIn("30 天未同步", body["checks"]["sync"]["reason"])
+
+
 class RouteTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
@@ -37,7 +72,9 @@ class RouteTests(unittest.TestCase):
 
     def test_changed_data_does_not_cache_old_result_under_new_stamp(self):
         with patch.object(web, "fund_cache_path", side_effect=[Path("old.pkl"), Path("new.pkl")]), patch.object(web, "analyze", return_value={"meta": {}}), patch.object(web, "_atomic_pickle_dump") as save:
-            self.assertEqual(web.execute("analyze", {}, "test"), {"meta": {}})
+            result = web.execute("analyze", {}, "test")
+            # P2-34：结果统一挂溯源指纹，原有 meta 字段保留
+            self.assertIn("provenance", result["meta"])
             save.assert_not_called()
 
     def test_cached_requests_do_not_consume_slots(self):
@@ -70,6 +107,7 @@ class RouteTests(unittest.TestCase):
                     ("analyze", "analyze", {"code": "110022", "models": ["ridge"]}),
                     ("refit", "refit_single", {"code": "110022", "model": "ridge"}),
                     ("backtest", "backtest_fund", {"code": "110022"}),
+                    ("holdings", "holdings", {"code": "110022"}),
                 ):
                     with self.subTest(route=route), patch.object(web, function, return_value={"meta": {}, "case": route}) as work:
                         response = self.client.post("/api/" + route, json=body)
@@ -86,7 +124,7 @@ class RouteTests(unittest.TestCase):
                         self.runner._slots.release()
 
     def test_non_object_body(self):
-        for route in ("analyze", "refit", "backtest"):
+        for route in ("analyze", "refit", "backtest", "holdings"):
             self.assertEqual(self.client.post("/api/" + route, json=[1]).status_code, 400)
 
     def test_correlation_cold_cache_executes_as_queue_job(self):
@@ -146,6 +184,21 @@ class ReadOnlyRouteTests(unittest.TestCase):
             response = self.client.get("/api/corr", params={"code": "110022"})
         self.assertEqual(response.status_code, 429)
         self.assertIn("上限", response.json()["error"])
+
+    def test_storage_lock_timeout_maps_to_retryable_503(self):
+        """P2-30：锁超时必须回 503 + 可读原因，不能被通用 500 吞掉。"""
+        from market_research.errors import StorageBusy
+        message = ("数据库正被同步任务或其它进程写入，等待 10 秒仍未获得锁；"
+                   "请稍后重试")
+        with patch.object(D, "load_panel", side_effect=StorageBusy(message)):
+            response = self.client.get("/api/corr", params={"code": "110022"})
+        self.assertEqual(response.status_code, 503)
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["field"], "storage")
+        self.assertIn("仍未获得锁", body["error"])
+        self.assertIn("稍后重试", body["error"])
+        self.assertGreater(body["retry_after_s"], 0)
 
     def test_correlation_computes_from_already_loaded_panel(self):
         rng = np.random.default_rng(7)

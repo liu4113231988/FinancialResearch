@@ -13,7 +13,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import market_research.config as C
-from market_research.errors import JobsBusy
+from market_research.errors import JobsBusy, StorageBusy
+from market_research.security import AccessControl, mode_description
 from market_research.tasks.jobs import JOBS
 from market_research.tasks.processes import launch
 from market_research.settings import Settings
@@ -65,6 +66,9 @@ def create_app():
     app=FastAPI(title='Market Research API',version='0.3.0',lifespan=lifespan,
                 responses={400:{'model':ErrorResponse},429:{'model':ErrorResponse}})
     app.add_middleware(BodyLimit)
+    # P2-24：默认单用户不启用认证；开启后用身份上下文贯通调用链。
+    app.add_middleware(AccessControl)
+    LOG.info('访问控制：%s', mode_description())
     origins=[v.strip() for v in os.environ.get('FIL_CORS_ORIGINS','').split(',') if v.strip()]
     if origins:
         app.add_middleware(CORSMiddleware,allow_origins=origins,allow_methods=['GET','POST'],allow_headers=['Content-Type'])
@@ -78,6 +82,14 @@ def create_app():
     @app.exception_handler(JobsBusy)
     async def busy(request:Request,error:JobsBusy):
         return JSONResponse({'ok':False,'error':str(error),'field':'concurrency'},status_code=429)
+
+    @app.exception_handler(StorageBusy)
+    async def storage_busy(request:Request,error:StorageBusy):
+        # P2-30：存储锁超时是**暂时性**故障，必须回 503 + 可读原因，
+        # 而不是被通用 500 吞掉；客户端可据此稍后重试。
+        LOG.warning('存储繁忙 %s：%s',request.url.path,error)
+        return JSONResponse({'ok':False,'error':str(error),'field':'storage',
+                             'retry_after_s':int(C.STORAGE_LOCK_TIMEOUT)},status_code=503)
 
     @app.exception_handler(ValueError)
     async def invalid(request:Request,error:ValueError):

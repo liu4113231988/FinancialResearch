@@ -653,6 +653,18 @@ function exportResult() {
   } catch (e) {
     showAlert('无法连接后端：' + e.message); return;
   }
+  // P2-36：声明文案与位置由后端配置；失败时保留页面内置默认文案
+  try {
+    const d = await api('/api/disclosure');
+    const banner = $('disclosureBanner');
+    if (banner && d.text) {
+      banner.replaceChildren();
+      const label = document.createElement('b');
+      label.textContent = '数据与使用声明';
+      banner.append(label, document.createTextNode('　' + d.text));
+      if (d.position === 'footer') document.body.appendChild(banner);
+    }
+  } catch (e) { /* 不影响主流程 */ }
   // 示例基金
   const sel = $('presetSel');
   S.cat.known_funds.forEach(f => {
@@ -733,6 +745,7 @@ function exportResult() {
 
   initBacktestPicker();
   $('btRun').onclick = runBacktest;
+  $('holdRun').onclick = runHoldings;
   if (window.MarketApp) MarketApp.init(S.cat, {
     request: api, alert: showAlert,
     fund: {invalidate: invalidateFund, hasResult: () => !!S.result, show: showFundResult, renderWatchlist},
@@ -1052,11 +1065,13 @@ function applyResult(res) {
   renderHead();
   renderWatchlist();               // ☆/★ 需跟随当前基金刷新
   renderInsights();
+  renderValNote();
   renderDrift();
   renderModelStrip();
   renderRank();
   renderSelected();
   renderNav();
+  renderFundForecast();
   renderCorr();
   syncBacktestDefaults();
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1068,7 +1083,8 @@ function renderHead() {
   $('fundName').textContent = `${r.name}（${r.code}）`;
   const m = r.meta;
   $('fundMeta').textContent =
-    `${st.start} ~ ${st.end} · ${st.n_days} 交易日 · 候选指数 ${m.n_assets} 个 · ` +
+    `${st.start} ~ ${st.end} · ${st.n_days} 交易日 · 候选指数 ` +
+    `${m.n_assets}${(m.n_assets_expected && m.n_assets_expected !== m.n_assets) ? '/' + m.n_assets_expected : ''} 个 · ` +
     `窗口 ${m.window} 日 / 重估 ${m.refit} 日 · 用时 ${m.elapsed}s` +
     (m.window_years ? ` · 分析窗口 ${m.window_years} 年` : '') +
     (m.from_cache ? ' · 缓存' : '') +
@@ -1076,12 +1092,24 @@ function renderHead() {
   // 价格覆盖降级透传：后端 align_prices 剔除/截断过数据时，别让用户以为
   // 用的是完整候选池。用 textContent/title，不拼 innerHTML。
   const dataWarns = m.data_warnings || [];
-  if (dataWarns.length) {
+  const quality = m.data_quality || {};
+  if (dataWarns.length || (quality.status && quality.status !== 'ok')) {
     const badge = document.createElement('span');
     badge.className = 'meta-warn';
-    badge.textContent = ` · ⚠ 口径降级 ${dataWarns.length} 项`;
-    badge.title = dataWarns.join('\n');
+    const status = quality.status && quality.status !== 'ok' ? quality.status : '';
+    badge.textContent = ` · ⚠ 数据质量${status ? ' ' + status : ''} ${dataWarns.length} 项`;
+    badge.title = (quality.reasons && quality.reasons.length
+      ? quality.reasons : dataWarns).join('\n');
     $('fundMeta').appendChild(badge);
+  }
+  const comp = r.completeness || {};
+  if (comp.status && comp.status !== 'ok') {
+    const cbadge = document.createElement('span');
+    cbadge.className = 'meta-warn';
+    cbadge.textContent = ` · ⚠ 结果${comp.status === 'failed' ? '失败' : '部分完成'}` +
+      `${(comp.missing || []).length ? ' ' + comp.missing.length + ' 项' : ''}`;
+    cbadge.title = (comp.reasons || []).join('\n') || '完整性信息缺失';
+    $('fundMeta').appendChild(cbadge);
   }
 
   const bm = r.models[S.best];
@@ -1102,6 +1130,29 @@ function renderHead() {
       <div class="lb">${k.lb}</div><div class="vl">${k.vl}</div>
       <div class="sb">${k.sb || ''}</div>
     </div>`).join('');
+}
+
+function valuationText(v) {
+  if (!v || !v.degraded) return '';
+  if (v.available === false) {
+    return `估值通道不可用${v.reason ? `（${v.reason}）` : ''}，` +
+      '已从融合权重中剔除，其余通道按权重重归一；页面不显示中性估值。';
+  }
+  const assets = (v.fallback_assets || []).slice(0, 6)
+    .map(a => `${a.name}(${a.code}, ${((a.weight || 0) * 100).toFixed(1)}%)`).join('、');
+  const cov = v.coverage != null
+    ? `真实 PE 覆盖率 ${(v.coverage * 100).toFixed(0)}%` : 'PE 覆盖率未知';
+  return `${v.note || '部分资产使用宽基兜底'}；${cov}` +
+    (assets ? `；兜底资产：${assets}` : '') +
+    (v.reason ? `（${v.reason}）` : '');
+}
+
+function renderValNote() {
+  const el = $('valNote');
+  if (!el) return;
+  const txt = valuationText(S.result && S.result.valuation);
+  el.hidden = !txt;
+  el.textContent = txt;
 }
 
 function renderInsights() {
@@ -1757,6 +1808,37 @@ function renderNav() {
   drawMonthly(n.monthly, n.years);
 }
 
+function renderFundForecast() {
+  const f = S.result && S.result.forecast;
+  const el = $('fundForecast'), note = $('fundForecastNote');
+  if (!el) return;
+  if (!f || !f.available) {
+    const why = (f && f.reason) || '净值样本不足，方向概率不可用';
+    el.innerHTML =
+      `<div class="kpi bad"><div class="lb">方向概率</div>` +
+      `<div class="vl">不可用</div><div class="sb">${escapeHtml(why)}</div></div>`;
+    if (note) note.innerHTML = '方向模型未通过可用性检查，因此<b>不显示任何概率</b>，避免被误读成正常值。';
+    return;
+  }
+  el.innerHTML = f.horizons.map(h => {
+    const p = (h.ok && h.probability != null)
+      ? (h.probability * 100).toFixed(1) + '%' : '不可用';
+    const ev = h.evaluation || {};
+    const evTxt = (ev.ok && ev.n)
+      ? `样本外准确率 ${((ev.accuracy ?? 0) * 100).toFixed(1)}% · 基准 ${((ev.baseline_accuracy ?? 0) * 100).toFixed(1)}% · n=${ev.n}`
+      : '样本外评估样本不足';
+    const cls = !h.ok ? 'bad' : (h.advantage ? 'good' : 'warn');
+    return `<div class="kpi ${cls}">
+      <div class="lb">未来 ${h.horizon} 日上涨概率</div>
+      <div class="vl">${p}</div>
+      <div class="sb">历史上涨基准 ${h.baseline != null ? (h.baseline * 100).toFixed(1) + '%' : '—'}<br>${escapeHtml(evTxt)}</div>
+    </div>`;
+  }).join('');
+  if (note) note.innerHTML =
+    `${escapeHtml(f.disclaimer || '')} 上方趋势色带只描述<b>已经发生</b>的形态；本区块才是方向概率，` +
+    '两者都不构成买卖建议。';
+}
+
 function drawMonthly(monthly, years) {
   if (!monthly || !Object.keys(monthly).length) {
     chart('chartMonthly', { title: { text: '数据不足', left: 'center',
@@ -2006,14 +2088,185 @@ async function pollBacktest(jid, token = fundGeneration) {
   }
 }
 
+async function runHoldings() {
+  if (!S.result) { showAlert('请先分析一只基金'); return; }
+  const token = ++fundGeneration;
+  correlationGeneration++;
+  setFundBusy(true);
+  showAlert(null);
+  $('holdMsg').textContent = '';
+  $('holdOut').hidden = true;
+  $('progressWrap').hidden = false;
+  setProgress('提交持仓拟合任务…', 0.02, '');
+  try {
+    const r = await api('/api/holdings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: S.result.code, refresh: false })
+    });
+    if (token !== fundGeneration) return;
+    await pollHoldings(r.job_id, token);
+  } catch (e) {
+    if (token !== fundGeneration) return;
+    $('progressWrap').hidden = true;
+    showAlert('持仓拟合失败：' + e.message);
+  } finally {
+    activeJob = null;
+    if (token === fundGeneration) setFundBusy(false);
+  }
+}
+
+async function pollHoldings(jid, token = fundGeneration) {
+  const MAX_POLLS = 1500;
+  activeJob = jid;
+  let attempts = 0;
+  while (token === fundGeneration) {
+    await new Promise(r => setTimeout(r, attempts > 200 ? 2000 : 800));
+    if (token !== fundGeneration) return;
+    if (++attempts > MAX_POLLS) {
+      $('progressWrap').hidden = true;
+      showAlert('持仓拟合等待超时。任务可能仍在后台运行。');
+      return;
+    }
+    let j;
+    try { j = await api('/api/job/' + jid); }
+    catch (e) {
+      if (token !== fundGeneration) return;
+      $('progressWrap').hidden = true;
+      showAlert('持仓拟合查询失败：' + e.message);
+      return;
+    }
+    if (token !== fundGeneration) return;
+    setProgress(j.stage, j.progress, j.detail);
+    if (j.status === 'done') {
+      const r = await api('/api/result/' + jid);
+      if (token !== fundGeneration) return;
+      $('progressWrap').hidden = true;
+      renderHoldings(r.result);
+      return;
+    }
+    if (j.status === 'error') {
+      $('progressWrap').hidden = true;
+      showAlert('持仓拟合失败：' + j.error);
+      return;
+    }
+  }
+}
+
+function _cell(v, pct, dec) {
+  if (v === null || v === undefined || Number.isNaN(v)) return '—';
+  if (pct) return (Number(v) * 100).toFixed(dec ?? 1) + '%';
+  if (Number.isFinite(Number(v)) && typeof v !== 'string') return Number(v).toFixed(dec ?? 2);
+  return String(v);
+}
+
+function fillHoldTable(el, rows, cols, pctCols = [], decCols = {}) {
+  if (!el) return;
+  const head = `<tr>${cols.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr>`;
+  const body = rows.map(r => `<tr>${cols.map(c => {
+    const pct = pctCols.includes(c);
+    return `<td>${escapeHtml(_cell(r[c], pct, decCols[c]))}</td>`;
+  }).join('')}</tr>`).join('');
+  el.innerHTML = head + body;
+}
+
+function renderHoldings(h) {
+  const out = $('holdOut'), msg = $('holdMsg');
+  if (!h || !h.ok) {
+    out.hidden = true;
+    msg.textContent = '未生成：' + ((h && h.reason) || '持仓数据不可用');
+    return;
+  }
+  out.hidden = false;
+  msg.textContent = '';
+  const s = h.summary || {};
+  $('holdSummary').innerHTML =
+    `<div class="kpi"><div class="lb">可用期数</div><div class="vl">${s.n_periods ?? 0}</div>` +
+    `<div class="sb">半年报/年报</div></div>` +
+    `<div class="kpi"><div class="lb">平均绝对偏差</div><div class="vl">${_cell(s.mad_mean, true, 1)}</div>` +
+    `<div class="sb">RBSA − 真实行业权重</div></div>` +
+    `<div class="kpi"><div class="lb">权重相关</div><div class="vl">${_cell(s.corr_mean, false, 2)}</div>` +
+    `<div class="sb">${_cell(s.corr_first, false, 2)} → ${_cell(s.corr_last, false, 2)}</div></div>` +
+    `<div class="kpi"><div class="lb">行业覆盖率</div><div class="vl">${_cell(s.coverage_mean, true, 0)}</div>` +
+    `<div class="sb">未映射 ${_cell(s.unmapped_mean, true, 0)}（不是现金）</div></div>`;
+  const n = h.notes || {};
+  const b = h.benchmark || {};
+  const miss = b.missing_industries || [];
+  const benchNote = ['[警示] 行业面板缺失 ' + miss.length + ' 个持仓行业' +
+    (miss.length ? '（' + miss.join('、') + '）' : '') +
+    '，其权重按 0 收益处理，不按现金计息。', b.residual_treatment]
+    .filter(Boolean).join(' ');
+  $('holdNotes').textContent = [n.broad, n.coverage, n.unmapped_not_cash,
+    n.benchmark_compare, n.benchmark_residual, miss.length ? benchNote : b.residual_treatment]
+    .filter(Boolean).join(' ');
+  fillHoldTable($('holdPeriods'), (h.periods || []).slice(-8),
+    ['季末', '披露约', '共同行业数', '平均绝对偏差', '权重相关', '未映射权重', '持仓合计'],
+    ['平均绝对偏差', '未映射权重', '持仓合计'], { '权重相关': 2 });
+  fillHoldTable($('holdCompare'), ((h.compare || {}).stats || []),
+    ['基准', '区间收益', '年化收益', '年化波动', '与基金相关', '信息比率IR'],
+    ['区间收益', '年化收益', '年化波动', '与基金相关'], { '信息比率IR': 2 });
+}
+
 function renderBacktest(p) {
   $('btOut').hidden = false;
+  renderBtCurrent(p);
   drawBtEquity(p);
+  renderBtVariantNotes(p);
+  renderBtQuality(p);
   drawBtHealth(p);
   renderBtKpis(p);
   renderBtMetrics(p);
   renderBtTrades(p);
   $('btOut').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderBtQuality(p) {
+  const el = $('btQuality');
+  if (!el) return;
+  const q = (p.meta || {}).data_quality || {};
+  const parts = [];
+  if (q.status && q.status !== 'ok') {
+    parts.push(`数据质量 ${q.status}：${(q.reasons || []).join('；') || '原因未提供'}`);
+  }
+  if (p.meta && p.meta.nav_degraded) {
+    parts.push(`净值口径已降级为累计净值（${p.meta.nav_degraded_reason || '总回报构造失败'}），回测结论不可按总回报解读`);
+  }
+  el.textContent = parts.join(' ');
+  el.hidden = parts.length === 0;
+}
+
+function renderBtVariantNotes(p) {
+  const el = $('btVariantNotes');
+  if (!el) return;
+  const txt = valuationText(p.valuation);
+  el.textContent = txt
+    ? `「仅赛道估值通道」曲线说明：${txt}。该曲线不是买卖建议，仅用于对照。`
+    : '';
+}
+
+function renderBtCurrent(p) {
+  const c = p.current, el = $('btCurrent'), note = $('btCurrentNote');
+  if (!el) return;
+  if (!c) { el.innerHTML = ''; if (note) note.textContent = ''; return; }
+  if (!c.available) {
+    el.innerHTML = `<div class="kpi bad"><div class="lb">当前建议</div>` +
+      `<div class="vl">不可用</div><div class="sb">健康分缺失，未给出仓位建议</div></div>`;
+    if (note) note.textContent = (c.notes || []).join(' ') || '模型参考值，非投资建议。';
+    return;
+  }
+  const cls = c.degraded ? 'warn' : (c.position === 1 ? 'good' : 'bad');
+  const noteTxt = [c.disclaimer].concat(c.notes || []).filter(Boolean).join(' ');
+  el.innerHTML =
+    `<div class="kpi ${cls}"><div class="lb">当前建议</div>` +
+    `<div class="vl">${escapeHtml(c.state)}</div>` +
+    `<div class="sb">${c.degraded ? '降级/仅供参考' : '健康门控正常'}</div></div>` +
+    `<div class="kpi"><div class="lb">建议仓位</div>` +
+    `<div class="vl">${c.position_pct == null ? '—' : (c.position_pct * 100).toFixed(0) + '%'}</div>` +
+    `<div class="sb">${escapeHtml(c.date)} 收盘决策</div></div>` +
+    `<div class="kpi ${c.degraded ? 'warn' : ''}"><div class="lb">健康分</div>` +
+    `<div class="vl">${c.health == null ? '不可用' : Number(c.health).toFixed(2)}</div>` +
+    `<div class="sb">离场线 ${Number(p.meta.thresholds.exit).toFixed(2)}` +
+    (c.distance_to_exit == null ? '' : ` · 距线 ${Number(c.distance_to_exit).toFixed(2)}`) + `</div></div>`;
+  if (note) note.textContent = noteTxt;
 }
 
 function btLineStyle(k) {
