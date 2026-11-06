@@ -63,12 +63,18 @@ def clean_bars(raw, start, end, volume_unit="shares", allow_nonpositive=False):
     return frame
 
 
-def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=False):
-    code = normalize_code(kind, code)
+def normalize_adjust(kind, adjust):
+    """统一复权口径：指数没有复权概念，一律按原始价。"""
+    if kind == "index":
+        return ""
     if adjust not in ("qfq", "", "hfq"):
         raise ValueError("复权方式必须为 qfq、hfq 或空字符串")
-    if kind == "index":
-        adjust = ""
+    return adjust
+
+
+def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=False):
+    code = normalize_code(kind, code)
+    adjust = normalize_adjust(kind, adjust)
     if not _fetch_only:
         import market_research.tasks.sync as sync
         sync.register(kind, code, adjust)
@@ -118,6 +124,9 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
 def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh000300", refresh=False, job_id=None):
     from market_research.tasks.jobs import JOBS
     code = normalize_code(kind, code)
+    # 直调入口必须与 Web 请求用同一口径，否则 160/179 行的 sync.cached
+    # 会按 qfq 查指数缓存而注册键是空字符串，预热上下文永远取不到。
+    adjust = normalize_adjust(kind, adjust)
     benchmark = normalize_code("index", benchmark)
     end = end or pd.Timestamp.today().strftime("%Y-%m-%d")
     start = start or (pd.Timestamp(end) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")

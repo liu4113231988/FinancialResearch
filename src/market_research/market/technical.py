@@ -138,9 +138,26 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
     latest = probability.iloc[-1]
     return {"horizon": horizon, 'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
             "ok": bool(pd.notna(latest)), "probability": latest,
+            "baseline": baseline.iloc[-1],
             "training_rows": training_rows, "minimum_training_rows": MIN_TRAIN,
             "evaluation": evaluation, "series": probability.loc[display_start:].tolist(),
             "reason": "至少需要 252 个已成熟训练样本及约 65 日指标预热；单一涨跌类别无法训练。" if pd.isna(latest) else None}
+
+
+def series_forecast(nav, horizon, display_start=None, *, calendar=None):
+    """把只有净值/收盘价的序列当作退化 OHLC 喂给 `direction_forecast`。
+
+    基金净值没有开高低收，用同一个收盘价填满 OHLC 后，ATR/布林/均线等
+    指标仍按收盘价计算；这样基金与股票/指数共用**同一套因果口径**
+    （标签成熟截断、滚动重训、无未来数据），而不是另写一套近似模型。
+    """
+    nav = pd.Series(nav).astype(float).dropna()
+    bars = pd.DataFrame({"open": nav, "high": nav, "low": nav, "close": nav},
+                        index=nav.index)
+    ind = indicators(bars)
+    features = features_for(bars, ind)
+    return direction_forecast(bars, features, horizon,
+                              display_start or nav.index[0], calendar=calendar)
 
 
 def compare_forecasts(bars, base, candidate, horizon, display_start, context=None, *, calendar=None):
@@ -274,4 +291,7 @@ def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, be
             "rules": "趋势分 = 五项方向判断等权合成（收盘/MA20、MA20/MA60、MA60近5日斜率、DIF/DEA、20日动量），范围 −100～100。买入关注：分数≥60、RSI在45～70且未突破布林上轨；减仓警戒：分数≤−20，或收盘低于MA20且MACD柱为负。均为规则条件。",
             "series": {"dates": visible.index.strftime("%Y-%m-%d").tolist(), **{c: visible[c].tolist() for c in ("dif", "dea", "macd", "rsi", "boll_upper", "boll_lower", "atr", "score")}},
             "forecasts": forecasts,
-            "signals": records[-12:][::-1], "notices": notices}
+            # P3-A：按观察窗口返回全部首次触发，不再只留最近 12 条。
+            # 同时给出总数/截断数，便于前端在标记过密时自行抽样而不丢信息。
+            "signals": records[::-1], "signal_total": len(records),
+            "signals_truncated": 0, "notices": notices}

@@ -88,7 +88,11 @@ class TechnicalTests(unittest.TestCase):
         np.testing.assert_array_equal(ind.sell_event,ind.exit & ~ind.exit.shift(fill_value=False))
         result=analyze_technical(frame,display_start=frame.index[-100],adjust='hfq')
         self.assertEqual(len(result['series']['dates']),100)
-        self.assertLessEqual(len(result['signals']),12)
+        # P3-A：窗口内全部触发都返回，不再只留最近 12 条
+        self.assertEqual(len(result['signals']),result['signal_total'])
+        self.assertEqual(result['signals_truncated'],0)
+        self.assertTrue(all(s['date']>=frame.index[-100].date().isoformat()
+                            for s in result['signals']))
         self.assertTrue(any('不能直接' in x for x in result['notices']))
         json.dumps(_jsafe(result),allow_nan=False)
 

@@ -52,6 +52,21 @@ class ContextTests(unittest.TestCase):
         self.assertTrue(all(not f['comparison']['ok'] for f in out['forecasts']))
         json.dumps(_jsafe(out), allow_nan=False)
 
+    def test_direct_index_entry_uses_same_cache_adjust_as_web(self):
+        """P2-22：直调 analyze_market 的指数缓存口径必须与 Web 一致（空字符串）。"""
+        bars = sample(100)
+        calls = []
+
+        def cached(kind, code, adjust, start, end=None):
+            calls.append(adjust)
+            return None
+
+        with patch('market_research.market.analysis.load_bars', return_value=bars), \
+             patch('market_research.tasks.sync.cached', side_effect=cached):
+            analyze_market('index', 'sh000300', '2023-01-01', '2024-01-01')
+        self.assertTrue(calls)
+        self.assertEqual(set(calls), {''})
+
     def test_index_production_path_has_technical_and_context(self):
         bars = sample(100)
         with patch('market_research.market.analysis.load_bars', return_value=bars), \

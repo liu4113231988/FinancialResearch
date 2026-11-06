@@ -86,7 +86,10 @@ class MarketTests(unittest.TestCase):
                 self.assertEqual(fetch.call_count, 2)
                 self.assertTrue((Path(directory) / "market.duckdb").exists())
             with patch.object(ak, "stock_zh_a_hist", side_effect=RuntimeError("offline")), patch.object(ak, "stock_zh_a_hist_tx", side_effect=RuntimeError("offline")):
-                with self.assertRaises(ValueError): load_bars("stock", "sh600519", "2024-01-01", "2025-01-01", refresh=True)
+                # P2-27：刷新失败但本地同口径缓存可用时回退旧数据并标记，而不是让整个请求失败
+                stale = load_bars("stock", "sh600519", "2024-01-01", "2025-01-01", refresh=True)
+            self.assertTrue(stale.attrs.get("stale"))
+            self.assertTrue(str(stale.attrs.get("source_error"))[:1])
             pd.testing.assert_frame_equal(load_bars("stock", "sh600519", "2024-01-01", "2025-01-01"), first, check_freq=False)
 
     def test_stock_fallback_preserves_normalized_volume(self):
