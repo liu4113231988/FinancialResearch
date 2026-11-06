@@ -3,12 +3,14 @@ import sys
 from pathlib import Path
 import json
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 import pandas as pd
 import market_research.config as C
 import market_research.data.marketdata as D
 import market_research.data.storage as storage
+from market_research.errors import StorageBusy
 
 
 class StorageTests(unittest.TestCase):
@@ -35,8 +37,12 @@ class StorageTests(unittest.TestCase):
             updated = self.frame * 2
             D._cached("legacy", lambda: updated, {"v": 2})
             self.assertNotEqual(initial, D.data_stamp())
-            with self.assertRaisesRegex(RuntimeError, "fetch"):
-                D._cached("legacy", lambda: (_ for _ in ()).throw(RuntimeError("fetch")), {"v": 2}, refresh=True)
+            # P2-27：刷新失败但旧缓存 meta 仍匹配 → 带 stale 标记沿用旧数据，
+            # 不再让一次网络故障打断分析（失败原因写进 info.last_error）。
+            fallback = D._cached("legacy", lambda: (_ for _ in ()).throw(RuntimeError("fetch")), {"v": 2}, refresh=True)
+            self.assertTrue(fallback.attrs["stale"])
+            self.assertIn("RuntimeError", fallback.attrs["source_error"])
+            self.assertIn("last_error", storage.metadata("legacy")["info"])
             pd.testing.assert_frame_equal(storage.read("legacy"), updated, check_freq=False)
             self.assertTrue((C.DATA_DIR / "legacy.csv").exists())
 
@@ -147,6 +153,31 @@ class StorageTests(unittest.TestCase):
         with patch.object(storage, "metadata", side_effect=AssertionError("unlocked read")):
             D._cache_info_write("x", {"n_missing": 0})
         self.assertEqual(storage.metadata("x"), {"v": 2, "info": {"source": "original", "n_missing": 0}})
+
+    def test_connection_times_out_with_explicit_busy_error(self):
+        """P2-30：同步长时间持锁时，请求必须超时并给出明确原因。"""
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def hold_lock():
+            storage._LOCK.acquire()
+            acquired.set()
+            release.wait(5)
+            storage._LOCK.release()
+
+        holder = threading.Thread(target=hold_lock, daemon=True)
+        holder.start()
+        acquired.wait(2)
+        try:
+            with self.assertRaises(StorageBusy) as ctx:
+                with storage.connection(timeout=0.15):
+                    pass
+            self.assertIn("仍未获得锁", str(ctx.exception))
+            self.assertIn("同步", str(ctx.exception))
+        finally:
+            release.set()
+            holder.join(2)
+        self.assertGreaterEqual(storage.LOCK_STATS["timeouts"], 1)
 
 
 if __name__ == "__main__":

@@ -51,8 +51,10 @@ ENV PATH="/opt/venv/bin:$PATH" \
 USER app:app
 VOLUME ["/data"]
 EXPOSE 8877
+# 就绪探针：/api/health 只证明进程活着，/api/ready 同时检查 DuckDB、
+# worker 进程与队列；依赖不可用时返回 503，容器会被标记 unhealthy。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('FIL_PORT', '8877') + '/api/health', timeout=3).close()"]
+    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('FIL_PORT', '8877') + '/api/ready', timeout=3).close()"]
 
 # The API starts the existing singleton worker and registered-asset scheduler.
 CMD ["market-research"]

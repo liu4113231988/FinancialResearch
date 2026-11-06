@@ -2,42 +2,94 @@
 from contextlib import contextmanager
 import hashlib
 import json
+import logging
 import os
 import threading
+import time
 
 import duckdb
 import pandas as pd
+import market_research.audit as audit
 import market_research.config as C
+from market_research.errors import StorageBusy
 
+LOG = logging.getLogger(__name__)
 _LOCK = threading.RLock()
+
+# P2-30：锁等待可观测，health/日志据此判断请求是否被同步任务拖住
+LOCK_STATS = {"waits": 0, "timeouts": 0, "total_wait_s": 0.0}
+
+
+def _acquire_file_lock(file, timeout: float) -> float:
+    """非阻塞轮询文件锁，返回本次等待秒数；超时抛 OSError。"""
+    deadline = time.monotonic() + max(timeout, 0.0)
+    started = time.monotonic()
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                file.seek(0)
+                msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return time.monotonic() - started
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
+def _release_file_lock(file) -> None:
+    if os.name == "nt":
+        import msvcrt
+        file.seek(0)
+        msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+
+
+def _busy_error(limit: float) -> StorageBusy:
+    return StorageBusy(
+        f"数据库正被同步任务或其它进程写入，等待 {limit:.0f} 秒仍未获得锁；"
+        "请稍后重试；若持续出现，请检查 /api/health 的 storage 状态与同步进程")
 
 
 @contextmanager
-def connection():
+def connection(timeout: float | None = None):
     C.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with _LOCK, (C.DATA_DIR / "market.lock").open("a+b") as lock:
-        lock.seek(0, 2)
-        if lock.tell() == 0:
-            lock.write(b"0")
-            lock.flush()
-        lock.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            with duckdb.connect(str(C.DATA_DIR / "market.duckdb")) as db:
-                db.execute("CREATE TABLE IF NOT EXISTS datasets (name VARCHAR PRIMARY KEY, metadata VARCHAR, schema_json VARCHAR, revision VARCHAR)")
-                db.execute("CREATE TABLE IF NOT EXISTS prices (dataset VARCHAR, date TIMESTAMP_NS, asset VARCHAR, value DOUBLE, PRIMARY KEY(dataset, date, asset))")
-                yield db
-        finally:
-            if os.name == "nt":
-                lock.seek(0)
-                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    limit = C.STORAGE_LOCK_TIMEOUT if timeout is None else float(timeout)
+    started = time.monotonic()
+    if not _LOCK.acquire(timeout=max(limit, 0.001)):
+        LOCK_STATS["timeouts"] += 1
+        raise _busy_error(limit)
+    try:
+        with (C.DATA_DIR / "market.lock").open("a+b") as lock:
+            lock.seek(0, 2)
+            if lock.tell() == 0:
+                lock.write(b"0")
+                lock.flush()
+            lock.seek(0)
+            try:
+                _acquire_file_lock(lock, limit - (time.monotonic() - started))
+            except OSError as exc:
+                LOCK_STATS["timeouts"] += 1
+                raise _busy_error(limit) from exc
+            waited = time.monotonic() - started
+            if waited > 0.5:
+                LOCK_STATS["waits"] += 1
+                LOCK_STATS["total_wait_s"] += waited
+                LOG.warning("等待数据库锁 %.1fs（同步或其它进程正在写入）", waited)
+            try:
+                with duckdb.connect(str(C.DATA_DIR / "market.duckdb")) as db:
+                    db.execute("CREATE TABLE IF NOT EXISTS datasets (name VARCHAR PRIMARY KEY, metadata VARCHAR, schema_json VARCHAR, revision VARCHAR)")
+                    db.execute("CREATE TABLE IF NOT EXISTS prices (dataset VARCHAR, date TIMESTAMP_NS, asset VARCHAR, value DOUBLE, PRIMARY KEY(dataset, date, asset))")
+                    yield db
+            finally:
+                _release_file_lock(lock)
+    finally:
+        _LOCK.release()
 
 
 def metadata(name):
@@ -79,7 +131,15 @@ def write(name, frame, meta):
             db.execute("COMMIT")
         except Exception:
             db.execute("ROLLBACK")
+            audit.record("data.write", ok=False, subject=name,
+                         detail={"rows": int(len(frame)),
+                                 "columns": int(len(frame.columns))},
+                         error="写入事务回滚")
             raise
+    # P2-26：数据写入留审计轨迹（只记规模与指纹，不记行情数值）
+    audit.record("data.write", subject=name,
+                 detail={"rows": int(len(frame)), "columns": int(len(frame.columns)),
+                         "revision": revision[:12]})
 
 
 def write_metadata(name, meta):
