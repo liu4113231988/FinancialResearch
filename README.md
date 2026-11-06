@@ -2,7 +2,7 @@
 
 本地研究工作台，包含股票技术分析与方向估计、基金滚动 RBSA 与多模型比较、指数走势与风险分析。后端使用 FastAPI、独立计算进程和 DuckDB，环境与依赖由 uv 管理。
 
-文档核对日期：2026-11-01。本轮核对源码、配置和文档，完成固定股票/指数快照与资金情景回放；未重抓全市场行情或重算全部基金研究。
+文档核对日期：2026-11-06。本轮按代码实际行为回查 TODO 关闭项并同步文档，配置、端点与数据契约以本文件及三份运维文档为准；未重抓全市场行情或重算全部基金研究。
 
 ## 安装与启动
 
@@ -13,7 +13,7 @@ uv sync --locked
 uv run --locked market-research --port 8877
 ```
 
-打开 [研究工作台](http://127.0.0.1:8877/)。接口文档位于 `/docs`，协议位于 `/openapi.json`，健康检查为 `/api/health`。未传 `--port` 时默认端口为 8760；8877 是上述示例及浏览器测试使用的端口。
+打开 [研究工作台](http://127.0.0.1:8877/)。接口文档位于 `/docs`，协议位于 `/openapi.json`，存活探针为 `/api/health`，就绪检查为 `/api/ready`（存储/worker/队列异常返回 503）。未传 `--port` 时默认端口为 8760；8877 是上述示例及浏览器测试使用的端口。
 
 Web 启动时默认拉起单实例 worker。分析任务在独立子进程计算；API 关闭后 worker 继续处理已提交任务与同步调度。停止 worker：
 
@@ -43,7 +43,7 @@ docker run -d --init --name market-research -p 127.0.0.1:8877:8877 -v market-res
 
 访问 `http://127.0.0.1:8877/`。镜像使用 Python 3.13，通过 `uv.lock` 安装运行依赖和非 editable 项目包；最终镜像只复制安装环境，包含前端和 SQL 包资源，以 UID/GID 10001 运行。`.dockerignore` 采用允许列表，本机 `.venv`、行情、结果、Git、Node 依赖及测试产物不进入构建上下文。
 
-> **安全边界**：本项目**没有登录/鉴权**，`-p 8877:8877` 会把 API 发布到所有网卡，同一网段的任何人都能提交分析任务、读写数据卷。只在本机使用时请写 `-p 127.0.0.1:8877:8877`；确需局域网访问时，前面必须加带鉴权的反向代理，且不要暴露到公网。
+> **安全边界**：默认以单用户模式运行（`FIL_ACCESS_CONTROL=off`，无登录/鉴权）。设置 `FIL_ACCESS_CONTROL=token` 并配置 `FIL_API_TOKENS` 后，业务接口要求 `Authorization: Bearer <token>` 或 `X-API-Key`；`/`、`/api/health`、`/api/ready`、`/api/disclosure` 与静态资源始终公开。令牌模式是最小认证，尚无注册/登录、租户数据分区与按用户配额。无论是否开启认证，`-p 8877:8877` 都会把 API 发布到所有网卡；只在本机使用时请写 `-p 127.0.0.1:8877:8877`，确需局域网或公网访问时仍应放在带鉴权的反向代理之后。
 
 命名卷 `market-research-data` 挂载到 `/data`，行情数据库、队列和日志位于 `/data/output/data`，研究输出也保存在该卷中。容器首次运行创建独立数据，**不会自动导入本机已有行情**。若使用宿主目录代替命名卷，应确保该目录可由容器 UID/GID 10001 写入。停止/删除容器不会删除命名卷；备份或迁移 DuckDB 前先停止容器内所有写入进程。
 
@@ -55,7 +55,7 @@ docker exec market-research market-research-cli --help
 docker stop market-research
 ```
 
-HTTP 健康检查使用 `/api/health`；后台计算和同步日志保留在数据卷中。多阶段安装与非 editable 环境复制方式参考 [uv 官方 Docker 指南](https://docs.astral.sh/uv/guides/integration/docker/)。当前维护环境未安装 Docker，本次仅完成文件及配置核对，镜像构建和容器运行需在具备 Docker 的环境验证。
+容器 HEALTHCHECK 使用 `/api/ready`（依赖异常时返回 503 并标记 unhealthy）；`/api/health` 仅作存活探针。后台计算和同步日志保留在数据卷中。多阶段安装与非 editable 环境复制方式参考 [uv 官方 Docker 指南](https://docs.astral.sh/uv/guides/integration/docker/)。当前维护环境未安装 Docker，本次仅完成文件及配置核对，镜像构建和容器运行需在具备 Docker 的环境验证。
 
 ## 页面功能
 
@@ -176,18 +176,38 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_sync_task.ps
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | FIL_HOME | 源码根目录；安装包通常为当前目录 | 运行产物根目录 |
-| FIL_DATA_DIR | FIL_HOME/output/data | DuckDB、任务、缓存及日志目录 |
+| FIL_ENV | local | 环境标识 `dev/local/prod`；`dev` 默认产物落 `output/dev/`，未知值回退 `local` |
+| FIL_DATA_DIR | FIL_HOME/output/data（`dev` 为 output/dev/data） | DuckDB、任务、审计、缓存及日志目录 |
+| FIL_FIG_DIR / FIL_RES_DIR | FIL_HOME/output/figures、results（`dev` 为 output/dev/*） | 图表与研究结果目录，可分别覆盖 |
 | FIL_HOST / FIL_PORT | 127.0.0.1 / 8760 | HTTP 监听地址，命令参数可覆盖 |
 | FIL_AUTO_SERVICES | 1 | API 自动启动 worker |
 | FIL_MAX_JOBS / FIL_QUEUE_LIMIT | 2 / 100 | 分析进程并发数；排队和运行任务总上限 |
 | FIL_JOB_TIMEOUT / FIL_JOB_ATTEMPTS | 900 / 3 | 单次计算超时秒数；进程中断最大尝试次数 |
 | FIL_SYNC_ENABLED / FIL_SYNC_TIME | 1 / 18:30 | worker 同步开关及北京时间 |
+| FIL_ACCESS_CONTROL | off | `off` 单用户放行；`token` 校验 Bearer / X-API-Key |
+| FIL_API_TOKENS | 空 | 逗号分隔令牌，支持 `租户:令牌`；仅 token 模式生效 |
+| FIL_HTTP_MAX_RPS | 8 | 全进程公网抓取限速（请求/秒，`<=0` 关闭） |
+| FIL_HTTP_TIMEOUT | 30 | 单次抓取超时秒数（线程级，注入 requests） |
+| FIL_DATA_STALE_DAYS | 10 | 数据末日距参考日超过该天数标记 stale |
+| FIL_NAV_DEGRADED_POLICY | reject | 总回报构造失败策略：`reject` 失败 / `allow_cum` 显式降级并标注 |
+| FIL_STORAGE_LOCK_TIMEOUT | 10 | DuckDB 文件锁最长等待秒数，超时抛 `StorageBusy` |
+| FIL_DISCLOSURE_SCOPE / TEXT / POSITION | internal / 内置文案 / top | 免责披露作用域、自定义文案与位置（`top` 或 `footer`） |
 | FIL_CORS_ORIGINS | 空 | 逗号分隔跨域来源；同源页面无需配置 |
 | FIL_START_DATE | 未设置 | 固定基金分析起点，覆盖滚动默认值，用于研究复现 |
 
-任务通过 `POST /api/analyze`、`/api/refit`、`/api/backtest` 或 `/api/market/analyze` 提交，再查询 `/api/job/{jid}` 与 `/api/result/{jid}`。完成的基金计算可能直接命中结果缓存；以实际返回字段为准。取消为 `POST /api/job/{jid}/cancel`，进入错误终态并由 worker 终止对应进程；切换页面入口不会自动取消后台任务。
+任务通过 `POST /api/analyze`、`/api/refit`、`/api/backtest`、`POST /api/holdings` 或 `/api/market/analyze` 提交，再查询 `/api/job/{jid}` 与 `/api/result/{jid}`。完成的基金计算可能直接命中结果缓存；以实际返回字段为准。取消为 `POST /api/job/{jid}/cancel`，进入错误终态并由 worker 终止对应进程；切换页面入口不会自动取消后台任务。`/api/holdings` 与 CLI `holdings` 共用 `fit_fund_holdings` 口径，返回逐期行业暴露、持仓基准对比与 `benchmark` 诊断（缺失行业、已映射/未映射/现金权重、`residual_treatment`）。
 
-参数错误为 400，容量不足为 429，未完成结果为 202，不存在/过期任务为 404。`/api/corr` 与 `/api/name` 只读本地缓存，**不会为单个请求联网取数**：缓存未预热时前者返回 409 并提示先跑一次分析，后者返回 `found: null`（`found: false` 表示名录确实拉到过、没有该代码）。队列及结果在 API 重启后可继续查询，终态满 24 小时后在新任务提交时清理。持久任务不等于长期研究档案。
+结果契约（Web、API 与导出同源）：
+
+- `meta.data_basis` / `meta.nav_basis` / `meta.nav_degraded` / `meta.nav_degraded_reason`：实际净值口径。total 构造失败默认 `reject`，仅在 `FIL_NAV_DEGRADED_POLICY=allow_cum` 时降级为累计净值并显式标注，且不写入 total 缓存。研究 CLI 输出同一组字段，报告顶部固定显示「总回报（分红再投资）」或「累计净值（降级）+ 原因」。
+- `meta.data_quality`：`status=ok|partial|degraded|failed`（stale 单独只升到 `partial`，缺失比例 ≥20% 或净值降级/取数回退升到 `degraded`）、`data_end/as_of/stale_days`、`missing_assets/n_missing/n_expected/missing_ratio`、`source_error`，以及 `provenance`（来源键、端点、抓取时间、成功/降级/错误次数）。
+- `status` / `ok` / `completeness`：`completeness` 含 `sections`、`missing[{section,item,reason}]`、`reasons`；`/api/result` 透传 `status/completeness`（外层信封 `ok` 保持 true）。
+- `meta.provenance`：`environment`、`code_version`、`config_version`、`git_commit`、`git_dirty`、`data_stamp`、`generated_at`。`data_stamp` 是本次结果依赖的数据版本：基金类操作收窄到本基金本窗口（与结果缓存键同口径），市场/持仓类为全局指纹；缓存命中时保留产出时的版本。
+- `meta.valuation` 与回测 `variants[].note/degraded/excluded`：估值通道可用性、沪深300 兜底资产与降级说明；不可用时 CLI 与研究回测都不生成「仅赛道估值通道」曲线并标 `excluded`。
+
+公开端点：`/api/health`（存活）、`/api/ready`（依赖就绪，异常 503）、`/api/disclosure`（免责与数据来源披露，页面和报告同源读取）；三者不受 `FIL_ACCESS_CONTROL` 限制。
+
+参数错误为 400，容量不足为 429，存储锁超时为 **503**（`ok=false`、`field=storage`、可读原因与 `retry_after_s`，代表暂时性故障、可稍后重试），未完成结果为 202，不存在/过期任务为 404。`/api/corr` 与 `/api/name` 只读本地缓存，**不会为单个请求联网取数**：缓存未预热时前者返回 409 并提示先跑一次分析，后者返回 `found: null`（`found: false` 表示名录确实拉到过、没有该代码）。队列及结果在 API 重启后可继续查询，终态满 24 小时后在新任务提交时清理。持久任务不等于长期研究档案。
 
 同步接口为 `GET /api/sync`、`POST /api/sync/assets`（`kind/code/basis`）、`POST /api/sync/retry`（`asset_key`）。股票 basis 为 `qfq`、空字符串或 `hfq`，指数为空，基金为 `total` 或 `cum`。
 
@@ -202,14 +222,19 @@ src/market_research/
   market/       股票、指数和技术计算
   funds/        基金分析、持仓与样本池
   modeling/     拟合器、滚动评估、信号与回测
-  data/         数据源、缓存、面板、DuckDB 与 migrations/
+  data/         数据源、缓存、面板、DuckDB、溯源与 migrations/
   tasks/        持久队列、worker 与已添加资产同步
   research/     实验、统计检验、报告及 commands/
   validation/   窗口与模型参数规则
   cli/          命令注册、分发及基础命令
+  ops/          备份/恢复与真实数据冒烟（backup.py、smoke.py）
+  security.py   可选令牌认证与身份/租户上下文
+  disclosure.py 免责披露文案、作用域与位置
+  audit.py      JSONL 操作审计（轮转与脱敏）
 compat/         旧导入转发与 entrypoints/ 归档脚本
 tests/          按业务与测试类型分组
-scripts/        Windows 同步任务安装脚本
+scripts/        Windows 同步任务安装脚本、真实数据冒烟入口（smoke_real.py）
+.github/        CI：compileall、node --check、全量离线 unittest
 ```
 
 | 文档 | 用途 |
@@ -222,6 +247,9 @@ scripts/        Windows 同步任务安装脚本
 | [扩池预注册规则](docs/扩池预注册规则.md) | 冻结规则、历史执行状态与未满足条件 |
 | [合成基准与净值差距](docs/合成基准与基金净值的差距.md) | 历史诊断、股息口径和残差解释限制 |
 | [模型档案方案](docs/模型档案与算法记录_重构方案.md) | 尚未实现的产品提案及当前架构修订 |
+| [运行环境与配置](docs/运行环境与配置.md) | 环境变量、默认值、多环境目录与启动检查 |
+| [备份与恢复](docs/备份与恢复.md) | 数据资产清单、备份/校验/恢复命令与恢复后一致性检查 |
+| [数据源供应商契约](docs/数据源供应商契约.md) | 公开抓取端点、字段契约、限流/重试/降级与溯源 |
 | [TODO](TODO.md) | 仅记录未完成项、行动约束与关闭标准；已完成项的验证记录见测试说明与 git 历史 |
 | [测试说明](tests/README.md) / [兼容说明](compat/README.md) | 验证方式及旧入口边界 |
 
@@ -235,7 +263,7 @@ node tests/frontend/test_refit.js
 node tests/frontend/test_ui_async.cjs
 ```
 
-最新完整回归245项unittest、两套脚本式回归及两套前端回归通过；当轮改动未重跑真实浏览器渲染检查与 `uv build`，wheel 独立安装的历史记录不代表本轮重新打包验证。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
+最新完整回归 366 项 unittest（2026-11-06 执行通过）、两套脚本式回归及两套前端回归通过；当轮改动未重跑真实浏览器渲染检查与 `uv build`，wheel 独立安装的历史记录不代表本轮重新打包验证。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
 
 依赖以 `pyproject.toml` 和 `uv.lock` 为准。`requirements.txt` 引用运行依赖兼容导出，更新命令为：
 
@@ -247,6 +275,6 @@ uv export --locked --no-dev --no-emit-project --no-hashes -o requirements.lock.t
 
 基金历史研究支持将 RBSA 作为风格解释工具；权重不等于真实持仓，较高 R² 也不能证明预测能力。已有样本未建立稳定择时优势，时间向前验证、窗口变化与扩池曾改变结论。数值应连同样本、窗口、收益口径和产物日期阅读，不能把不同轮次结果混成一组。
 
-基金总回报采用事后月度锚点校准，未来锚点可能修订历史；股票复权历史也会随公司行动修订。当前滚动验证不是严格历史时点可得的可执行回测。交易诊断未完整模拟申赎确认、持有期费用、滑点、停牌与涨跌停，不能由简化成本模型推导任何份额类别可直接交易。
+基金总回报默认采用事后月度锚点校准，未来锚点可能修订历史；单位净值或锚点缺失时默认拒绝分析（`FIL_NAV_DEGRADED_POLICY=reject`），仅在显式 `allow_cum` 时降级为累计净值，并在 `meta.nav_degraded`/`data_basis` 标注且不写入 total 缓存。公开数据源没有 SLA，数据过期或缺失时带 `stale/partial/degraded` 标记继续（见 `meta.data_quality`）；股票复权历史也会随公司行动修订。当前滚动验证不是严格历史时点可得的可执行回测。交易诊断未完整模拟申赎确认、持有期费用、滑点、停牌与涨跌停，不能由简化成本模型推导任何份额类别可直接交易。
 
 本项目提供研究与人工判断辅助，不承诺未来收益，不自动交易。

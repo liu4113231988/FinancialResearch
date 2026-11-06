@@ -2,7 +2,11 @@
 
 本文件**只记录未完成项**。已完成项的实现与验证见 `git log`、[测试说明](tests/README.md) 的验证记录，方法论结论见[研究方案](docs/研究方案.md)与[功能完整性检查](docs/功能完整性检查.md)。
 
-复核日期：2026-11-01。本轮除更新待办外，**已修复当日复核发现的全部程序缺陷**：P1-14（覆盖率 KeyError）、P1-15（固定窗口被截止日后净值污染）、P1-16（持仓基准混合收益口径）、P1-17（"相对基金IR"实为自身收益波动比）、P1-18（持仓缓存忽略请求年份）、P2-19（年数窗口未锚定 end）、P1-11 的代码侧问题（不完整行业映射被永久冻结），以及可选能力 P1-13（/api/corr 冷缓存改为提交队列任务）。每项均带最小复入的回归测试；验证：`.venv/Scripts/python.exe -u -m unittest discover -s tests -p "test_*.py" -t .`（269 项）、`python -u tests/regression/test_regressions.py` 及两套前端回归。实现提交 dc3a4d0（2026-11-01 已推送 origin/main）。剩余的 P1-10 / P1-11（数据部分）是数据缺口，不是本轮可关闭的缺陷。P1 表示影响正常计算或结果解释，P2 表示参数语义或特定入口问题。
+复核日期：2026-11-06（专项复核 2026-11-06 的走势预测 / 买卖点 / 持仓拟合；同日按四项拍板口径完成基金方向概率、当前建议仓位/健康分、P1-19 兜底标注与 P3-C 产品化；随后修复 P2-22 指数缓存口径、P2-23 未映射残差计息、P3-A 买卖点截断、P3-B 面板缺列静默丢弃、P2-21 估值通道不可用仍占权重。P1-10/P1-11 数据缺口仍开放；同日另做生产上线评估，新增 P1-20、P2-24~P2-36、P3-D~P3-I；随后按评估结论关闭 P1-20 与 P2-27/28/30/31/32/37/25/26，P2-24/29/33/34/35/36 已按 2026-11-06 拍板口径（公开抓取、stale 标记继续、内部研究、API 内部使用、单用户可升级）关闭）。2026-11-01 本轮除更新待办外，**已修复当日复核发现的全部程序缺陷**：P1-14（覆盖率 KeyError）、P1-15（固定窗口被截止日后净值污染）、P1-16（持仓基准混合收益口径）、P1-17（"相对基金IR"实为自身收益波动比）、P1-18（持仓缓存忽略请求年份）、P2-19（年数窗口未锚定 end）、P1-11 的代码侧问题（不完整行业映射被永久冻结），以及可选能力 P1-13（/api/corr 冷缓存改为提交队列任务）。每项均带最小复入的回归测试；2026-11-06 全量验证：`.venv/Scripts/python.exe -u -m unittest discover -s tests -p "test_*.py" -t .`（325 项；2026-11-06 回查轮已增至 354 项、修复轮增至 366 项）、`python -u tests/regression/test_regressions.py`、`python -u tests/regression/test_p0_fixes.py` 均通过。剩余的 P1-10 / P1-11（数据部分）是数据缺口，不是本轮可关闭的缺陷。P1 表示影响正常计算或结果解释，P2 表示参数语义或特定入口问题。
+
+**2026-11-06 回查补充**：按「代码实际行为」复核本文件标记关闭的条目，发现 P1-20、P2-21、P2-24/25/26/28/29/30/31/32/33/34/35/36/37、P3-C 共 16 条只完成核心部分（P3-C 缺 payload/报告渲染测试），已回退为「部分落地」并写明差距（详见各条「回查差距」）；P1-19、P2-22/23/27、P3-A/B 已确认落地，保持关闭。另发现 `meta.provenance.data_stamp` 恒为 `null`（见 P2-34 回查差距）。全量单测 354 项通过（2026-11-06 复核执行）。
+
+**2026-11-06 修复轮**：按回查结论补齐 P2-34（`data_stamp` 按操作取数据版本、缓存命中保留产出时版本）、P2-30（`StorageBusy` 映射 503 + 可读原因/重试秒数，路由不再吞掉）、P2-21（研究 CLI 按估值可用性剔除曲线）、P1-20（CLI/报告输出净值口径）、P3-C（持仓 payload 与报告 3.6 内容级断言）。P1-20、P2-21、P3-C 已关闭；P2-34、P2-30 仍为部分落地（剩余差距已在各条更新）。全量单测 366 项通过。
 
 ## 基金分析
 
@@ -113,6 +117,337 @@
 - 市场页 resize 无防抖（`market.js:284`，基金侧有 140ms debounce）。
 - 图表容器缺 `role="img"`/`aria-label`、分段按钮缺 `aria-pressed`；`document.title` 不随入口变化。
 - 自选不清理失效代码；catalog 初始加载无 loading 态、失败无重试按钮。
+
+## 专项检查：走势预测 / 买卖点参考 / 持仓拟合（2026-11-06 补记）
+
+范围：`modeling/trends.py`、`modeling/signals.py`、`modeling/backtest.py`、`market/analysis.py`、`market/technical.py`、`market/targets.py`、`market/execution.py`、`funds/holdings.py`、`funds/payloads.py`、`api/static/market.js`、`api/static/app.js`。检查数据获取→计算→接口/前端→配置与降级的闭环、前视偏差、边界样本与回测/实盘口径。优先级沿用本文件定义：P1 影响正常计算或结果解释；P2 为特定条件或特定入口下错误/口径不自洽；P3 为健壮性、一致性或打磨。已知数据缺口（P1-10/P1-11 及「股票与指数」六项）不重复。
+
+### P1（影响正常计算或结果解释）
+
+- ~~**P1-19：估值通道把申万行业腿静默映射到沪深300 PE**~~ **已关闭（2026-11-06）**
+  位置：`modeling/signals.py:47-51`（`PE_SYMBOL` 只映射 6 个宽基，`PE_FALLBACK = "沪深300"`）、`signals.py:122-126`（未映射资产一律回退）、`signals.py:146-151`（按权重重心算 `pe_agg`）。
+  触发：风格权重含申万行业（801xxx）的基金——默认面板 47 个指数中有 31 个是行业指数。`PE_SYMBOL` 只覆盖 6 个宽基，其余 399xxx 宽基与全部 801 行业都会回退（宽基→宽基误差尚可，行业→宽基不可接受）。
+  后果：`pe_pct`（`signals.py:400` 在 snapshot 中展示为「估值分位」）和 `val_score`（融合分 `w_val_pe=0.15`）实际取的是沪深300 的分位，却被按该基金行业权重解释；行业集中基金（如白酒/半导体）的估值结论完全错位，且没有任何覆盖率或降级提示。该错误还会进入 Web 默认回测图：`funds/pipeline.py:66` 用 `val_score` 构造「仅赛道估值通道」，`funds/payloads.py:585-587` 下发 `equity.series` 全部列，`app.js:2027-2043` 无过滤地绘制所有键，用户看到的默认曲线即含错误口径。
+  修复方向：801 行业腿不参与 PE 分位（返回 NaN 并从分母剔除），只对非行业宽基保留兜底；输出 `pe_coverage`（真实 PE 覆盖的权重占比）与 `val_degraded`；补「100% 行业权重 → pe_pct 不可用」的最小回归。
+  **实际修法（拍板：保留沪深300 兜底并显式标注）**：`signals.py:valuation_channel` 返回 `pe_real_weight/pe_fallback_weight/pe_coverage/val_available/val_degraded` 及 `attrs["valuation"]`（含 `note`、`fallback_assets` 的代码/名称/权重/行业或宽基类型）；`snapshot` 增加「估值口径」字段。标注透传到 CLI（`funds/pipeline.py` verbose 警示 + 兜底资产）、报告 3.2（橙色提示框）、Web 分析页 `#valNote`，以及 Web 默认回测图的「仅赛道估值通道」曲线说明（`funds/analysis.py` 新增该变体，`payloads.py` 下发 `valuation` 与 `variants[].note/degraded`）。回归见 `tests/funds/test_payloads.py:BacktestCurrentPayloadTest.test_valuation_fallback_reaches_variants_and_payload`。
+
+### P2（特定条件 / 特定入口）
+
+- ~~**P2-21：估值源整体不可用/列缺失仍返回中性 0，且分母保留该权重**~~ **已关闭（2026-11-06）**
+  - **回查差距（已修）**：研究 CLI 路径 `funds/pipeline.py` 原无条件构造「仅赛道估值通道」，估值不可用时 `val_score` 为 NaN，会生成 NaN 曲线；现已复用与 Web 回测一致的可用性判断（`valuation.available` 且 `val_score.notna().any()`），不可用时不出该曲线并在 `valuation.excluded/note` 显式标注，verbose 增加提示。回归见 `tests/funds/test_pipeline_valuation.py`（不可用/可用两条路径 + 无 NaN 污染）。
+  位置：`modeling/signals.py:117-119`（`pe_pct` 为 None/空 → `val_score` 全 0）、`signals.py:147-151`（无匹配列 → NaN）、`signals.py:233/238-240`（分母恒含 `w_val_pe`）。
+  触发：PE 缓存缺失、断跑超过 csindex 约一个月窗口、离线/只读模式；与 P1-A 已修的「累积全 NaN」不同，这是数据源不可用的独立路径。
+  后果：融合分被静默压向中性、`position` 系统性向 0.5 收缩，界面/CSV 仍显示「估值中性」，与真实中性不可区分。
+  修复方向：通道不可用时返回 NaN，`compute` 按可用通道重归一化分母；payload 输出 `channels.val.available=false`，report 注明「估值通道不可用」。若产品决定「缺失即中性」，需在口径文档显式声明并保留标记。
+  **实际修法**：`valuation_channel` 不可用（面板为空/无映射列/关键列整列 NaN）时 `val_score=NaN`、`attrs["valuation"]` 增加 `reason`/`weight=0`/`excluded=true`；`compute` 用逐行 `val_available & val_score.notna()` 计算有效权重 `val_weight_effective`，分母改为 `w_trend+w_dev+有效估值权重`，其余通道自动重归一；`snapshot` 增加原因/通道权重/已剔除。Web `valuationText`、报告估值提示按 `available=false` 改为「已剔除并重归一」，不再写「按宽基口径解读」；回测不再生成 NaN 的「仅赛道估值通道」曲线。回归见 `tests/modeling/test_signals_valuation.py`、`tests/funds/test_pipeline_valuation.py`。
+  口径变化（影响历史数值）：估值数据缺失期间，综合分不再被 15% 的中性估值权重稀释，仓位会比旧口径更偏离 0.5、更贴近趋势/偏离通道结论；PE 数据正常时数值不变。
+
+- ~~**P2-22：`analyze_market` 对指数预热历史用了错误的缓存 basis（库层默认参数）**~~ **已关闭（2026-11-06）**
+  位置：`market/analysis.py:160`（`sync.cached(kind, code, adjust, warm_start, end)` 用外层 `adjust`，默认 `"qfq"`）；`market/analysis.py:70-76`（`load_bars` 对 index 强制 `adjust=""` 后才 `register/cached`）；`tasks/sync.py:54-55/135-146`（资产键含 basis，`cached` 不做归一化）。
+  触发：直接调用 `analyze_market("index", ...)` 且未显式传 `adjust=""`（研究脚本、测试、未来调用方）；Web 路径因 `api/schemas.py:123-129` 已把 index 的 adjust 归一为 `""`，当前不触发。
+  后果：`context=None` → 只用请求窗口（默认 1 年），`direction_forecast` 的 `MIN_TRAIN=252` 成熟样本永远不够，指数方向概率/校准/成交对比全部退化为「样本不足」；MA120 也缺少预热（前 120 日空线）。
+  修复方向：入口统一 `basis = "" if kind == "index" else adjust` 后再 `sync.cached`/`analyze_technical`；补测试 mock `sync.cached` 断言 index 传入 `""`，并用短窗口验证 `context` 覆盖 warm_start。
+  **实际修法**：新增 `market/analysis.py:normalize_adjust`，`load_bars` 与 `analyze_market` 入口共用；`analyze_technical` 也随之一并收到 index 的空口径。回归见 `tests/market/test_context.py:test_direct_index_entry_uses_same_cache_adjust_as_web`。
+  口径变化：仅影响**直调**指数路径（研究脚本/测试）。此前直调指数会按前复权口径传 `adjust="qfq"` 给指标层，现在与 Web 一致按原始价；直调指数的 MA/水平位数值可能变化。Web 路径不变。
+
+- ~~**P2-23：持仓基准把未映射股票残差按现金利率计息，与 CLI 口径说明矛盾**~~ **已关闭（2026-11-06）**
+  位置：`funds/holdings.py:601-680`（`stock_weight = w.sum()`；`ret = stock_weight*(...) + (1-stock_weight)*cash_rate`，默认 `cash_rate=0.015`）；`research/commands/holdings.py:230-234`（明确「未映射权重 ≠ 现金……同样是股票仓位」）。
+  触发：行业映射未覆盖的新股/北交所/停牌股权重较高的历史期次（覆盖率低的基金）。
+  后果：残差被当成现金，持仓基准收益被系统性低估；与 RBSA/基金实际收益的差值把这段偏差算进「ML 拟合增量」，方向可能相反，尤其成长/新股暴露高的基金。与 P1-10 的股息缺口是两件事。
+  修复方向：残差按可配置情景处理（`cash` / 宽基指数近似），默认改为宽基并在输出标注 `residual_treatment` 与当期 `exposure_coverage`；覆盖率低于阈值时把该基金对比标为 degraded、不进入均值汇总。
+  **实际修法**：`holding_benchmark` 新增可选 `coverage`；只有 `100 − 合计`（明确现金/债券）按 `cash_rate` 计息，未映射股票与面板缺失行业一律 **0 收益**，并写入 `attrs["residual_treatment"]` 与 `attrs["diagnostics"]`；`fit_fund_holdings`/`holdings_payload` 下发 `benchmark` 诊断，CLI、报告 3.6、Web 持仓区块同步展示。回归见 `tests/funds/test_payloads.py` 的两个 P2-23 用例。
+  **口径变化（影响历史数值）**：此前残差按 1.5% 现金收益计息，相当于把未映射股票当现金赚利息；现在残差 0 收益，**持仓基准年化收益会下降**，因而「基金 − 持仓基准」「RBSA − 持仓基准」的差额、以及据此得出的 ML 增量都会变化，覆盖率越低/未映射越多的基金变化越大。历史持仓拟合结论需按新口径重跑，旧数字不可直接引用。
+
+### P3（健壮性 / 一致性）
+
+- ~~**P3-A：规则买卖点历史只回传最近 12 次，长窗口静默丢点**~~ **已关闭（2026-11-06）**
+  位置：`market/technical.py:277`（`"signals": records[-12:][::-1]`）；`api/static/market.js:161/279`（图上 markPoint 与列表直接使用该数组）。
+  触发：观察窗口内首次满足次数 > 12（长区间）。
+  后果：图上买卖点标记与列表只显示最近 12 次，早期信号无提示消失；标题「最近条件触发记录」不足以说明图上标记也被截断。
+  修复方向：返回全量（或上限 50）并附 `signal_total`/`truncated`；前端标记过多时抽样但显示总数，至少在图表下方注明「仅展示最近 N 次」。
+  **实际修法**：`signals` 改为按观察窗口全量返回，并新增 `signal_total`/`signals_truncated`（当前恒为全量、截断 0）；前端标题改为「观察窗口内条件触发记录」，note 显示窗口内总次数，若未来设上限会显式标注未列出数量。回归见 `tests/market/test_technical.py:test_signals_are_first_condition_and_use_past_only`。
+
+- ~~**P3-B：`holding_benchmark` 静默丢弃面板缺失的行业列**~~ **已关闭（2026-11-06）**
+  位置：`funds/holdings.py:639-641`（`cols = [c for c in exposure.columns if c in panel.columns]`，未记录缺失）。
+  触发：`C.INDICES` 池变动或 exposure 出现池外行业代码。
+  后果：缺失行业权重从 `stock_weight` 中消失，等价于多算现金腿，收益偏差不可见。
+  修复方向：收集 `missing`，写 `attrs["missing_exposure_weight"]` 并在 CLI/报告提示；超过阈值（如 5%）时把结果标 degraded。
+  **实际修法**：收集 `missing = [c for c in exposure.columns if c not in panel.columns]`，写入 `attrs["missing_industries"]` 与逐期 `attrs["diagnostics"]`（面板缺失行业/权重、已映射权重、未映射权重、现金债券权重、生效日）；缺失权重按 **0 收益** 处理而非现金。`fit_fund_holdings` 新增 `benchmark` 字段，CLI 打印警示与缺失行业列表，报告 3.6 与 Web 持仓区块展示同一诊断。全部行业都缺时返回空序列并附 `note`，`benchmark.available=false`。回归见 `tests/funds/test_payloads.py:HoldingBenchmarkPanelGapTest`。
+
+- ~~**P3-C：持仓拟合没有 Web/API 入口（仅 CLI 研究命令）**~~ **已关闭（2026-11-06）**
+  - **回查差距（已修）**：此前测试只覆盖路由参数转发与 400 校验（mock 掉 `holdings`），无 payload 内容/报告 3.6 渲染断言。现补 `tests/funds/test_payloads.py:HoldingsPayloadTest`（逐期记录、行业表首列「行业」、4 条披露约束原文、比较/基准/诊断明细、失败态显式原因）与 `tests/research/test_report_render.py:HoldingsSectionRenderTests`（3.6 实际数值、首末期相关、缺失行业告警、残差按 0 收益口径、未生成提示），未 mock 核心逻辑；原路由契约测试保留。
+  位置：`cli/registry.py:21`（`holdings` 命令）、`research/commands/holdings.py`；`api/routes/` 无对应路由，`funds/payloads.py` 不含持仓拟合结果。
+  触发：用户在 Web 工作台查找「持仓拟合/行业暴露/持仓基准」。
+  后果：能力只在 `run.py holdings` 可得（CSV 落在 `output/results/`），Web 与基金报告均无入口。若定位为产品能力则链路未闭环；若定位为研究 CLI 则只需明确边界。
+  修复方向（二选一，需确认）：①产品化：新增任务类型 + `/api/holdings` + 结果页（复用 H0~H3 的 CSV 口径）；②保留研究：README/页面明确「持仓拟合为 CLI 研究能力」。
+  **实际修法（拍板：产品化接入 Web 与报告）**：新增 `funds/holdings.py:fit_fund_holdings`（CLI/API/报告共用一条链路）与 `funds/payloads.py:holdings_payload`；任务队列新增 `holdings` 操作与 `POST /api/holdings`（`schemas.py:HoldingsRequest`）；基金页新增「真实持仓拟合」区块（运行按钮、逐期对齐表、基准对比表）；报告新增 3.6 章节。披露不退化：仍只用半年报/年报、Q2 +62 天 / Q4 +90 天、共同行业归一到 100%、持仓基准 ≥60 日共同区间，失败时显式「未生成」而不是省略。现有回归只有 `tests/api/test_routes.py` 的路由契约（任务参数转发/400 校验），**不含 payload 内容与报告 3.6 渲染断言**，见上方回查差距。
+
+### 已核验合理（留痕，不设待办）
+
+- **趋势标签严格因果**：`classify_at` 只用 `[t−2n+1, t]` 的前后段结构（`modeling/trends.py:8-60`），追加未来数据不改变历史标签；基金「走势带」贴在**样本外合成基准**上且 UI 明示（`funds/payloads.py:271-285`、`funds/analysis.py:384`、`app.js` 文案），不是基金自身 NAV 形态，也不是方向预测。
+- **方向概率无前视**：训练集按「标签已成熟」截断，REFIT 只用过去标签；样本不足时返回 `ok=false`+reason（`market/technical.py:83-145`）。`horizon` 缺报价不借用后续报价（`market/targets.py`）。
+- **买卖点执行口径一致**：t 日收盘出条件、t+1 开盘成交（`market/execution.py:62-109`），涨跌停/容量/费用有阻断原因；中间概率不生成新订单、持仓保持（`probability_targets`）；规则条件互相排斥，不存在同日买卖冲突。
+- **基金择时无前视**：decision 在 t 日、回测 `shift(1)` 生效（`modeling/backtest.py:243-246`）；健康门控在拟合不可信时只禁止卖出；零交易有 `no_trades`/`health_stats.reachable` 诊断（`signals.py:425-470`）。研究结论（日频方向信号无预测力）见 `docs/研究方案.md:912-924`、`README.md:248`，当前「只描述、不建议」的定位与证据一致。
+- **持仓拟合时点处理正确**：披露滞后 Q2=62 天 / Q4=90 天、基准按披露日切换、RBSA 对齐只比共同行业并披露 coverage 与重估日（`funds/holdings.py:61-75/485-576`）；持仓基准对比要求共同区间 ≥60 日（`holdings.py:703-710`）；未映射股票与面板缺失行业已按 0 收益处理（P2-23/P3-B 已关闭），只有明确现金/债券部分计息。
+
+### 已拍板口径（2026-11-06 已实施，留痕不设待办）
+
+- **基金走势输出方向概率**：原「只描述形态」保留为形态色带，新增独立的「方向概率（模型参考）」区块；复用 `market/technical.py:series_forecast` → `direction_forecast`，标签按成熟期截断、horizon 缺报价不外借、样本不足返回 `available=false`+reason。输出区分「形态描述」与「概率」，两处都标注不构成买卖建议。
+- **基金 Web 展示当前建议仓位/健康分**：回测结果新增 `current`（日期、是否可用、是否降级、仓位、状态、健康分、距离场线、原因清单、免责声明）；缺健康分或门控不可触发/拟合不可信时显式「不可用」或降级标注，不把默认仓位显示成正常值。
+- **P1-19 修法**：保留沪深300 兜底，但显式标注「行业估值不可用，已用宽基替代」，并暴露 `fallback_assets` 便于后续补行业 PE 数据源（详见 P1-19 实际修法）。
+- **P3-C 持仓拟合接入 Web 与报告**：已产品化，详见 P3-C 实际修法。
+
+## 生产上线评估（2026-11-06）
+
+范围：以「直接把当前系统作为生产系统上线」为前提，对数据链路、计算正确性、运行可靠性、生产必需能力、产品与合规、工程质量做**静态审查**（只读源码、README、Dockerfile 与测试说明，未改代码、未跑长任务）。优先级沿用本文件定义，并按本次要求收紧：**P1 仅用于会导致结果错误、数据丢失或无法运行的问题**；可由运维手段（鉴权反代、卷快照、外部日志采集、容器资源限制）规避的不计 P1。每条标注「缺失功能」或「逻辑/设计问题」；与已关闭/在办条目相关但不重复的，注明区别。
+
+### P1（阻塞上线）
+
+- ~~**P1-20（逻辑/设计问题）：总回报口径构造失败后静默改用累计净值，输出仍宣称 total 口径**~~ **已关闭（2026-11-06）**
+  - **回查差距（已修）**：核心拒绝/标记逻辑、Web/API 的 `meta.data_basis` 已落地；此前 CLI/报告侧缺口径标签。现 `funds/pipeline.run_fund` 输出 `meta.data_basis/nav_basis/nav_degraded/nav_degraded_reason`，verbose 打印「总回报 / 累计净值（降级）」，`research/commands/report.py` 把同样的字段写入报告 meta，报告 hero 固定渲染净值口径（降级用警示样式并带 `data_basis`/原因）。回归见 `tests/funds/test_pipeline_valuation.py:NavBasisMetaTests`、`tests/research/test_report_render.py:NavBasisRenderTests`。
+  - 位置：`data/panels.py:218-242`（`_DegradedNav` 在 `data/panels.py:228-230` 正确拒绝写 total 缓存，但 `except` 分支 `data/panels.py:237-239` 直接 `return fetch_fund_nav(...)`，返回序列不带退化标记）；`data/panels.py:308-310` 的打印标签仍按请求的 `nav_basis` 写「总回报」；`funds/analysis.py:229` 的 `meta.data_basis` 固定写「事后月度锚点校准」。
+  - 为什么生产不成立：只要单位净值或月频锚点缺失（新基金、分红/拆分修订、第三方接口偶发失败），本次分析就在累计净值上计算，而累计净值相对总回报实测平均低估约 23%（`data/providers/funds.py:156-160`），RBSA 权重、健康分、择时仓位、回测净值、报告与导出全部口径错误；同一参数两次运行还可能一次命中 total 同步历史、一次走 cum 直取（同步路径在 `tasks/sync.py:166-169` 遇降级会 `raise` 保留旧数据，分析路径却绕过该保护）。
+  - 影响面：所有基金入口（CLI/Web/API/报告），覆盖率低或分红多的基金最严重；结果不可复现、不可审计。
+  - 建议：退化时返回带 `attrs["nav_basis"]="cum"`/`nav_degraded=True` 的序列，并在 `meta`、CLI、报告、Web、导出 JSON 统一显示；或与同步一致，无 total 时直接 `ok=false` 拒绝，仅在显式 `basis=cum` 时允许。补「total 降级 → 不落 total 缓存且输出标记」的回归。
+  - 与 P2 第 60 行的区别：那条是「未校准 total 因缺 `degraded` 被永久缓存」；本条是「已有 `degraded` 后，分析路径仍静默改用 cum」，触发点和后果都独立。
+  - **实际修法（拍板：默认拒绝降级）**：新增 `config.NAV_DEGRADED_POLICY`（`reject` 默认 / `allow_cum` 显式降级，env `FIL_NAV_DEGRADED_POLICY`）；`load_fund_nav_cached` 在 total 构造退化时默认抛 `errors.NavBasisUnavailable`（带原因、受影响口径字段、数据基准说明与两条放行方式），失败经任务系统变成 job `status=error` 可见，不再静默返回 cum；`allow_cum` 下返回带 `nav_basis=cum`/`nav_degraded=True`/`nav_degraded_reason` 的序列且绝不落 total 缓存。实际口径挂在 Series/panel `attrs` 并透传到 `meta`（新增 `nav_basis`/`nav_degraded`/`nav_degraded_reason`，`data_basis` 由 `funds/analysis.py:nav_basis_meta` 按实际序列生成），CLI 标签改为「总回报/累计净值(降级)」，降级时 `data_warnings` 追加说明。同步路径（`tasks/sync.py`）原有的降级即 `raise` 保持不变。
+  - **口径变化（影响历史结论）**：total 正常构造时数值不变（同一输入结果完全一致）；此前「total 退化 → 静默按 cum 计算」的那些分析会由「看似正常的结果」变为**显式失败**，或（仅在显式 `allow_cum` 时）变为带 `nav_degraded` 标记的结果，`data_basis` 不再宣称「事后月度锚点校准」。同时 `DATA_CACHE_VERSION 5→6` 让旧实现写进 `_total` 缓存名下的 cum 数据失效重抓，`CACHE_VERSION 10→11` 让此前可能基于 cum 的结果缓存失效。**需要重跑**：任何在 total 构造失败时生成的基金分析、回测、报告与导出（尤其新基金/分红拆分频繁/单位净值缺失的代码）；`allow_cum` 下产出的历史结论不能与 total 口径结果混用。
+  - 回归：`tests/data/test_panels.py:NavBasisPolicyTests`（reject 抛错且不落缓存 / allow_cum 标记且不缓存 / total 成功缓存往返 / `load_panel` 透传降级警告）、`NavBasisMetaTests`（三种口径文案）；`tests/funds`、`tests/market/test_nav_calibration.py`、`tests/market/test_calibration.py` 与两个 regression 脚本全通过。
+
+### P2（上线前应修）
+
+- **P2-24（缺失功能）：认证、授权与配额** **部分落地（2026-11-06 回查）**
+  - **回查差距**：可开关令牌认证（`FIL_ACCESS_CONTROL=token`）、身份/租户 `ContextVar` 与审计 actor/tenant 已落地并有 `tests/api/test_access_control.py`；未落地：按用户/租户的任务与结果分区、每用户并发/队列配额、注册/登录/OIDC（本轮口径为单用户默认，仅预留升级入口）。
+  - 现状：`api/app.py:64-70` 只装 `BodyLimit` 与可选 CORS，无任何认证/授权中间件；`README.md:46` 明示「没有登录/鉴权」；`tasks/store.py:56-59` 只有全局 `queue_limit`，无按客户端限流；各路由无用户/租户维度。
+  - 为什么生产不成立：按 README 的 `0.0.0.0:8877` 暴露后，同网段任何人都能提交高成本任务、读取全部基金结果与持仓、耗尽 100 个队列名额和计算名额；无隔离、无配额。
+  - 影响面：滥用、数据泄露、拒绝服务；无法支持多用户。
+  - 建议：单人内网场景保持 `127.0.0.1` + 鉴权反代，并把该约束写进启动检查；产品化则需 API Key/OIDC、租户隔离、每用户并发/队列配额与审计（与 P2-26 合并设计）。
+  - 优先级说明：反代可降低风险，故不列 P1；但多用户上线前必须修。
+  - **实际修法（拍板：单用户为主、保留多用户升级入口）**：新增 `market_research/security.py`：
+    - `Identity`（subject / tenant / scopes / authenticated）+ `ContextVar` 请求上下文，服务层统一用 `current_identity()` 读取，不解析 HTTP 头；审计记录在认证模式下自动带 `actor/tenant`。
+    - `AccessControl` 中间件：`FIL_ACCESS_CONTROL=off`（默认）完全放行，行为与之前一致；`token` 模式校验 `Authorization: Bearer` / `X-API-Key`，未授权返回 401 + `WWW-Authenticate`；`FIL_API_TOKENS` 支持逗号分隔与 `租户:令牌`，为多租户预留。`/`、`/api/health`、`/api/ready`、`/api/disclosure` 与静态资源保持公开。
+    - 启动日志打印「单用户模式（未启用认证）」或「令牌模式（N 个令牌）」；`/api/health` 返回 `access_control` 模式。
+    - **未做（明确预留）**：注册/登录、按用户/租户的任务与结果缓存分区、每用户并发/队列配额、OIDC。接入多用户时在中间件后按 `Identity.tenant` 分区数据、在 `tasks/jobs.py` 提交处加租户字段即可，不需要重写路由调用链。
+  - 配置文档：`docs/运行环境与配置.md`（默认 `off`，token 模式说明）。
+  - 回归：`tests/api/test_access_control.py`（默认放行、缺令牌/错令牌 401、正确令牌 200、探针豁免、身份带 tenant/scopes、本地主体匿名）；`tests/api` 全通过。
+  - 语义变化：默认单用户模式下无任何变化；仅开启 `FIL_ACCESS_CONTROL=token` 后业务接口才要求令牌。
+
+- **P2-25（缺失功能）：健康检查、指标与错误上报** **部分落地（2026-11-06 回查）**
+  - **回查差距**：`/api/ready` 的存储/worker/队列/同步检查、503 语义与 Dockerfile `HEALTHCHECK` 切换已落地并有 `tests/api/test_routes.py:HealthTests`；未落地：Prometheus 指标、request id、结构化错误上报、worker 独立心跳文件（当前仅校验 pid 存活）。
+  - 现状：`api/routes/meta.py:8-10` 的 `/api/health` 只返回静态 `ok/version/framework/models`，不触达 DuckDB、不检查 worker、不检查同步状态和队列深度；`Dockerfile:54-55` 直接用它做 HEALTHCHECK；`api/app.py:54-61` 的 lifespan 只在启动时调用 `JOBS.migrate()` 与 `launch()`。
+  - 为什么生产不成立：数据库被锁死/损坏、worker 未启动或反复崩溃、同步连续失败、队列积压时，容器仍显示 healthy，用户看到任务永远 `queued`；没有指标和错误上报，只能翻 `worker.log`/`job-*.log`。
+  - 影响面：故障发现延迟、排障成本、SLO 不可度量。
+  - 建议：拆出 `/api/ready`（执行 `SELECT 1`、校验 worker pid/心跳、最近同步成功时间、队列/运行数）并让 HEALTHCHECK 使用；接入结构化日志 + request id、Prometheus 指标（任务数/耗时/失败率/缓存命中/同步结果）与错误上报；`/api/health` 保留为纯存活探针。
+  - **实际修法**：
+    - `/api/health` 保留为纯存活探针（新增 `probe=liveness`、`pid`、`uptime_s`，不触达依赖）；
+    - 新增 `/api/ready`：`storage` 实际执行 `SELECT 1`（带 2 秒超时，返回延迟/原因）、`worker` 校验 `worker.pid` 且进程存活（Windows 用 `OpenProcess`，POSIX 用 `os.kill(pid,0)`）、`jobs` 读取 `DurableJobStore.stats()` 的状态分布、`sync` 读取 `valuation_sync.json.last_success` 与阈值（`2×FIL_DATA_STALE_DAYS`，同步关闭时返回 enabled=false）、并附 `storage.LOCK_STATS`；
+    - 判定：storage/worker/jobs 任一失败 → `status=unhealthy` 且 HTTP **503**；仅同步过期 → `degraded` + 200；否则 `ok`；
+    - `Dockerfile:54-57` 的 HEALTHCHECK 改用 `/api/ready`（503 会让容器标记 unhealthy）。
+  - **未做**：Prometheus 指标、request id、结构化错误上报（需要产品/运维确定后端与保留策略，未声称完成）；worker 只校验 pid，没有独立心跳文件（supervisor 崩溃但 pid 残留的极端情形识别不了）。
+  - 回归：`tests/api/test_routes.py:HealthTests`（存活探针不依赖存储、依赖故障 503、同步过期 degraded）；`tests/api` 全通过。
+
+- **P2-26（缺失功能）：审计与操作日志** **部分落地（2026-11-06 回查）**
+  - **回查差距**：JSONL 审计（5MB×5 轮转、脱敏）及分析/报告发布/数据写入三类记录已落地并有 `tests/data/test_audit.py`；未落地：操作者/IP 字段（认证模式下仅 actor/tenant）、审计查询接口、保留期策略与防篡改。
+  - 现状：`tasks/store.py:47-60` 的任务表只记录 `code/models/operation/arguments/created/updated`，无操作者、来源 IP、结果版本；`DurableJobStore.public` 不下发 `arguments`；日志仅 Uvicorn stdout 与 `worker.log`/`job-*.log`（`README.md:194`），无保留期限与不可篡改要求。
+  - 为什么生产不成立：无法回答「谁在何时、用什么参数和哪版数据、得到了哪个结果、是否发布过」；任务终态 24 小时后被清理（`tasks/store.py:51` 附近），事故复盘和合规审计没有依据。
+  - 影响面：内部治理、合规、结果争议追溯。
+  - 建议：新增审计表（actor、ip、operation、参数摘要、`data_stamp`、模型状态、耗时、结果 locator）与结构化日志；明确保留期、脱敏规则与查询接口；审计记录不复用 24h 任务清理。
+  - **实际修法**：新增 `market_research/audit.py`：JSONL（`DATA_DIR/audit.jsonl`，5MB×5 轮转），每次追加后立即关闭句柄（避免 Windows 上常驻句柄阻塞目录清理/轮转）；`_sanitize` 对 `params/arguments/headers/token/cookie/authorization` 等键一律替换为 `<redacted>`，字符串截断 200 字符、层级 >2 截断，写入失败静默不影响主流程。记录三类关键操作：
+    - **分析运行**：`services/analysis.execute()` 统一包装 `_dispatch`，成功/失败都记 `analysis.run`（operation、code、job_id、status、completeness 状态与缺失项、模型数、耗时；异常记 `type: message`）；CLI/报告链路 `funds/pipeline.run_fund` 末尾追加一条（窗口、状态、缺失项、数据质量）。
+    - **报告发布**：`research/commands/report.py` 记 `report.publish`（fund、path、门禁是否通过、是否 `--allow-incomplete` 强制、数据质量/完整性状态）；`PublishRefused` 前记失败与问题清单。
+    - **数据写入**：`data/storage.write()` 记 `data.write`（dataset 名、行数、列数、revision 前 12 位；事务回滚记失败），不含任何行情数值。
+  - **未做**：无操作者/IP（当前无认证体系，取决于 P2-24 部署形态）、审计查询接口与保留期策略（需产品/合规口径）、审计表入库与防篡改。审计对象仍复用 `DATA_DIR`，未与 24h 任务清理绑定（JSONL 本身不被任务清理触碰）。
+  - 回归：`tests/data/test_audit.py`（字段完整、敏感键脱敏、字符串/深度截断、写入失败静默）；`tests/data`(48)、`tests/funds`(37)、`tests/api`(22)、`tests/research/test_report_render`(10) 全通过。
+  - 语义变化：无业务返回值变化；副作用是 `DATA_DIR/audit.jsonl` 会新增记录（同步期间每个数据集写入一条，5MB 轮转）。
+
+- ~~**P2-27（逻辑/设计问题）：缓存新鲜度与数据源故障降级不统一**~~ **已关闭（2026-11-06）**
+  - 现状：`data/cache.py:62-85` 的 `_cached` 只用 meta 指纹判等，不校验数据年龄；`index_universe` 的 meta 只有 `v/n_candidates/start/end`（`data/panels.py:149-159`），`info.data_end` 仅作描述（`data/panels.py:88-104`、`175-178`）；builder 失败时 `data/cache.py:83-85` 直接抛错，没有「回退旧缓存 + stale 标记」路径（`_cached` 的 docstring 虽称「刷新失败保留上一份数据」，但代码未实现该分支）；只有同步路径有保旧逻辑（`tasks/sync.py:188-208`）。
+  - 为什么生产不成立：同步停用/失败或容器长期不运行时，基金分析会无限期使用旧指数池，用户把旧暴露/旧净值当成当前；反过来，数据源短时故障会直接让所有分析任务失败，即使本地已有完整旧数据；同一天多次运行的可用性随网络抖动。
+  - 影响面：结果时效性不可判断、可用性受单次网络故障影响。
+  - 建议：统一新鲜度模型——缓存读取校验 `data_end` 与预期最近交易日（结合交易日历）差，超过阈值输出 `stale_days/stale=true` 并在 payload/UI/报告标注；读取路径支持 `allow_stale`：取数失败回退最近缓存并附 `source_error`；关键结论（当前仓位/估值）默认拒绝超阈值 stale，历史诊断可带标记继续。
+  - 与 P3 第 104 行的区别：那条是同步历史 `meta.through` 写当天导致旧数据被误判新鲜；本条是全局指数池缓存根本没有新鲜度字段，且缺故障回退。建议一并统一，但影响面不同。
+  - **实际修法**：新增 `data/quality.py` 作为唯一判定入口：`freshness()` 按数据末日与参考日（`min(今天, 请求 end)`）计算 `stale_days/stale`，`build_quality()` 把过期、候选缺失（占比 ≥20% 升为 degraded）、净值口径降级、取数失败回退合并成 `status=ok/partial/degraded/failed + reasons + missing_assets/n_missing/n_expected`，阈值由 `C.DATA_STALE_DAYS`（env `FIL_DATA_STALE_DAYS`，默认 10 天）控制。`_cached` 在 builder 抛错且**旧缓存 meta 仍匹配**时回退旧数据，挂 `attrs.stale/source_error/cached_at` 并写 `info.last_error`（meta 不匹配时仍抛错，避免 P1-20 的污染缓存被复用）；`load_index_universe` 把缺失清单与回退标记写入 `attrs`；`load_panel` 汇总为 `attrs.data_quality` 并把 reasons 并入 `data_warnings`。透传：分析 `meta.data_quality/data_warnings`、CLI 首行警示、`meta.json` 的 `数据质量`、报告头部警示条、Web 元信息徽标（显示 status 与原因）。
+  - 回归：`tests/data/test_panels.py:DataQualityTests`（ok/过期 partial/缺失 partial→degraded/口径与回退 degraded/旧缓存回退可见/meta 不匹配拒绝回退）；`tests/data`、`tests/funds`、`tests/api` 全通过。
+  - 语义变化：取数失败不再一律任务失败，而是在本地有同口径旧缓存时**带 stale/degraded 标记继续**（无缓存仍失败）；新增 `meta.data_quality` 字段，`data_warnings` 会多出过期/缺失原因；历史窗口分析（`end` 为过去日期）不会因「距今久」被误标 stale。
+
+- **P2-28（逻辑/设计问题）：候选指数缺失没有进入用户可见口径** **部分落地（2026-11-06 回查）**
+  - **回查差距**：`missing_assets/n_missing/n_expected` 进入 `meta.data_quality`、`data_warnings` 与回测/相关接口已落地并有 `DataQualityTests`；未落地：关键宽基缺失单独升级 `degraded`（需产品先定义「关键指数」清单）。
+  - 现状：`data/panels.py:160-185` 把缺失指数写入 `_cache_info_write` 并 `LOG.warning`；`load_panel` 的 `warnings` 只来自 `align_prices`（`data/panels.py:311-321`）；`funds/analysis.py:230-232` 只透传 `panel.attrs["warnings"]`，cache info 里的 `missing_assets/n_missing/n_expected` 没有进入 payload。
+  - 为什么生产不成立：47 个候选缺 3 个时，RBSA 候选池缩小、权重重新分配，用户看到 `meta.n_assets`（实际列数）却不知道少了谁、为什么少；若缺的是基金主风格指数，结论可能反转而无提示。
+  - 影响面：RBSA 画像、风格漂移、估值覆盖与回测变体的解释力。
+  - 建议：把 `missing_assets/n_missing/n_expected` 从 cache info 提升到 `panel.attrs` 与 payload `meta.data_quality`；缺失比例超阈值或关键宽基缺失时标 `degraded`；CLI/报告/Web 显示缺失清单与重试建议。
+  - **实际修法**：`load_index_universe` 把 `missing_assets/n_expected` 写入返回 DataFrame 的 `attrs`；`load_panel` 交给 `build_quality` 合并（缺失占比 ≥20% 判 `degraded`，少量缺失判 `partial`，缺失清单与「重跑可补齐」提示进入 `data_quality.reasons` 和 `data_warnings`）。分析 `meta` 新增 `missing_assets`、`n_assets_expected`、`data_quality`；回测 payload 的 `meta` 同样带 `data_quality`；滚动相关轻量接口返回 `data_quality/data_warnings`；Web 元信息显示「候选指数 实际/应有」并附缺失清单 tooltip，回测页新增数据质量提示；CLI/报告延续 P2-27 的警示。未实现的建议项：**关键宽基缺失单独升级 degraded**（需要产品定义哪些指数是关键），已在挂起口径中说明，不声称完成。
+  - 回归：`tests/data/test_panels.py:DataQualityTests.test_load_panel_reports_missing_candidates`；`tests/data`、`tests/api`、`tests/funds` 全通过。
+
+- **P2-29（缺失功能）：数据源单点、限流与供应商契约** **部分落地（2026-11-06 回查）**
+  - **回查差距**：全进程限流、指数退避、编程错误不重试、`data/provenance.py` 溯源与 `ProviderContractError` 契约校验已落地并有 `tests/data/test_http.py`；未落地：备用源/本地归档、熔断与 provider 健康度降权（本轮口径为继续公开抓取）。
+  - 现状：指数走 `data/providers/indices.py:41-60` 的 6 线程批量抓取；基金总回报需 3 个接口（`data/providers/funds.py:224-260`）；估值走 csindex（`data/providers/valuation.py`）；重试为固定 4 次、线性 1.2s（`data/http.py:36-47`）；同步进程与 2 个分析进程各自独立访问，无全局令牌桶/熔断/provider 健康状态。
+  - 为什么生产不成立：全部依赖同一类公开接口（akshare/新浪/东财/中证），限流、反爬或字段变更会让同步与分析同时失败；多进程并发放大请求；30 分钟冷却重试在长时间故障时持续打满上游，进一步触发封禁。
+  - 影响面：可用性、数据完整性、被抓取方封禁风险。
+  - 建议：全局按 host 限速 + jitter/backoff + 熔断；缓存优先（stale 可服务时先返回并标记）；至少一条独立备用源或本地归档；为 provider 关键列建立契约 fixture 与监控（与 P2-35 共用）。
+  - **实际修法（拍板：继续公开抓取）**：
+    - 限流：`data/http.py:rate_limit()` 全进程共享最小请求间隔，`FIL_HTTP_MAX_RPS` 默认 8（`<=0` 关闭），在 `_retry` 每次尝试前执行。
+    - 重试：改为指数退避 `wait × 2^i`（上限 30s + 抖动）；`ValueError/KeyError/TypeError/AttributeError/ProviderContractError` 判定为编程/契约错误，**不重试**；网络/超时类才重试，避免空转四次。
+    - 降级路径保持统一：重试耗尽后交给既有 `_cached` 回退（stale + `source_error`，P2-27），不在各 provider 各自实现。
+    - 溯源：新增 `data/provenance.py`，每次抓取记录 `source/endpoint/last_fetch_at/ok/degraded/error/calls`，由 `build_quality(provenance=...)` 写入 `meta.data_quality.provenance`（Web/报告/接口可见）。
+    - 供应商契约：`data/provenance.py:CONTRACTS` + [数据源供应商契约](docs/数据源供应商契约.md) 固化端点与字段；`require_columns` / `_require_nav_frame` 在缺列、空表、列改名时抛 `ProviderContractError`（含来源、实际列、端点）；`fetch_pe_panel/fetch_dividend_panel` 不再吞掉契约错误；候选池**全部**失败时 `fetch_universe` 显式抛错，部分失败仍进入 `missing_assets`。
+    - **未做**：备用源/本地归档、熔断与 provider 健康度降权（拍板不采购合规源，且需要新增数据源工程；未声称完成）。
+  - 回归：`tests/data/test_http.py:RetryAndProvenanceTests/ContractValidationTests`（瞬时错误重试成功、编程错误只调一次、耗尽标记 degraded、限流参数解析、缺列报错含端点）；`tests/data`、`tests/market`、`tests/research/test_report_render` 全通过。
+  - 语义变化：抓取默认增加限流（总体变慢但不改变数值）；编程错误不再重试 4 次；契约变化由「静默用错列/空表」变为显式失败；`data_quality` 新增 `provenance` 字段。
+
+- **P2-30（逻辑/设计问题）：DuckDB 全局写锁使请求路径与同步互相阻塞** **部分落地（2026-11-06 回查）**
+  - **回查差距**：有限等待、`StorageBusy`、`LOCK_STATS` 已落地；此前 `StorageBusy` 未映射为明确 HTTP 状态。现注册 FastAPI 异常处理映射为 **503**（`ok=false`、`field=storage`、可读原因、`retry_after_s`），并让 `/api/corr` 的通用 `except Exception` 不再吞掉它；错误码已登记到 README。回归见 `tests/api/test_routes.py:test_storage_lock_timeout_maps_to_retryable_503`。未落地：读写分离/独立库文件/多列合并写入，读写仍共用一把锁（只保证不无限阻塞）。
+  - 现状：`data/storage.py:18-40` 每次连接都取阻塞式跨进程文件锁 + 进程内 `RLock`；所有数据集读取/写入都走短连接；写入是整表 `DELETE` + `INSERT`（`data/storage.py:72-82`）；同步逐资产「读整表 + 写整表」（`tasks/sync.py:296-309`），47 个指数各一次。
+  - 为什么生产不成立：每日同步或任一 CLI 研究写入期间，API 的入队、状态查询、结果读取、`/api/name`、`/api/sync` 都会排队；没有 busy timeout 与只读降级，长批次会让请求线程长时间阻塞，p99 尖刺甚至触发网关超时。
+  - 影响面：请求延迟、线程池耗尽、同步与在线服务争抢。
+  - 建议：读路径使用只读连接或 `busy_timeout` + 有限重试；把 47 个指数的更新合并为一次多列写入/单事务，减少锁次数；同步放到独立库文件或低峰执行；加锁等待指标与告警。
+  - **实际修法**：`storage.connection()` 改为**非阻塞轮询 + 有限等待**：进程内 `RLock` 与跨进程文件锁都按 `FIL_STORAGE_LOCK_TIMEOUT`（默认 10 秒）等待，超时抛 `errors.StorageBusy`，错误信息明确说明「同步/其它进程正在写入」与排查入口；新增 `storage.LOCK_STATS`（waits/timeouts/total_wait_s），等待超过 0.5 秒写 warning 日志。持有锁的范围不变（仍是每次连接内的短事务），同步的联网抓取仍在锁外。**没有做**：读写分离/独立库文件/多列合并写入（需要改存储模型与同步链路，风险大），因此「彻底解耦」未完成；当前保证「不会无提示卡死」。
+  - 语义变化：锁竞争从「无限阻塞」变为「10 秒后明确失败」；请求侧收到 **503**（`field=storage`、可读原因与 `retry_after_s`）后可稍后重试，同步侧若被长时间占用也会失败并在 `sync_assets.error` 留下原因。
+  - 回归：`tests/data/test_storage.py:test_connection_times_out_with_explicit_busy_error`（线程持锁 → 超时抛 StorageBusy 并计数）、原有跨进程写入测试仍通过；`tests/data` 全通过。
+
+- **P2-31（缺失功能）：分析结果的完整性/部分失败没有契约** **部分落地（2026-11-06 回查）**
+  - **回查差距**：`result_completeness()`（`status/ok/sections/missing/reasons`）与 `/api/result` 透传 `status/completeness`、Web 徽标已落地并有 `CompletenessTests`；未落地：失败模型从 `rank/best/insights` 强制排除（当前只标记、排名仍保留失败行），以及页面顶部统一的部分失败横幅。
+  - 现状：`services.analysis.execute('analyze')` 原样返回 `analyze()` 的 dict（`funds/analysis.py:186-238`），没有 `ok/status/partial_failed`；单模型失败由 `_failed_report` 填 NaN 与 `extra.error`（`modeling/engine.py:10-24`），`rank` 仍保留失败行（`modeling/engine.py:377-392`）；`/api/result` 对 `done` 一律返回 `{"ok":true}`（`api/routes/tasks.py:14-23`）。
+  - 为什么生产不成立：11 个模型失败 8 个时任务仍显示「完成」，排名/insights 可能选中空权重或出现 NaN；调用方无法判断结果能否引用、能否发布。
+  - 影响面：Web/API/报告的结论可信度；自动化下游无法做质量门禁。
+  - 建议：结果增加 `status`（ok/degraded/failed）、`failed_models`、`degraded_reasons`；失败模型从 rank/best/insights 中排除；全失败返回失败终态或明确 `ok=false`；UI 顶部统一横幅；补部分失败契约测试。
+  - **实际修法**：`funds/analysis.py:result_completeness()` 定义统一契约 `{status: ok|partial|failed, ok, sections, missing[{section,item,reason}], reasons}`：
+    - `models` 按 `extra.error` 或 `oos_r2 is None` 判定单个模型失败（全失败 → failed，部分失败 → partial），缺失项逐个带原因；
+    - `correlation/forecast/valuation/style_drift` 作为可选章节，缺失记 `unavailable` 并计入 partial；`data` 章节直接采用 P2-27 的 `data_quality.status`；
+    - 顶层结果新增 `status/ok/completeness`；`/api/result` 透传 `status/completeness`（信封 `ok` 保持 true，避免破坏现有调用）；Web 元信息新增「结果部分完成/失败 + 缺失项」徽标，tooltip 显示原因；报告路径 `funds/pipeline.py:_completeness()` 用同构结构（nav/exposure/health/backtest/valuation/style_drift/data），写入 `meta.json` 的「完整性」，报告头部与数据质量警示合并展示。
+  - **未做**：失败模型从 `rank/best/insights` 中强制排除（属 P2 行为变更，会改变现有排名与报告结论；当前只把失败标记出来，`rank` 仍保留失败行）。如需切换，需产品确认后单独实施。
+  - 回归：`tests/data/test_panels.py:CompletenessTests`（部分缺失 → partial 且 `ok=true`、全模型失败 → failed 且 `ok=false`）；`tests/data`、`tests/funds`、`tests/api` 全通过。
+
+- **P2-32（缺失功能）：报告发布缺少完整性/窗口一致性门禁** **部分落地（2026-11-06 回查）**
+  - **回查差距**：`validate_publish()` 在 `build_report` 之前执行、默认 `PublishRefused` 不覆盖旧报告、`--allow-incomplete` 强制模式与 `publish_gate` 记录已落地并有 `PublishGateTests`；未落地：CSV 指纹/窗口元数据持久化（当前只按「样本天数」做量级校验）、报告版本化归档（仍原子覆盖同名文件）。
+  - 现状：`research/commands/report.py:8-10` 仅以文档提醒「跨基金表必须与主案例同窗口」；`research/commands/report.py:57-61` 缺 CSV 时用空 `DataFrame` 继续；`research/report.py:664` 附近空表照常渲染；`research/report.py:1018-1023` 原子写会直接覆盖已有报告。
+  - 为什么生产不成立：主案例与跨基金表可能来自不同窗口或旧文件，关键证据缺失也能生成「完整」报告并覆盖上一版；没有完整性清单、没有非零退出、没有版本留痕。
+  - 影响面：对外/对内结论被误引；历史版本不可回溯。
+  - 建议：生成前校验各 CSV 的窗口/指纹与主案例一致，缺失则标 `incomplete`、非零退出且不覆盖旧版；报告页脚显示窗口、`data_stamp`、fingerprint；保留版本化输出。
+  - **实际修法**：`research/commands/report.py:validate_publish()` 在调用 `build_report` **之前**执行，返回问题清单：
+    - 完整性：主案例 `completeness.status == failed` → 拒绝；关键表格（跨基金汇总、E1/E2/E3/E4）任一缺失/为空 → 拒绝；
+    - 窗口一致性：凡带「样本天数」的跨基金表（汇总/E2/E3），最大样本天数与主案例样本外天数相差超过 `max(30 天, 15%)` → 拒绝；
+    - 有问题是默认 `raise PublishRefused`（不写文件、不覆盖旧报告），并逐条打印原因；新增 `--allow-incomplete` 显式强制发布，此时报告顶部出现红色「发布门禁未通过」横幅，`meta_extra.publish_gate` 记录 `{ok, problems, forced}`。
+  - **未做**：CSV 指纹/窗口元数据的持久化（现有 CSV 无 fingerprint 列，只能按「样本天数」做量级校验）；报告版本化归档（仍原子覆盖同名文件）。这两项需要实验导出侧配合，未声称完成。
+  - 回归：`tests/research/test_report_render.py:PublishGateTests`（一致通过/缺表拒绝/窗口不一致拒绝/主案例失败拒绝），现有报告渲染测试全部通过。
+
+- **P2-33（缺失功能）：备份与恢复** **部分落地（2026-11-06 回查）**
+  - **回查差距**：`ops/backup.py` 的 `backup|verify|restore`（锁内 `EXPORT DATABASE`、revision/行数校验、`--confirm`）与 [备份与恢复](docs/备份与恢复.md)、`tests/data/test_backup.py` 已落地；未落地：定时快照调度、异地/不可变存储、保留策略自动化、在线双库切换（需部署方 cron/对象存储配合）。
+  - 现状：`README.md:48` 只要求「备份/迁移 DuckDB 前先停止容器内所有写入进程」，无备份命令、定时快照、校验、恢复演练或 RPO/RTO；DuckDB 单文件同时存放行情、任务与累积面板；`tasks/sync.py:260-266` 明示 csindex 估值面板断跑超过约一个月无法回补。
+  - 为什么生产不成立：卷损坏、误删或失败升级会丢失不可重建的估值历史与任务记录；没有恢复验证，备份本身可能不可用。
+  - 影响面：数据资产（尤其 `pe_panel`/`div_panel`）与历史结果可复现性。
+  - 建议：提供 `backup/restore` 命令（`CHECKPOINT` 或 `EXPORT DATABASE`，含校验和），每日快照与保留策略，恢复演练文档；至少把累积估值/股息面板导出到独立不可变存储。卷快照可部分规避，故列 P2 而非 P1。
+  - **实际修法**：新增 `market_research/ops/backup.py`（CLI：`python -m market_research.ops.backup backup|verify|restore`）：
+    - 数据资产明确为 DuckDB（行情 / `pe_panel` / `div_panel` / 指数池 / 同步历史）、`audit.jsonl*`、`webcache/*.pkl`、`*.meta.json`。
+    - 一致性：在 `storage.connection()` 持有的文件锁内执行 `EXPORT DATABASE ... (FORMAT PARQUET)`（停写快照），再复制审计与缓存；`manifest.json` 记录数据集数量、价格行数、revision 哈希、环境与时间。
+    - `verify` 用独立 DuckDB 读 Parquet 校验数量与 revision 哈希（不一致拒绝恢复），关键数据集/审计缺失只作 warning。
+    - `restore` 必须显式 `--confirm`：同一把锁内清空 `datasets/prices` → `IMPORT DATABASE` → 复制审计/缓存 → 用 manifest 比对 revision 哈希与价格行数，不一致即报错。
+    - 文档：[备份与恢复](docs/备份与恢复.md)（资产清单、命令、RPO/RTO 建议、恢复后四步一致性检查）。
+  - **未做**：定时快照调度、异地/不可变存储、保留策略自动化（需要部署方 cron/对象存储配合）；未做在线双库切换。
+  - 回归：`tests/data/test_backup.py`（备份→verify→restore 往返、篡改 manifest 被拒、无效备份拒绝恢复）。
+  - 语义变化：仅新增运维命令与文档，不影响 CLI/Web 业务路径。
+
+- **P2-34（缺失功能）：多环境配置与结果溯源** **部分落地（2026-11-06 回查）**
+  - **回查差距**：`FIL_ENV` 与可分离目录、`meta.provenance`、`/api/health.environment` 已落地；此前 `_stamp()` 未传数据版本导致 `data_stamp` 恒 `null`，现已修复：基金类操作（analyze/backtest/refit/corr）使用本基金本窗口的数据指纹（与结果缓存键同口径），market/holdings 使用全局指纹；缓存命中读旧 pickle 时保留产出时的版本；analyze 在计算前后各取一次，期间数据变化则跳过写缓存。回归见 `tests/api/test_provenance.py:test_data_stamp_changes_when_data_version_changes`。未落地：`/api/config` 脱敏视图、启动期 schema 校验、参数级指纹（`C.RBSA`/窗口参数未进入每个结果）。
+  - 现状：`settings.py:14-25` 全部依赖 `FIL_*` 环境变量，启动时只做 `int` 转换，无 schema 校验/环境分层；`config.py` 中大量研究参数是代码常量；`api/routes/meta.py:8-10` 的版本硬编码；结果缓存与分析 payload 现在共用同一 `data_stamp` 口径（`services/analysis.py`），但配置指纹仍只有版本级。
+  - 为什么生产不成立：dev/staging/prod 无隔离；升级后无法判断某个结果是哪版代码、哪版数据、哪套窗口/参数产生；「同输入同输出」无法自证。
+  - 影响面：发布管理、问题回溯、合规审计、跨环境对比。
+  - 建议：启动时用 `pydantic-settings` 校验并打印生效配置；把 `data_stamp`、git commit、关键 `C.RBSA`/窗口参数、`cache_version`、同步状态写入 `meta.provenance`（API/报告/导出统一）；提供脱敏的 `/api/config`。
+  - **实际修法**：`config.py` 新增 `ENV`（`FIL_ENV=dev|local|prod`，未知回退 `local`）与可分离目录：`FIL_DATA_DIR` / `FIL_FIG_DIR` / `FIL_RES_DIR`；`local` 默认路径保持 `output/data|figures|results`，`dev` 默认落 `output/dev/*`，行为不变。`research/runinfo.py:result_provenance()` 输出 `environment/code_version/config_version/git_commit/git_dirty/data_stamp/generated_at`（git 查询进程内缓存）；`services.analysis._stamp()` 在 `_dispatch` 对所有操作结果写 `meta.provenance`，缓存文件保留产出时的版本；报告 `runinfo.data_summary()` 增加 `environment/data_dir`；`/api/health` 返回 `environment`。配置说明见 [运行环境与配置](docs/运行环境与配置.md)。
+  - **未做**：`/api/config` 脱敏配置视图、启动期 pydantic schema 校验、把完整 `C.RBSA` 参数写入每个结果（当前指纹是版本级，非参数级）。
+  - 回归：`tests/api/test_provenance.py`（指纹字段、`_stamp` 挂载与缺 meta 兜底、数据变化后 `data_stamp` 变化/基金窗口只跟踪自身依赖、`FIL_ENV=dev` 切换数据目录、未知环境回退）；`tests/api/test_routes.py` 仅调整一处断言以容纳新增 `meta.provenance`，缓存语义不变。
+  - 语义变化：结果 payload 新增 `meta.provenance`；默认 `FIL_ENV=local` 时路径与数值完全不变。
+
+- **P2-35（缺失功能，工程质量）：真实数据测试、CI 与接口契约** **部分落地（2026-11-06 回查）**
+  - **回查差距**：手动真实冒烟（`ops/smoke.py`、`scripts/smoke_real.py`）、`.github/workflows/ci.yml` 的 `compileall`+`node --check`+全量 unittest、provider 契约单测已落地；未落地：真实数据 CI、录制 fixture 库、每日 live smoke 告警。CI 未在本机执行过 GitHub Actions。
+  - 现状：`tests/README.md` 说明默认只跑离线/合成数据，真实数据用例需手动联网；仓库无 `.github/`（已用 Glob 确认），无 PR 门禁；`tests/api/test_routes.py` 只断言路由存在，不校验响应字段/错误码；provider 适配层无字段契约测试。
+  - 为什么生产不成立：akshare 列名/接口变更历史上已发生，CI 不会捕获；重构可能破坏前端依赖字段而不自知；发布前无自动化全量回归。
+  - 影响面：回归风险、供应商契约漂移、交接质量。
+  - 建议：CI 跑全量 unittest + `node --check` 前端；为关键响应加 JSON schema/字段契约；用录制的真实响应 fixture 测 provider；每日/每周 live smoke（告警但不阻塞合并）。
+  - **实际修法（拍板：内部研究，不强制全量真实数据 CI）**：
+    - 手动真实冒烟：`market_research/ops/smoke.py` + `scripts/smoke_real.py`，覆盖抓取→面板→分析→报告，产物 `smoke_result.json`；失败按阶段与异常来源分类 `data_source | logic`（契约/净值口径/存储/网络类归 data_source，其余本地计算/渲染归 logic）。
+    - CI：新增 `.github/workflows/ci.yml`，跑 `python -m compileall src scripts`、`node --check` 全部前端 JS、`python -m unittest discover`（全量离线单测）；不跑真实数据。
+    - 字段契约：provider 缺列/改名由 P2-29 的 `ProviderContractError` 在单测中覆盖（`tests/data/test_http.py`）。
+  - **未做**：真实数据 CI、录制 fixture 库、每日 live smoke 告警。真实冒烟失败时由 `failure_class` 区分数据源/逻辑，不自动重试。
+  - 回归：`tests/data/test_smoke.py`（分类与失败落盘）；CI 配置为新增文件，未在本机执行 GitHub Actions。
+
+- **P2-36（缺失功能，产品与合规）：免责声明、数据延迟披露与数据源授权** **部分落地（2026-11-06 回查）**
+  - **回查差距**：`disclosure.py`、`/api/disclosure`、Web 顶部横幅与报告首页横幅、`FIL_DISCLOSURE_SCOPE/TEXT/POSITION` 开关已落地并有 `tests/api/test_disclosure.py`、`DisclosureTests`；未落地：每个 API 响应的统一 `meta.disclaimer/data_as_of/data_latency/model_limits` 信封；数据源再分发授权评估仍属法务事项。
+  - 现状：Web 页脚（`api/static/index.html:382`）、报告页脚（`research/report.py:1014`）、预测/当前仓位/回测 payload（`funds/payloads.py:173`、`209`、`739`）已有免责声明；但顶层分析、持仓、`/api/result` 没有统一信封，`meta` 无 `data_as_of`/延迟说明；akshare/新浪/东财/中证数据的生产使用与再分发授权未确认。
+  - 为什么生产不成立：通过 API/导出消费结果的人拿不到免责声明与数据截止/延迟；数据源条款风险未评估；用户无法区分「模型参考」与「投资建议」。
+  - 影响面：合规、用户误解、对外分发风险。
+  - 建议：所有响应加统一 `meta.disclaimer/data_as_of/data_latency/model_limits`；报告/导出与 API 同源；明确「仅内部研究」或采购合规数据源；具体措辞与授权范围需产品/法务拍板。
+  - **实际修法（拍板：内部研究，保留对外交付升级位）**：新增 `market_research/disclosure.py`，默认文案明确「数据来源为公开抓取、存在延迟与不完整、结论仅供研究参考、不构成投资建议」；Web 页顶部显著横幅（`index.html` + `app.js` 从 `/api/disclosure` 读取，失败保留内置文案）与报告首页横幅（`build_report` 在 hero 之前插入，带独立高对比样式）。文案与位置可配：`FIL_DISCLOSURE_SCOPE=internal|external`、`FIL_DISCLOSURE_TEXT`、`FIL_DISCLOSURE_POSITION=top|footer`；`/api/disclosure` 与页面/报告同源，便于未来对外交付统一替换。
+  - **未做**：每个 API 响应的统一 `meta.disclaimer/data_as_of/data_latency/model_limits` 信封（当前是页面与报告级披露 + `data_quality` 已有数据截止/降级信息）；数据源再分发授权评估仍属法务事项（拍板继续公开抓取、API 内部使用）。
+  - 回归：`tests/research/test_report_render.py:DisclosureTests`（横幅位于 hero 之前且含三项声明、文案覆盖生效）、`tests/api/test_disclosure.py`（默认内部文案、对外作用域/位置/自定义文案、token 模式下接口仍公开）；相关 19 项测试通过。
+  - 语义变化：Web 页与报告新增显著声明条；默认文案为内部研究口径，数值结果不变。
+
+- **P2-37（逻辑/设计问题）：抓取超时使用进程级全局 socket 默认值，与 6 线程并发冲突** **部分落地（2026-11-06 回查）**
+  - **回查差距**：`http_timeout` 改为 `threading.local()`（支持嵌套恢复）+ 模块导入时给 `requests.Session.request` 注入线程级 timeout 已落地并有 `tests/data/test_http.py`；未落地：同步单资产的 watchdog/总超时（仍属 P2-29 挂起范围，`tasks/sync.py` tick 循环无看门狗）。
+  - 现状：`data/http.py:25-33` 的 `http_timeout` 通过 `socket.setdefaulttimeout` 设置/恢复**进程级**默认超时，注释称「局部设置」，但该 API 不是线程局部的；`data/providers/indices.py:54-55` 同时用 6 个线程抓取，每个线程都会进入/退出该上下文。
+  - 为什么生产不成立：并发交错时，一个线程可能在另一个线程仍在请求时把全局默认值恢复为 `None`，使新建立的连接没有超时；全部结束后还可能在进程里留下 30s 的全局默认值，影响后续连接。AkShare 请求没有显式 timeout，一旦落到无超时状态，同步线程可无限挂起，`tasks/sync.py:328-333` 的 tick 循环没有 watchdog，数据刷新会长期停摆。
+  - 影响面：同步停摆、候选池抓取卡死、进程级网络行为被意外改变；问题只在并发/慢请求下出现，难以复现。
+  - 建议：改用显式 per-request timeout（或执行器内线程局部配置），不要在共享进程里改全局默认；至少给同步单资产抓取加 watchdog/总超时，并在 `finally` 用引用计数保证最后一个退出者才恢复原值。
+  - 与 P2-29 的关系：P2-29 讲限流与单点，本条是并发实现本身的全局状态缺陷，修法不同。
+  - **实际修法**：`http_timeout` 改为 `threading.local()` 保存超时值（支持嵌套并在退出时恢复上一值），完全不调用 `socket.setdefaulttimeout`；模块导入时一次性给 `requests.Session.request` 注入线程级 `timeout`（已有显式 timeout 时不覆盖），把超时下沉到**每个请求**。这样 6 线程各自超时互不干扰，Flask 监听/连接 socket 不再被波及。
+  - **未做**：同步单资产的 watchdog/总超时（属 P2-29 数据源路线/调度策略范畴，保持挂起）。
+  - 回归：`tests/data/test_http.py`（全局 socket 默认值不变、线程隔离、嵌套恢复、requests 注入仅在缺省时）。
+  - 语义变化：所有走 `requests` 的抓取（AkShare 主要入口）在 `http_timeout` 内都会收到显式 timeout；若某 provider 走原生 `urllib`/socket 且未传 timeout，则不再受进程级默认值保护（这是本次刻意移除的全局副作用）。
+
+### P3（可迭代）
+
+- **P3-D（缺失功能）：日志不轮转、无保留策略**
+  - 现状：`tasks/processes.py:87-94` 以 `ab` 追加打开 `worker.log`/`job-{id}.log`/`sync-process.log`，永不轮转；只有 `tasks/sync.py:321-327` 的 `sync.log` 用 `RotatingFileHandler`（2MB×3）。
+  - 风险：长跑后数据卷被日志占满，进而影响 DuckDB 写入；`job-*.log` 按任务累积且无清理。
+  - 建议：统一 `RotatingFileHandler` 或按天/大小保留；`job-*.log` 设保留天数；容器场景使用 Docker log driver；加磁盘水位告警。
+
+- **P3-E（逻辑/设计问题）：入队去重非原子**
+  - 现状：`tasks/store.py:47-60` 先 `SELECT` 再 `INSERT`，`task_key` 没有唯一约束；多 API 进程或线程并发提交同一参数时可能各插一条。
+  - 风险：重复计算、浪费并发名额；结果幂等性只能靠后写覆盖。
+  - 建议：对 `(task_key, status IN queued/running)` 建部分唯一索引，或在同一事务内 `INSERT ... WHERE NOT EXISTS` 并处理冲突重试。
+
+- **P3-F（逻辑/设计问题）：重试无断点，崩溃后从头开始**
+  - 现状：`tasks/worker.py:64-95` 的崩溃重试重新执行整个任务；模型级无检查点；`settings.py:20` 的超时固定 900s，无进度续期；POSIX 下 supervisor 自身崩溃时 `start_new_session` 的子进程可能成为孤儿（`processes.py:87-94`）。
+  - 风险：长任务重复消耗 CPU/上游配额；孤儿进程占用资源且不会被新 supervisor 接管。
+  - 建议：按模型/阶段落临时结果或断点；超时按进度续期或可配置；启动时按 pid/进程组清理孤儿；与 P3 第 100 行的僵尸等待一并处理。
+
+- **P3-G（逻辑/设计问题）：排名并列时结果顺序不稳定**
+  - 现状：`modeling/engine.py:194-216` 按进程完成顺序写入 `out`；`modeling/engine.py:377-392` 的 `sort_values` 无稳定 tie-break。
+  - 风险：样本外 R² 并列时 `best_model`/insights 可能在不同运行间切换，破坏「同输入同输出」。
+  - 建议：排序加模型 key 作为次级键（稳定排序）；并列时明确选择规则并在 meta 记录。
+
+- **P3-H（缺失功能）：API 版本与响应契约**
+  - 现状：路由为未版本化的 `/api/*`；`api/schemas.py` 只定义请求模型，响应多以裸 dict 返回；版本在 `api/app.py:65` 与 `api/routes/meta.py:10` 两处硬编码。
+  - 风险：破坏性变更无兼容层；OpenAPI 不能描述响应结构；外部调用方升级困难。
+  - 建议：引入 `/api/v1` 或显式兼容策略；为关键响应定义模型；版本单一来源；补弃用说明。
+
+- **P3-I（缺失功能）：资源上限与容器配额**
+  - 现状：`modeling/engine.py:189-199` 每个任务默认 `cpu_count()-1` 个子进程；`settings.py:16` 允许 2 个并发任务，理论上可同时占用约 `2×(CPU-1)` 个进程；`Dockerfile` 未设 CPU/内存限制，代码也不读取 cgroup。
+  - 风险：小规格机器上 CPU 超卖、内存 OOM 可能同时打挂 API 与同步写入。
+  - 建议：按 cgroup 配额计算 worker 数并设全局上限；容器设置 `--cpus/--memory`；为单任务加内存/耗时保护与告警。
+
+### 已具备（看似缺失但实际已有，不重复列项）
+
+- **持久任务与恢复**：DuckDB 任务表、45s 租约、尝试令牌、崩溃/超时恢复、终态 24h 清理已实现（`tasks/store.py:15`、`47-124`、`tasks/worker.py:64-95`）；同 key 运行中任务复用（`tasks/store.py:51-55`）。
+- **进程隔离与超时终止**：单实例 supervisor + 每任务独立子进程 + 进程树终止（`tasks/worker.py:64-95`、`tasks/processes.py:11-56`）；Windows 用 Job Object 连带回收孙子进程。
+- **请求与错误契约**：8MB 请求体上限、400/404/429/500 统一错误结构（`api/app.py:24-47`、`72-92`）；任务取消入口已实现。
+- **部署基础**：Docker 多阶段、非 root UID/GID 10001、`/data` 卷、HEALTHCHECK、锁定 `uv.lock`（`Dockerfile:1-58`）；单机文件系统与多 API 进程约束已写入 `README.md:33`。
+- **写入安全**：DuckDB 事务写入、空/倒退/截断历史拒写并保留旧数据（`data/storage.py:72-82`、`tasks/sync.py:188-208`）；缓存版本与数据指纹、旧结果缓存清理已实现（`data/storage.py:101-125`、`services/analysis.py:94-125`）。
+- **报告与溯源（部分）**：报告原子写与运行指纹已实现（`research/report.py:1018-1023`、`research/runinfo.py`）；结果 JSON 导出含窗口/模型口径（`README.md:34`）。
+- **已有免责声明与降级标记**：Web 页脚、报告页脚、预测/当前仓位/回测 payload 已有声明（`api/static/index.html:382`、`research/report.py:1014`、`funds/payloads.py:173`/`209`/`739`）；估值/持仓/健康分已有 `available/degraded/reason` 字段（P2-21 部分落地、P3-B 已关闭）。
+- **因果与执行口径**：方向概率按标签成熟截断、基金择时 `shift(1)`、规则买卖点 t 收盘/t+1 开盘已在「已核验合理」留痕；模型随机种子固定（`modeling/estimators.py:343/424/453/526`）。
+- **文档交接**：`README.md` 与 `docs/架构设计.md`、`docs/模块与入口.md`、`docs/功能完整性检查.md` 已覆盖数据流、进程、部署约束与命令映射；缺的是运维 runbook（备份恢复、监控告警、故障处置），已在 P2-25/P2-33 列出。
+
+### 需要产品/口径决策（不是纯技术修复）
+
+- ~~**部署形态**~~：已拍板**当前单用户为主**，保留多用户升级入口；P2-24 实现为默认可无认证、可开启令牌 + 身份/租户上下文，配额与数据分区未做。
+- ~~**数据源路线**~~：已拍板**继续公开抓取**，不采购合规数据源；P2-29 实现限流/退避/溯源/契约校验，备用源与熔断未做。
+- ~~**数据延迟/新鲜度策略**~~：已拍板**带 stale 标记继续**，不拒绝分析（P2-27 已实现；关键结论由调用方自行决定是否引用）。
+- ~~**NAV 降级策略**~~：已拍板并实现为**默认拒绝**（P1-20 核心已落地、CLI/报告口径标注待补）；保留 `FIL_NAV_DEGRADED_POLICY=allow_cum` 作为显式降级并强制标注。
+- ~~**报告定位**~~：已拍板**内部研究**，保留对外交付物升级位；P2-32 门禁按内部研究严格度执行，版本化归档未做。
+- ~~**免责声明与 API 开放范围**~~：已拍板**API 内部使用、暂不提供给第三方**；结果对外提供时的措辞/授权仍需法务确认，P2-36 已提供 internal/external 两套文案开关。
+- ~~**备份目标**~~：已拍板把 DuckDB（含 `pe_panel`/`div_panel`）、审计与缓存视为数据资产；P2-33 提供脚本与恢复校验，RPO/RTO 由部署方按日备份设定。
+- ~~**发布流程**~~：已拍板**不强制全量真实数据 CI**；CI 跑全量单测与语法检查，真实数据冒烟手动触发（P2-35）。
 
 ## 本轮复核范围与证据
 
