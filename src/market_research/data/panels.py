@@ -9,8 +9,25 @@ from market_research.data.cache import _cached, _cache_info_write, _with_info
 from market_research.data.providers.funds import NAV_BASIS_CUM, NAV_BASIS_TOTAL, fetch_fund_nav, fetch_fund_total_return
 from market_research.data.providers.indices import fetch_universe
 from market_research.data.providers.valuation import fetch_pe_panel, fetch_dividend_panel
+from market_research.data.quality import build_quality
+from market_research.data import provenance
+from market_research.errors import NavBasisUnavailable
 
 LOG = logging.getLogger(__name__)
+
+
+def _nav_basis_attrs(series: pd.Series, basis: str, degraded: bool = False,
+                     reason: str = "", extra: Optional[dict] = None) -> pd.Series:
+    """把实际净值口径挂在 Series 上，供 meta/CLI/报告统一读取。"""
+    series.attrs["nav_basis"] = basis
+    series.attrs["nav_degraded"] = bool(degraded)
+    series.attrs["nav_degraded_reason"] = reason if degraded else ""
+    # P2-27：缓存回退时 _cached 会挂 stale/source_error，不能在这里丢掉
+    for key in ("stale", "source_error", "cached_at"):
+        value = (extra or {}).get(key)
+        if value not in (None, ""):
+            series.attrs[key] = value
+    return series
 
 def align_prices(px: pd.DataFrame, nav: pd.Series, max_ffill: int = 5,
                  min_coverage: float = 0.97) -> pd.DataFrame:
@@ -157,6 +174,10 @@ def load_index_universe(start: Optional[str] = None,
 
     df = _cached(cache_name, build, meta=meta, refresh=refresh,
                  allow_fetch=allow_fetch)
+    # P2-27：缓存回退标记（stale/source_error）在 concat 后可能丢失，先留存
+    fallback_attrs = {k: df.attrs.get(k) for k in
+                      ("stale", "source_error", "cached_at")
+                      if df.attrs.get(k) not in (None, "")}
     # ★ 缺失资产必须留痕（N-07）：部分行情失败会静默得到一个"不完整指数池"，
     #   下游的覆盖率过滤会把它们当"中途停编"剔除，掩盖了真实原因是抓取失败。
     #   无条件写入（空列表 = 无缺失），否则"没这个字段"和"没缺失"分不清。
@@ -183,6 +204,9 @@ def load_index_universe(start: Optional[str] = None,
         LOG.warning("候选池缺 %d/%d 个指数（%s）——重跑本命令可补齐，已成功的部分不会重复请求",
                     len(missing), len(C.NAME_OF),
                     ", ".join(missing[:6]) + ("…" if len(missing) > 6 else ""))
+    df.attrs.update(fallback_attrs)
+    df.attrs["missing_assets"] = missing
+    df.attrs["n_expected"] = len(C.NAME_OF)
     return df
 
 
@@ -207,7 +231,7 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
         if history is not None:
             result = history.iloc[:, 0].copy()
             result.name = f"fund_{fund_code}"
-            return result
+            return _nav_basis_attrs(result, basis)
     suffix = "" if basis == NAV_BASIS_CUM else f"_{basis}"
     # None → 当前配置的起点（见 load_index_universe 的说明）
     start = start or C.START_DATE
@@ -235,11 +259,21 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
         df = _cached(cache_name, build, meta=meta, refresh=refresh,
                      allow_fetch=allow_fetch)
     except _DegradedNav as e:
-        LOG.warning("%s；本次退回累计净值口径，结果【未缓存】", e)
-        return fetch_fund_nav(fund_code, start)
+        reason = str(e)
+        if C.NAV_DEGRADED_POLICY == "allow_cum":
+            LOG.warning("%s；按 FIL_NAV_DEGRADED_POLICY=allow_cum 降级为累计净值，结果未缓存",
+                        reason)
+            s = fetch_fund_nav(fund_code, start)
+            s.name = f"fund_{fund_code}"
+            return _nav_basis_attrs(s, NAV_BASIS_CUM, degraded=True, reason=reason)
+        raise NavBasisUnavailable(
+            f"{reason}；为避免把累计净值冒充总回报口径，本次分析已终止。"
+            "受影响口径：收益/年化、RBSA 权重、健康分、择时仓位、回测与报告。"
+            "如需继续，请显式改用累计净值（basis=cum），"
+            "或设置 FIL_NAV_DEGRADED_POLICY=allow_cum 以降级展示并标注。") from e
     s = df.iloc[:, 0] if isinstance(df, pd.DataFrame) else df
     s.name = f"fund_{fund_code}"
-    return s
+    return _nav_basis_attrs(s, basis, extra=dict(getattr(df, "attrs", {})))
 
 
 def fetch_start_for(start: Optional[str] = None) -> str:
@@ -297,6 +331,9 @@ def load_panel(fund_code: str, start: Optional[str] = None,
     fs = fetch_start_for(start)
     nav = load_fund_nav_cached(fund_code, fs, refresh=refresh, basis=nav_basis,
                                allow_fetch=allow_fetch)
+    actual_basis = str(nav.attrs.get("nav_basis") or nav_basis)
+    nav_degraded = bool(nav.attrs.get("nav_degraded"))
+    nav_reason = str(nav.attrs.get("nav_degraded_reason") or "")
     # ★ P1-15：净值必须先截到分析结束日再做对齐与覆盖率筛选。
     #   指数池按 end 截止；若净值延伸到 end 之后，那些日期的指数缺失会
     #   稀释覆盖率分母，把完整覆盖历史窗口的指数误判为"中途停编"而剔除
@@ -305,13 +342,41 @@ def load_panel(fund_code: str, start: Optional[str] = None,
     if end is not None:
         nav = nav.loc[nav.index <= pd.Timestamp(end)]
     if verbose:
-        tag = "总回报" if nav_basis == NAV_BASIS_TOTAL else "累计净值(旧口径)"
+        if actual_basis == NAV_BASIS_TOTAL:
+            tag = "总回报"
+        elif nav_degraded:
+            tag = "累计净值(降级)"
+        else:
+            tag = "累计净值(旧口径)"
         print(f"[data] 基金 {fund_code} {tag} {len(nav)} 行  "
               f"{nav.index[0].date()} ~ {nav.index[-1].date()}")
     px = load_index_universe(fs, end, refresh=refresh, verbose=verbose,
                              allow_fetch=allow_fetch)
     out = align_prices(px, nav)
     warnings = list(out.attrs.get("warnings") or [])
+    if nav_degraded:
+        warnings.append(
+            f"净值口径已降级为累计净值（{nav_reason}）；收益/回测/健康分不可按总回报解读")
+
+    # P2-27：降级判定统一在这里汇总（过期 / 缺失 / 口径降级 / 取数回退），
+    # 后续 meta、CLI、报告、Web 只读这一份 data_quality。
+    reference = (min(pd.Timestamp.today().normalize(), pd.Timestamp(end))
+                 if end is not None else None)
+    quality = build_quality(
+        data_end=out.index[-1] if len(out) else (nav.index[-1] if len(nav) else None),
+        as_of=reference,
+        missing_assets=px.attrs.get("missing_assets"),
+        n_expected=px.attrs.get("n_expected"),
+        nav_degraded=nav_degraded,
+        nav_reason=nav_reason,
+        source_error=str(nav.attrs.get("source_error")
+                         or px.attrs.get("source_error") or ""),
+        warnings=warnings,
+        provenance=provenance.snapshot(),
+    )
+    for reason in quality["reasons"]:
+        if reason not in warnings:
+            warnings.append(reason)
 
     # 裁剪到分析窗口
     if start:
@@ -319,6 +384,11 @@ def load_panel(fund_code: str, start: Optional[str] = None,
     if end:
         out = out.loc[out.index <= pd.Timestamp(end)]
     out.attrs["warnings"] = warnings
+    out.attrs["nav_basis"] = actual_basis
+    out.attrs["nav_degraded"] = nav_degraded
+    out.attrs["nav_degraded_reason"] = nav_reason
+    quality["warnings"] = list(warnings)
+    out.attrs["data_quality"] = quality
     if out.empty:
         raise ValueError(
             f"{fund_code} 在 {start or '全区间'} ~ {end or '最新'} 内没有可用数据"

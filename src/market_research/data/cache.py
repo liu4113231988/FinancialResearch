@@ -1,11 +1,13 @@
 from __future__ import annotations
-import json, time
+import json, logging, time
 from pathlib import Path
 from typing import Optional
 import pandas as pd
 import market_research.config as C
 from market_research.data import storage
 from market_research.errors import CacheMiss
+
+LOG = logging.getLogger(__name__)
 
 def data_stamp(*, exclude_stocks=False, fund_code=None,
                fetch_start=None, end=None) -> str:
@@ -80,7 +82,25 @@ def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False,
                 return frame
     if not allow_fetch:
         raise CacheMiss(f"缓存 {name} 未就绪（只读模式不抓取）")
-    frame = builder()
+    try:
+        frame = builder()
+    except Exception as exc:
+        # P2-27：数据源故障不回退到「口径已过期」的旧缓存（如旧版 total
+        # 缓存里其实是 cum 数据）；只有 meta 仍匹配时才降级使用旧数据，
+        # 并把 stale/source_error 挂到返回值上，由统一 data_quality 透传。
+        previous = (storage.read(name)
+                    if meta is None or _cache_meta_valid(name, meta) else None)
+        if previous is None or not len(previous):
+            raise
+        error = f"{type(exc).__name__}: {str(exc)[:200]}"
+        LOG.warning("数据源抓取失败，沿用本地缓存 %s：%s", name, error)
+        previous.attrs["stale"] = True
+        previous.attrs["source_error"] = error
+        previous.attrs["cached_at"] = cache_info(name).get("fetched_at")
+        _cache_info_write(name, {
+            "last_error": error,
+            "last_error_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+        return previous
     storage.write(name, frame, _with_info(meta or {}, frame))
     return frame
 

@@ -111,19 +111,49 @@ class SignalEngine:
 
     def valuation_channel(self, weights_hist: pd.DataFrame,
                           pe_pct: Optional[pd.DataFrame],
-                          idx: pd.DatetimeIndex) -> pd.Series:
-        """风格基准的绝对估值分位 → val_score ∈ [−1, 1]。"""
+                          idx: pd.DatetimeIndex) -> pd.DataFrame:
+        """风格基准的绝对估值分位 → val_score ∈ [−1, 1]。
+
+        未映射资产（典型是 31 个申万行业）会回退到宽基 PE。该回退**必须显式
+        标注**：行业估值与宽基估值不是一回事，静默混用会让行业集中基金的
+        「估值分位」结论完全错位。`attrs["valuation"]` 携带覆盖率、兜底权重与
+        具体兜底资产，供 snapshot / 报告 / 前端透传。
+        """
         c = self.cfg
         if pe_pct is None or pe_pct.empty:
-            return pd.DataFrame({"pe_pct": pd.Series(index=idx, dtype=float),
-                                 "val_score": pd.Series(0.0, index=idx)})
+            # ★ P2-21：不可用不能伪装成中性 0。val_score 置 NaN，由 compute
+            #   把该通道从分子/分母里剔除并对其余通道重归一；若仍填 0，
+            #   综合分会静默向 0.5 收缩，与"真实中性"无法区分。
+            df = pd.DataFrame({
+                "pe_pct": pd.Series(index=idx, dtype=float),
+                "val_score": pd.Series(np.nan, index=idx),
+                "pe_real_weight": pd.Series(0.0, index=idx),
+                "pe_fallback_weight": pd.Series(0.0, index=idx),
+                "pe_coverage": pd.Series(np.nan, index=idx),
+                "val_available": pd.Series(False, index=idx),
+                "val_degraded": pd.Series(True, index=idx),
+            })
+            df.attrs["valuation"] = {
+                "available": False, "degraded": True, "coverage": None,
+                "fallback_weight": None, "fallback_assets": [],
+                "note": "估值数据不可用，估值通道未参与融合，其余通道按权重重归一",
+                "reason": "PE 面板为空或加载失败",
+                "weight": 0.0, "excluded": True,
+            }
+            return df
 
         # 资产列 → PE 标的（无映射或对应列缺失时用宽基兜底）
-        sym_of = {}
+        sym_of, real_of, fallback_of = {}, {}, {}
         for a in weights_hist.columns:
             s = PE_SYMBOL.get(a)
-            sym_of[a] = s if s in pe_pct.columns else (
-                PE_FALLBACK if PE_FALLBACK in pe_pct.columns else None)
+            if s in pe_pct.columns:
+                sym_of[a] = s
+                real_of[a] = s
+            elif PE_FALLBACK in pe_pct.columns:
+                sym_of[a] = PE_FALLBACK
+                fallback_of[a] = PE_FALLBACK
+            else:
+                sym_of[a] = None
 
         # 各资产权重按 PE 标的聚合，避免逐行逐资产 reindex
         syms = sorted({s for s in sym_of.values() if s})
@@ -131,6 +161,10 @@ class SignalEngine:
         for a, s in sym_of.items():
             if s is not None:
                 w_sym[s] += weights_hist[a].fillna(0.0)
+        w_real = (weights_hist[[a for a in real_of]].fillna(0.0).sum(axis=1)
+                  if real_of else pd.Series(0.0, index=weights_hist.index))
+        w_fb = (weights_hist[[a for a in fallback_of]].fillna(0.0).sum(axis=1)
+                if fallback_of else pd.Series(0.0, index=weights_hist.index))
 
         # 月度 PE asof 对齐到每个重估日。（取数源已切 csindex 日频；滞后仍按
         # pe_lag_days 配置，对日频数据偏保守，收紧需显式配置，不隐式变更）
@@ -150,7 +184,52 @@ class SignalEngine:
 
         pct = pe_agg.reindex(idx, method="ffill")
         score = pd.Series(_tanh(-(pct.values - 0.5) * 2.0, c["kappa_z"]), index=idx)
-        return pd.DataFrame({"pe_pct": pct, "val_score": score})
+        real_w = w_real.reindex(idx, method="ffill").fillna(0.0)
+        fb_w = w_fb.reindex(idx, method="ffill").fillna(0.0)
+        pe_total = real_w + fb_w
+        coverage = (real_w / pe_total.where(pe_total > 1e-12)).replace(
+            [np.inf, -np.inf], np.nan)
+        # "可用"必须同时满足：有映射标的、有权重、且 PE 列不是全空。
+        # 只看列名存在会漏掉"列在但整列 NaN"（P2-21 的关键列缺失路径）。
+        val_avail = (bool(syms)
+                     and bool(float((real_w + fb_w).max() or 0) > 1e-12)
+                     and bool(pct.notna().any()))
+        out = pd.DataFrame({
+            "pe_pct": pct,
+            "val_score": score,
+            "pe_real_weight": real_w,
+            "pe_fallback_weight": fb_w,
+            "pe_coverage": coverage,
+            "val_available": val_avail,
+            "val_degraded": fb_w > 1e-12,
+        })
+
+        last = weights_hist.ffill().iloc[-1] if len(weights_hist) else pd.Series(dtype=float)
+        fb_assets = [{
+            "code": str(a),
+            "name": C.NAME_OF.get(a, str(a)),
+            "weight": round(float(last.get(a, 0.0)), 5),
+            "kind": "行业" if str(a).startswith("801") else "其他",
+        } for a in fallback_of if float(last.get(a, 0.0)) > 1e-4]
+        fb_assets.sort(key=lambda r: -r["weight"])
+        fb_last = float(fb_w.iloc[-1]) if len(fb_w) else 0.0
+        cov_last = coverage.dropna()
+        degraded = bool(fb_assets) or fb_last > 1e-12 or len(syms) == 0
+        out.attrs["valuation"] = {
+            "available": val_avail,
+            "degraded": degraded,
+            "coverage": round(float(cov_last.iloc[-1]), 4) if len(cov_last) else None,
+            "fallback_weight": round(fb_last, 4),
+            "fallback_assets": fb_assets,
+            "note": ("行业估值不可用，已用沪深300 宽基替代" if
+                     any(a["kind"] == "行业" for a in fb_assets) else
+                     ("未映射资产已用沪深300 宽基替代" if fb_assets else None)),
+            "reason": (None if val_avail else
+                       "PE 列缺失或整列为空，估值通道未参与融合"),
+            "weight": float(c["w_val_pe"]) if val_avail else 0.0,
+            "excluded": not val_avail,
+        }
+        return out
 
     # -------------------------------------------------- 波动率目标（风险归一化）
     def vol_target_channel(self, syn_nav: pd.Series,
@@ -235,9 +314,18 @@ class SignalEngine:
             raise ValueError(
                 f"三通道权重之和必须为 0 以外的值，当前 "
                 f"w_trend={wt}, w_dev={wv}, w_val_pe={wl}")
-        df["score"] = (wt * df["trend_score"].fillna(0)
-                       + wv * df["dev_score"].fillna(0)
-                       + wl * df["val_score"].fillna(0)) / denom
+        # ★ P2-21：估值通道不可用时把它的权重从分母剔除、其余通道重归一。
+        #   不能填 0 后仍占 15% 权重——那会把综合分（进而仓位）静默拉向 0.5，
+        #   而 0.5 看起来和"真实中性"一模一样，无法区分。
+        val_ok = (df["val_available"].fillna(False).astype(bool)
+                  & df["val_score"].notna())
+        wv_eff = float(wl) * val_ok.astype(float)
+        den_row = float(wt) + float(wv) + wv_eff
+        num = (wt * df["trend_score"].fillna(0)
+               + wv * df["dev_score"].fillna(0)
+               + wv_eff * df["val_score"].fillna(0))
+        df["score"] = (num / den_row).where(den_row > 0, 0.0)
+        df["val_weight_effective"] = wv_eff
 
         raw_pos = np.clip(0.5 + 0.5 * df["score"], 0.0, 1.0)
         df["position_raw"] = raw_pos
@@ -253,6 +341,9 @@ class SignalEngine:
 
         df["quadrant"] = [_quadrant(a, b) for a, b in
                           zip(df["trend_score"], df["dev_score"])]
+        # 估值口径（覆盖率 / 兜底资产）随 DataFrame 一起传给 snapshot / 报告
+        if v.attrs.get("valuation"):
+            df.attrs["valuation"] = v.attrs["valuation"]
         return df
 
     # -------------------------------------------------- 拟合健康度通道
@@ -392,6 +483,9 @@ class SignalEngine:
             action = "减仓"
         else:
             action = "清仓 / 离场"
+        vmeta = sig.attrs.get("valuation") or {}
+        val_assets = [f"{a['name']}({a['code']}, {a['weight']:.1%})"
+                      for a in (vmeta.get("fallback_assets") or [])[:8]]
         return {
             "基金": name,
             "日期": pd.Timestamp(row.name).strftime("%Y-%m-%d"),
@@ -402,6 +496,17 @@ class SignalEngine:
             "建议仓位": f"{pos:.0%}",
             "形态": row["quadrant"],
             "结论": action,
+            "估值口径": {
+                "可用": bool(vmeta.get("available", True)),
+                "降级": bool(vmeta.get("degraded", False)),
+                "覆盖率": vmeta.get("coverage"),
+                "兜底权重": vmeta.get("fallback_weight"),
+                "兜底资产": val_assets,
+                "说明": vmeta.get("note"),
+                "原因": vmeta.get("reason"),
+                "通道权重": vmeta.get("weight"),
+                "已剔除": bool(vmeta.get("excluded", False)),
+            } if vmeta else None,
         }
 
 

@@ -4,9 +4,22 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import market_research.config as C
+from market_research.data import provenance
 from market_research.data.http import _retry, _clean_series
+from market_research.errors import ProviderContractError
 
 LOG = logging.getLogger(__name__)
+
+
+def _require_nav_frame(df, source: str):
+    """净值接口至少要有「日期 + 数值」两列，结构变化时显式失败。"""
+    if df is None or getattr(df, "empty", True):
+        raise ProviderContractError(
+            f"{source} 返回空表；端点 {(provenance.CONTRACTS.get(source) or {}).get('endpoint')}")
+    if len(getattr(df, "columns", [])) < 2:
+        raise ProviderContractError(
+            f"{source} 返回列数 {len(df.columns)}，期望至少 2 列（日期、数值）")
+    return df
 
 def fetch_fund_nav(code: str, start: Optional[str] = None) -> pd.Series:
     """
@@ -23,7 +36,10 @@ def fetch_fund_nav(code: str, start: Optional[str] = None) -> pd.Series:
     """
     import akshare as ak
 
-    df = _retry(ak.fund_open_fund_info_em, symbol=code, indicator="累计净值走势")
+    df = _retry(ak.fund_open_fund_info_em, symbol=code,
+                indicator="累计净值走势", source="fund_nav")
+    _require_nav_frame(df, "fund_nav")
+    df = df.iloc[:, :2].copy()
     df.columns = ["date", "nav"]
     df["date"] = pd.to_datetime(df["date"])
     s = df.set_index("date")["nav"].astype(float).sort_index()
@@ -107,9 +123,12 @@ def total_return_index(unit_nav: pd.Series,
 def _fetch_nav(code: str, indicator: str, start: Optional[str] = None) -> pd.Series:
     """按 indicator 抓一列净值（累计/单位），走统一重试与清洗。"""
     import akshare as ak
-    df = _retry(ak.fund_open_fund_info_em, symbol=code, indicator=indicator)
+    source = "fund_unit_nav" if "单位" in indicator else "fund_nav"
+    df = _retry(ak.fund_open_fund_info_em, symbol=code, indicator=indicator,
+                source=source)
     if df is None or df.empty:
         return pd.Series(dtype=float)
+    _require_nav_frame(df, source)
     dcol = df.columns[0]
     s = df.set_index(pd.to_datetime(df[dcol]))[df.columns[1]].astype(float).sort_index()
     s.name = code
@@ -132,11 +151,16 @@ def fetch_cum_return_curve(code: str,
     import akshare as ak
     try:
         df = _retry(ak.fund_open_fund_info_em, symbol=code,
-                    indicator="累计收益率走势")
+                    indicator="累计收益率走势", source="fund_cum_return")
+    except ProviderContractError:
+        raise
     except Exception:                                      # noqa: BLE001
+        # 锚点缺失只影响校准精度，由调用方标记 degraded，不阻断整条链路
         return pd.Series(dtype=float)
     if df is None or df.empty:
         return pd.Series(dtype=float)
+    _require_nav_frame(df, "fund_cum_return")
+    df = df.iloc[:, :2].copy()
     df.columns = ["d", "r"]
     df["d"] = pd.to_datetime(df["d"])
     s = df.set_index("d")["r"].astype(float).sort_index()

@@ -38,10 +38,80 @@ CACHE_DIR = C.DATA_DIR / "webcache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def nav_basis_meta(attrs: dict) -> dict:
+    """把净值口径转成结果 meta；累计净值不得继续宣称总回报口径。"""
+    attrs = attrs or {}
+    nav_basis = str(attrs.get("nav_basis") or "total")
+    nav_degraded = bool(attrs.get("nav_degraded"))
+    nav_reason = str(attrs.get("nav_degraded_reason") or "")
+    if nav_basis == "cum":
+        data_basis = ("累计净值（total 构造失败，已降级）；不可按总回报解读"
+                      if nav_degraded else
+                      "累计净值（未还原分红/拆分）；仅形态与相对强弱参考，收益口径偏低")
+    else:
+        data_basis = "事后月度锚点校准；尚非历史时点可得数据"
+    return {"data_basis": data_basis,
+            "nav_basis": nav_basis,
+            "nav_degraded": nav_degraded,
+            "nav_degraded_reason": nav_reason or None}
+
+
+def result_completeness(*, payload: dict, correlation: dict, forecast: dict,
+                        valuation: dict, drift: dict,
+                        quality: dict | None = None) -> dict:
+    """结果完整性契约（P2-31）：完成/部分/失败 + 缺失项 + 原因。
+
+    各接口与报告统一读取同一份结构；可选章节（估值/方向概率/漂移）缺失
+    记为 unavailable 并计入 partial，不影响已产出数值。
+    """
+    missing: list = []
+    sections: dict = {}
+
+    models = list(payload or {})
+    failed = [k for k in models
+              if (payload[k].get("extra") or {}).get("error")
+              or (payload[k].get("metrics") or {}).get("oos_r2") is None]
+    sections["models"] = {
+        "status": ("failed" if models and len(failed) == len(models)
+                   else "partial" if failed else "ok"),
+        "completed": len(models) - len(failed),
+        "total": len(models),
+    }
+    for key in failed:
+        reason = (payload[key].get("extra") or {}).get("error") or "样本外评估缺失"
+        missing.append({"section": "models", "item": key, "reason": str(reason)[:200]})
+
+    def optional(section: str, ok: bool, reason: str) -> None:
+        sections[section] = {"status": "ok" if ok else "unavailable"}
+        if not ok:
+            missing.append({"section": section, "item": section, "reason": reason})
+
+    optional("correlation", bool((correlation or {}).get("top")),
+             "无可用候选指数或收益重叠不足")
+    optional("forecast", bool((forecast or {}).get("available")),
+             (forecast or {}).get("reason") or "方向概率不可用")
+    optional("valuation", bool((valuation or {}).get("available")),
+             (valuation or {}).get("note") or (valuation or {}).get("reason") or "估值数据不可用")
+    optional("style_drift", bool((drift or {}).get("ok")),
+             (drift or {}).get("reason") or "风格漂移未计算")
+
+    data_status = str((quality or {}).get("status") or "ok")
+    sections["data"] = {"status": data_status}
+
+    fatal = sections["models"]["status"] == "failed"
+    status = "failed" if fatal else (
+        "partial" if missing or data_status not in ("ok",) else "ok")
+    reasons = [m["reason"] for m in missing]
+    if data_status not in ("ok",):
+        reasons.extend((quality or {}).get("reasons") or [])
+    return {"status": status, "ok": status != "failed",
+            "sections": sections, "missing": missing, "reasons": reasons}
+
+
 # 兼容现有脚本导入；实现按职责放在独立模块。
 from market_research.tasks.jobs import JOBS, JobStore
 from market_research.validation.parameters import _finite, _parse_max_rebal, _parse_auto_equity, _check_params, _parse_window
-from market_research.funds.payloads import _jnum, _jsafe, _dates, correlation_block, nav_block, model_payload, build_insights, _backtest_payload, _weights_payload, _weights_hist_payload, _alpha_stats
+from market_research.funds.payloads import _jnum, _jsafe, _dates, correlation_block, nav_block, model_payload, build_insights, _backtest_payload, _weights_payload, _weights_hist_payload, _alpha_stats, fund_forecast_payload
 
 
 def _cache_path(code: str, tag: str) -> Path:
@@ -103,6 +173,9 @@ def analyze(code: str, models: Optional[List[str]] = None,
     # ---------- 1. 净值
     prog("计算净值序列与回撤", 0.22)
     navb = nav_block(panel, nav)
+    # 方向概率：与趋势色带（形态描述）分开发布，样本不足时 available=False
+    prog("估计净值方向概率", 0.26)
+    forecast = fund_forecast_payload(nav)
 
     # ---------- 2. 相关性
     prog("计算与指数的相关性", 0.32)
@@ -161,11 +234,39 @@ def analyze(code: str, models: Optional[List[str]] = None,
     prog("生成分析结论", 0.96)
     insights = build_insights(code, name, navb, corr, reps, rank, payload)
 
+    # 估值口径：用当前"最佳可解释模型"的权重做一次通道，供页面标注兜底。
+    valuation: dict = {"available": False, "degraded": False,
+                       "fallback_assets": [], "note": None}
+    try:
+        bk = locals().get("best_key")
+        if bk is None:
+            bk = next((k for k, r in reps.items() if r.interpretable), None)
+        if bk in reps:
+            pe_pct = D.load_pe_panel(verbose=False)
+            v = SignalEngine().valuation_channel(reps[bk].weights_hist, pe_pct, nav.index)
+            valuation = dict(v.attrs.get("valuation") or {})
+            valuation["model"] = bk
+    except Exception as exc:                            # noqa: BLE001
+        valuation = {"available": False, "degraded": True,
+                     "fallback_assets": [], "coverage": None,
+                     "fallback_weight": None,
+                     "note": "估值数据不可用，无法判断行业估值覆盖率",
+                     "reason": f"{type(exc).__name__}: {str(exc)[:120]}"}
+
+    completeness = result_completeness(
+        payload=payload, correlation=corr, forecast=forecast,
+        valuation=valuation, drift=drift,
+        quality=dict(getattr(panel, "attrs", {}).get("data_quality") or {}))
+
     result = {
         "code": code, "name": name,
+        "status": completeness["status"], "ok": completeness["ok"],
+        "completeness": completeness,
         "models": payload,
         "rank": _jsafe(rank.to_dict("records")),
         "nav": navb,
+        "forecast": forecast,
+        "valuation": _jsafe(valuation),
         "correlation": corr,
         "insights": insights,
         "style_drift": drift,
@@ -202,10 +303,17 @@ def analyze(code: str, models: Optional[List[str]] = None,
                 (panel.index[-1] - panel.index[0]).days / 365.25, 2),
             "window_default_years": C.DEFAULT_WINDOW_YEARS,
             "window_min_years": C.MIN_WINDOW_YEARS,
-            "data_basis": "事后月度锚点校准；尚非历史时点可得数据",
+            **nav_basis_meta(getattr(panel, "attrs", {})),
             # 价格覆盖降级（剔除停编指数、连续缺失截断）必须透传到界面，
             # 否则用户会以为用的是完整候选池
             "data_warnings": list(getattr(panel, "attrs", {}).get("warnings") or []),
+            # P2-27：统一的数据质量（stale/partial/degraded + 原因 + 缺失清单）
+            "data_quality": dict(getattr(panel, "attrs", {}).get("data_quality") or {}),
+            # P2-28：候选池缺失必须显式可见，避免用户以为用了完整候选
+            "missing_assets": list(
+                getattr(panel, "attrs", {}).get("data_quality", {}).get("missing_assets") or []),
+            "n_assets_expected": getattr(panel, "attrs", {}).get(
+                "data_quality", {}).get("n_expected"),
             "window_requested_end": win_end,
             "window_requested": win_start,     # None = 用默认滚动窗口
             # 抓取起点与分析起点解耦：缓存名带 start，跟着窗口滚动会让缓存全 miss
@@ -390,6 +498,27 @@ def backtest_fund(code: str, model_key: str = "enet_slsqp",
     sig = pd.DataFrame({"position_final": decision,
                         "score": health["health_score"]})
     variants = {"仅趋势通道": score_to_position(trend["trend_score"])}
+
+    # 赛道估值通道：行业腿没有 PE 数据时会回退沪深300，必须把兜底信息
+    # 一起写进 payload，前端/报告据此标注，而不是只在前端写死一句提示。
+    valuation = None
+    try:
+        pe_pct = D.load_pe_panel(verbose=False)
+        val = engine.valuation_channel(rep.weights_hist, pe_pct, syn_nav.index)
+        valuation = dict(val.attrs.get("valuation") or {})
+        # P2-21：通道不可用时不能把 NaN 仓位塞进变体（会把回测净值污染成 NaN），
+        # 也不能拿中性 0 冒充。此时不生成该曲线，由 valuation.note/reason 说明。
+        if valuation.get("available") and val["val_score"].notna().any():
+            variants["仅赛道估值通道"] = score_to_position(val["val_score"])
+        else:
+            valuation.setdefault("note", "估值通道不可用，未生成该对照曲线")
+            valuation["excluded"] = True
+    except Exception as exc:                               # noqa: BLE001
+        valuation = {"available": False, "degraded": True,
+                     "fallback_assets": [], "coverage": None,
+                     "fallback_weight": None, "weight": 0.0, "excluded": True,
+                     "note": "估值数据不可用，估值通道未参与回测",
+                     "reason": f"{type(exc).__name__}: {str(exc)[:120]}"}
     bt_cfg = None if cost_rate is None else {"cost_rate": float(cost_rate)}
 
     prog("执行回测", 0.85)
@@ -399,4 +528,12 @@ def backtest_fund(code: str, model_key: str = "enet_slsqp",
                       decision_trades=trades)
 
     return _backtest_payload(code, name, model_key, auto_equity, bt,
-                             health, decision, time.time() - t0)
+                             health, decision, time.time() - t0,
+                             valuation=valuation,
+                             meta_extra={
+                                 **nav_basis_meta(getattr(panel, "attrs", {})),
+                                 "data_quality": dict(
+                                     getattr(panel, "attrs", {}).get("data_quality") or {}),
+                                 "data_warnings": list(
+                                     getattr(panel, "attrs", {}).get("warnings") or []),
+                             })

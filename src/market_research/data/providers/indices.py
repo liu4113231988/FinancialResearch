@@ -2,13 +2,16 @@ from __future__ import annotations
 from typing import Dict, Iterable, Optional
 import pandas as pd
 import market_research.config as C
+from market_research.data import provenance
 from market_research.data.http import _retry, _clean_series
+from market_research.errors import ProviderContractError
 
 def fetch_index_sina(code: str, start: Optional[str] = None) -> pd.Series:
     """新浪指数日线收盘价。code 形如 sh000300 / sz399006。"""
     import akshare as ak
 
-    df = _retry(ak.stock_zh_index_daily, symbol=code)
+    df = _retry(ak.stock_zh_index_daily, symbol=code, source="index_sina")
+    provenance.require_columns(df, ["date", "close"], "index_sina")
     df["date"] = pd.to_datetime(df["date"])
     s = df.set_index("date")["close"].astype(float).sort_index()
     s.name = code
@@ -19,7 +22,13 @@ def fetch_index_sw(code: str, start: Optional[str] = None) -> pd.Series:
     """申万一级行业指数收盘价。code 形如 801010。"""
     import akshare as ak
 
-    df = _retry(ak.index_hist_sw, symbol=code, period="day")
+    df = _retry(ak.index_hist_sw, symbol=code, period="day", source="index_sw")
+    has_date = "日期" in df.columns or len(df.columns) >= 2
+    has_close = "收盘" in df.columns or "close" in df.columns
+    if not (has_date and has_close):
+        raise ProviderContractError(
+            f"index_sw 返回缺少日期/收盘字段（实际列 {list(df.columns)}）；"
+            f"端点 {provenance.CONTRACTS['index_sw']['endpoint']}")
     dcol = "日期" if "日期" in df.columns else df.columns[1]
     ccol = "收盘" if "收盘" in df.columns else "close"
     df[dcol] = pd.to_datetime(df[dcol])
@@ -50,6 +59,7 @@ def fetch_universe(codes: Iterable[str], start: str, end: Optional[str] = None,
     codes = list(codes)
     series: Dict[str, pd.Series] = {}
     ok = fail = 0
+    errors = []
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(_fetch_one, c, start, end): c for c in codes}
@@ -62,16 +72,25 @@ def fetch_universe(codes: Iterable[str], start: str, end: Optional[str] = None,
                     ok += 1
                 else:
                     fail += 1
+                    errors.append(f"{code}: 仅 {len(s)} 行")
                     if verbose:
                         print(f"  [data] {code} {C.NAME_OF.get(code,''):8s} "
                               f"跳过（仅 {len(s)} 行）")
             except Exception as e:      # noqa: BLE001
                 fail += 1
+                errors.append(f"{code}: {type(e).__name__} {str(e)[:60]}")
                 if verbose:
                     print(f"  [data] {code} {C.NAME_OF.get(code,''):8s} "
                           f"失败: {type(e).__name__} {str(e)[:50]}")
 
     if verbose:
         print(f"  [data] 候选池抓取完成：成功 {ok} / 失败 {fail}")
+    if codes and ok == 0:
+        # 全部失败通常意味着源站结构/权限变化，必须显式失败而不是返回空表
+        raise ProviderContractError(
+            "候选指数全部抓取失败，无法判断是网络问题还是源站结构变化："
+            + "；".join(errors[:6]) + ("…" if len(errors) > 6 else ""))
     px = pd.DataFrame(series).sort_index()
+    if errors:
+        px.attrs["fetch_errors"] = errors
     return px

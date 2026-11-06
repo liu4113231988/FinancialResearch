@@ -5,7 +5,10 @@ import logging
 import pickle
 import time
 
+import market_research.audit as audit
 import market_research.config as C
+from market_research.research.runinfo import result_provenance
+from market_research.security import current_identity
 import market_research.data.marketdata as D
 import market_research.tasks.sync as sync
 from market_research.tasks.jobs import JOBS
@@ -26,6 +29,23 @@ def backtest_fund(**arguments):
 def refit_single(**arguments):
     from market_research.funds.analysis import refit_single as calculate
     return calculate(**arguments)
+
+def holdings(code, refresh=False, job_id=None, **_):
+    """真实持仓拟合：数据、RBSA、对齐与持仓基准都跑在任务队列里。"""
+    from market_research.funds.holdings import fit_fund_holdings, load_industry_map
+    from market_research.funds.payloads import holdings_payload
+
+    if job_id:
+        JOBS.update(job_id, stage="加载申万行业映射", progress=0.12)
+    industry_map = load_industry_map(refresh=refresh)
+    if industry_map.empty:
+        return {"ok": False, "code": code,
+                "reason": "申万行业映射构造失败（无法取得成分股）"}
+    if job_id:
+        JOBS.update(job_id, stage="加载持仓与行情并拟合", progress=0.4)
+    return holdings_payload(fit_fund_holdings(code, industry_map,
+                                              refresh=refresh))
+
 
 def correlation(**arguments):
     """滚动相关重算（P1-13）：在任务队列内执行，可取消、占计算名额。
@@ -50,7 +70,10 @@ def correlation(**arguments):
         JOBS.update(jid, stage="计算滚动相关", progress=0.6)
     result = correlation_block(panel, panel["__FUND__"],
                                roll_n=max(20, min(win, 750)))
-    return {"ok": True, "code": code, "correlation": result}
+    return {"ok": True, "code": code, "correlation": result,
+            # P2-27/P2-28：轻量接口同样要带出过期/缺失/口径降级
+            "data_quality": dict(getattr(panel, "attrs", {}).get("data_quality") or {}),
+            "data_warnings": list(getattr(panel, "attrs", {}).get("warnings") or [])}
 
 from market_research.data.files import _atomic_pickle_dump
 
@@ -74,11 +97,27 @@ def _fetch_window(params):
     return D.fetch_start_for(start), end
 
 
-def fund_cache_path(params):
+def fund_cache_path(params, data_stamp=None):
     fs, end = _fetch_window(params)
+    stamp = data_stamp if data_stamp is not None else D.data_stamp(
+        exclude_stocks=True, fund_code=params["code"], fetch_start=fs, end=end)
     return result_cache_path(params["code"],params["models"],params["params"],params.get("max_rebal"),params.get("auto_equity",False),
-                             D.data_stamp(exclude_stocks=True,fund_code=params["code"],fetch_start=fs,end=end),
+                             stamp,
                              params.get("start"),params.get("end"))
+
+
+def _data_stamp_for(operation, params):
+    """结果所依赖的数据版本（P2-34）。
+
+    基金类操作收窄到本基金本窗口的缓存（与结果缓存键同一口径），
+    市场/持仓类操作依赖全局数据集，用全局指纹。
+    """
+    code = params.get("code")
+    if operation in ("analyze", "backtest", "refit", "corr") and code:
+        fs, end = _fetch_window(params)
+        return D.data_stamp(exclude_stocks=True, fund_code=code,
+                            fetch_start=fs, end=end)
+    return D.data_stamp()
 
 
 _CLEANED = False
@@ -132,12 +171,68 @@ def submit(operation, params):
     return {"ok":True,"job_id":jid,"cached":False,"merged":merged}
 
 
+def _audit_summary(operation, params, result):
+    """审计只写白名单摘要：不落参数原文与行情数值（P2-26）。"""
+    detail = {"operation": operation, "code": params.get("code"),
+              "job_id": params.get("job_id")}
+    identity = current_identity()
+    if identity.authenticated:
+        detail["actor"] = identity.subject
+        detail["tenant"] = identity.tenant
+    if isinstance(result, dict):
+        detail["status"] = result.get("status")
+        completeness = result.get("completeness")
+        if isinstance(completeness, dict):
+            detail["completeness"] = completeness.get("status")
+            detail["missing"] = [item.get("item") or item.get("section")
+                                 for item in (completeness.get("missing") or [])][:8]
+        models = result.get("models")
+        if isinstance(models, dict):
+            detail["models"] = len(models)
+        if "ok" in result:
+            detail["ok"] = bool(result["ok"])
+        if result.get("reason"):
+            detail["reason"] = str(result["reason"])[:120]
+    return detail
+
+
 def execute(operation, params, jid):
+    started = time.monotonic()
+    try:
+        result = _dispatch(operation, params, jid)
+    except Exception as exc:
+        audit.record("analysis.run", ok=False,
+                     subject=f"{operation}:{params.get('code', '')}",
+                     detail={"operation": operation, "code": params.get("code"),
+                             "job_id": jid},
+                     error=f"{type(exc).__name__}: {str(exc)[:200]}",
+                     duration_s=time.monotonic() - started)
+        raise
+    detail = _audit_summary(operation, {**params, "job_id": jid}, result)
+    audit.record("analysis.run", ok=bool(result.get("ok", True)),
+                 subject=f"{operation}:{params.get('code', '')}",
+                 detail=detail, duration_s=time.monotonic() - started)
+    return result
+
+
+def _stamp(result, data_stamp=None):
+    """P2-34：给所有操作结果挂可追溯指纹；缓存文件里也保留当时的版本。"""
+    if isinstance(result, dict):
+        meta = result.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            result["meta"] = meta
+        meta["provenance"] = result_provenance(data_stamp)
+    return result
+
+
+def _dispatch(operation, params, jid):
     if operation == "analyze":
-        initial_path = fund_cache_path(params)
-        result=analyze(**params,job_id=jid)
+        stamp_before = _data_stamp_for(operation, params)
+        initial_path = fund_cache_path(params, stamp_before)
+        result=_stamp(analyze(**params,job_id=jid), stamp_before)
         try:
-            if fund_cache_path(params) == initial_path:
+            if fund_cache_path(params, _data_stamp_for(operation, params)) == initial_path:
                 _atomic_pickle_dump(result,initial_path)
             else:
                 LOG.info("分析期间行情发生变化，跳过结果缓存写入")
@@ -145,18 +240,25 @@ def execute(operation, params, jid):
             LOG.exception("分析完成，但缓存写入失败")
         return result
     if operation == "market":
-        return analyze_market(**params,job_id=jid)
+        return _stamp(analyze_market(**params,job_id=jid),
+                      _data_stamp_for(operation, params))
     if operation == "corr":
-        return correlation(**params, job_id=jid)
+        return _stamp(correlation(**params, job_id=jid),
+                      _data_stamp_for(operation, params))
     if operation == "refit":
         JOBS.update(jid,stage="重新学习模型",progress=.2)
         arguments=dict(params)
         arguments["model_key"]=arguments.pop("model")
-        return refit_single(**arguments)
+        return _stamp(refit_single(**arguments),
+                      _data_stamp_for(operation, params))
     if operation == "backtest":
         arguments=dict(params)
         arguments["model_key"]=arguments.pop("model")
         arguments["start_date"]=arguments.pop("start",None)
         arguments["end_date"]=arguments.pop("end",None)
-        return backtest_fund(**arguments,job_id=jid)
+        return _stamp(backtest_fund(**arguments,job_id=jid),
+                      _data_stamp_for(operation, params))
+    if operation == "holdings":
+        return _stamp(holdings(**params, job_id=jid),
+                      _data_stamp_for(operation, params))
     raise ValueError("未知任务操作")

@@ -13,9 +13,17 @@ import os
 from market_research.settings import home_dir
 
 ROOT = home_dir()
-DATA_DIR = Path(os.environ.get("FIL_DATA_DIR", ROOT / "output" / "data")).resolve()
-FIG_DIR = ROOT / "output" / "figures"
-RES_DIR = ROOT / "output" / "results"
+
+# ---------------------------------------------------------------- 运行环境（P2-34）
+# dev / local / prod 三档用 FIL_ENV 区分；数据与产物目录可用独立环境变量覆盖，
+# 便于同一套代码在不同环境指向不同目录。local 保持原有路径，默认行为不变。
+ENV = os.environ.get("FIL_ENV", "local").strip().lower()
+if ENV not in ("dev", "local", "prod"):
+    ENV = "local"
+_OUTPUT = (ROOT / "output" / "dev") if ENV == "dev" else (ROOT / "output")
+DATA_DIR = Path(os.environ.get("FIL_DATA_DIR", _OUTPUT / "data")).resolve()
+FIG_DIR = Path(os.environ.get("FIL_FIG_DIR", _OUTPUT / "figures")).resolve()
+RES_DIR = Path(os.environ.get("FIL_RES_DIR", _OUTPUT / "results")).resolve()
 for _d in (DATA_DIR, FIG_DIR, RES_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
@@ -31,7 +39,9 @@ for _d in (DATA_DIR, FIG_DIR, RES_DIR):
 # 10 = Web 重估点切换到 calendar 模式（前缀稳定，历史重估点不再随追加数据位移），
 #      且 data_stamp 收窄到基金自身的抓取窗口（旧 stamp 把其它窗口的缓存也算进依赖）。
 #      旧口径结果全部失效，由清理任务移除。
-CACHE_VERSION = 10
+# 11 = P1-20：total 口径构造失败不再静默退回累计净值。此前生成的结果可能基于
+#      cum 序列，必须让旧结果缓存失效（否则会继续被 submit() 直接命中）。
+CACHE_VERSION = 11
 
 # 数据缓存版本：修改 align_prices / 覆盖率阈值 / 候选池等取数口径后 +1，
 # 旧版 output/data/panel_*.csv 会被自动判为过期并重新抓取；
@@ -45,7 +55,28 @@ CACHE_VERSION = 10
 #     pe_panel 数值口径整体变化（月→日），旧缓存必须失效；新增 div_panel。
 # 5 = pe_panel 缓存口径从「抓取片段上算好的分位」改为「原始 PE」，分位改由
 #     load_pe_panel 在累积出完整历史后重算。旧版缓存是全 NaN 分位，必须失效。
-DATA_CACHE_VERSION = 5
+# 6 = P1-20：旧实现把退化的累计净值写进 `_total` 缓存名下，缓存里的数据其实
+#     不是总回报。必须重抓，否则「拒绝降级」之后仍会继续读到被污染的总回报缓存。
+DATA_CACHE_VERSION = 6
+
+# 净值口径降级策略（P1-20）：
+# reject（默认）= total 口径构造失败时直接失败，绝不用累计净值冒充总回报；
+# allow_cum = 降级为累计净值，但必须在 meta/CLI/报告/Web 显式标注，且不落 total 缓存。
+NAV_DEGRADED_POLICY = os.environ.get("FIL_NAV_DEGRADED_POLICY", "reject").strip().lower()
+if NAV_DEGRADED_POLICY not in ("reject", "allow_cum"):
+    NAV_DEGRADED_POLICY = "reject"
+
+# 数据新鲜度与降级判定（P2-27）：数据末日距参考日超过该天数即标记 stale；
+# 缺失去重后的候选指数占比超过该阈值即标记 degraded（否则 partial）。
+DATA_STALE_DAYS = int(os.environ.get("FIL_DATA_STALE_DAYS", "10"))
+DATA_MISSING_RATIO_LIMIT = 0.2
+
+# DuckDB 文件锁等待上限（秒，P2-30）。同步整表重写与请求路径共用一把锁，
+# 超时后显式报 StorageBusy，避免请求无提示地被同步任务卡住。
+try:
+    STORAGE_LOCK_TIMEOUT = float(os.environ.get("FIL_STORAGE_LOCK_TIMEOUT", "10"))
+except ValueError:
+    STORAGE_LOCK_TIMEOUT = 10.0
 
 # ---------------------------------------------------------------- 候选指数池
 # 第一层：宽基（刻画市场的 beta 骨架）
