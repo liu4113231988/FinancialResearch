@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 import market_research.config as C
+import market_research.disclosure as disclosure
 import market_research.research.charts as CH
 
 
@@ -85,6 +86,9 @@ body{margin:0;background:var(--bg);color:var(--ink);
   font-family:"Microsoft YaHei","Noto Sans SC",-apple-system,"Segoe UI",sans-serif;
   line-height:1.75;font-size:14.5px;}
 .wrap{max-width:1180px;margin:0 auto;padding:48px 30px 90px}
+.disclosure{background:#fffbeb;border:1px solid #f59e0b;border-left:5px solid #d97706;
+  color:#78350f;border-radius:10px;padding:12px 16px;margin-bottom:20px;font-size:13.5px}
+.disclosure b{color:#92400e;margin-right:4px}
 header.hero{background:linear-gradient(135deg,#1e3a8a 0%,#2563eb 55%,#0ea5e9 100%);
   color:#fff;border-radius:18px;padding:44px 42px;margin-bottom:34px;
   box-shadow:0 14px 40px rgba(37,99,235,.22)}
@@ -221,6 +225,37 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
                  extra_meta: Optional[dict] = None,
                  fingerprint: Optional[dict] = None) -> Path:
     extra_meta = extra_meta or {}
+    # P2-27：数据质量（过期/缺失/口径降级）必须在报告顶部可见
+    _dq = extra_meta.get("data_quality") or {}
+    _cq = extra_meta.get("completeness") or {}
+    _dq_html = ""
+    if (_dq.get("status") and _dq.get("status") != "ok") or \
+            (_cq.get("status") and _cq.get("status") != "ok"):
+        _dq_reasons = "；".join((_dq.get("reasons") or []) + (_cq.get("reasons") or []))
+        _dq_html = (f'<p style="color:#92400e;font-weight:600">数据质量：'
+                    f'{_dq.get("status") or _cq.get("status")} — '
+                    f'{_dq_reasons or "原因未提供"}</p>')
+    _gate = extra_meta.get("publish_gate") or {}
+    if _gate.get("problems"):
+        _dq_html += (f'<p style="color:#b91c1c;font-weight:600">发布门禁未通过'
+                     f'（强制发布）：{"；".join(_gate["problems"])}</p>')
+    # P1-20：净值口径（总回报 / 累计净值降级）必须在报告顶部可见，
+    # 降级时同时给出 data_basis 与原因，不能按总回报解读。
+    _nav_basis = str(extra_meta.get("nav_basis") or "total")
+    _nav_degraded = bool(extra_meta.get("nav_degraded")) or _nav_basis == "cum"
+    _nav_label = ("总回报（分红再投资）" if _nav_basis == "total"
+                  else "累计净值（降级）")
+    _nav_reason = (extra_meta.get("data_basis")
+                   or extra_meta.get("nav_degraded_reason") or "")
+    if _nav_degraded:
+        _nav_html = (f'<p style="background:#fef3c7;color:#78350f;border-radius:8px;'
+                     f'padding:8px 12px;font-weight:600">净值口径：{_nav_label}'
+                     + (f' — {_html.escape(str(_nav_reason))}' if _nav_reason else "")
+                     + '</p>')
+    else:
+        _nav_html = (f'<p style="opacity:.92">净值口径：<b>{_nav_label}</b>'
+                     + (f' · {_html.escape(str(_nav_reason))}' if _nav_reason else "")
+                     + '</p>')
     m = main["backtest"]["metrics"]
     ctrl = main["backtest"]["control_name"]
     tc = main["backtest"]["timing_contrib"]
@@ -473,7 +508,83 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
 
     # ---------------- 当前决策
     snap = main["snapshot"]
-    snap_tbl = _table(pd.DataFrame([snap]), index=False)
+    snap_view = {k: v for k, v in snap.items() if k != "估值口径"}
+    snap_tbl = _table(pd.DataFrame([snap_view]), index=False)
+
+    # 估值兜底必须在报告里显式标注（P1-19），不能只在前端提示
+    _val = main.get("valuation") or {}
+    _val_note = ''
+    if _val.get("degraded"):
+        _style = ('font-size:13px;color:#92400e;background:#fffbeb;'
+                  'border-left:3px solid #f59e0b;padding:8px 10px;margin-top:8px')
+        if _val.get("available") is False:
+            # P2-21：通道被剔除时不能继续写「按宽基口径解读」——
+            # 估值根本没有参与融合，综合分来自其余通道的重归一。
+            _val_note = (
+                f'<p style="{_style}">估值通道提示：'
+                f'{_val.get("note") or "估值数据不可用"}。'
+                f'该通道权重已从分母剔除，其余通道按权重重归一；'
+                f'不显示中性估值分。'
+                f'{"原因：" + str(_val.get("reason")) if _val.get("reason") else ""}'
+                '</p>')
+        else:
+            _assets = "、".join(
+                f'{a["name"]}（{a["code"]}，{a["weight"]:.1%}）'
+                for a in (_val.get("fallback_assets") or [])[:8])
+            _cov = _val.get("coverage")
+            _cov_txt = f'真实 PE 覆盖率 {_cov:.0%}；' if _cov is not None else ''
+            _val_note = (
+                f'<p style="{_style}">'
+                f'估值口径提示：{_val.get("note") or "部分资产使用宽基兜底"}。'
+                f'{_cov_txt}兜底资产：{_assets or "—"}。'
+                '行业估值不可用，相关「估值分位」结论请按宽基口径谨慎解读。</p>')
+
+    # ---------------- 真实持仓拟合（与 CLI/Web 同一链路）
+    _h = extra_meta.get("holdings") or {}
+    if _h.get("ok"):
+        _s = _h.get("summary") or {}
+        _c = _h.get("compare") or {}
+        _per = pd.DataFrame(_h.get("periods") or [])
+        _per_tbl = _table(_per.tail(8), index=False) if len(_per) else ''
+        _cmp_tbl = (_table(pd.DataFrame(_c.get("stats") or []), index=False)
+                    if _c.get("stats") else '')
+        _b = _h.get("benchmark") or {}
+        _diag = pd.DataFrame(_b.get("diagnostics") or [])
+        _diag_tbl = _table(_diag.tail(8), index=False) if len(_diag) else ''
+        _miss = _b.get("missing_industries") or []
+        _miss_note = (
+            '<p style="color:#92400e">[警示] 行业面板缺失 '
+            f'{len(_miss)} 个持仓行业：{_html.escape(", ".join(map(str, _miss)))}。'
+            '这些权重与未映射股票一样按 0 收益处理，不按现金计息。</p>'
+            if _miss else '')
+        _res_note = (
+            f'<p style="font-size:13px;color:#64748b">持仓基准口径：'
+            f'{_html.escape(str(_b.get("residual_treatment") or ""))}。</p>'
+            if _b.get("residual_treatment") else '')
+        _holdings_html = (
+            '<h3>3.6 真实持仓拟合验证</h3>'
+            '<p>用半年报/年报披露的真实行业持仓，检验 RBSA 权重是否说对了'
+            '基金的行业结构；并据此构造「持仓基准」，与基金、RBSA 合成基准比较。</p>'
+            f'<p>可用期数 <b>{_s.get("n_periods", 0)}</b>；跨期平均绝对偏差 '
+            f'<b>{_safe(_s.get("mad_mean"), ".1%")}</b>；跨期权重相关均值 '
+            f'<b>{_safe(_s.get("corr_mean"), ".2f")}</b>'
+            f'（首期 {_safe(_s.get("corr_first"), ".2f")} → 末期 '
+            f'{_safe(_s.get("corr_last"), ".2f")}，有效 {_s.get("corr_valid", 0)} 期）；'
+            f'真实 PE/行业覆盖率均值 <b>{_safe(_s.get("coverage_mean"), ".0%")}</b>；'
+            f'未映射权重均值 <b>{_safe(_s.get("unmapped_mean"), ".0%")}</b>。</p>'
+            f'{_per_tbl}'
+            f'<p><b>持仓基准 vs 基金 / RBSA 合成基准</b>'
+            f'（共同区间 {_c.get("n_days", 0)} 个交易日）：</p>{_cmp_tbl}'
+            f'{_miss_note}{_res_note}'
+            f'<p style="font-size:13px;color:#64748b">{_h.get("notes", {}).get("unmapped_not_cash", "")}'
+            f'{_h.get("notes", {}).get("benchmark_compare", "")}'
+            f'{_h.get("notes", {}).get("benchmark_residual", "")}</p>'
+            f'{_diag_tbl}')
+    else:
+        _holdings_html = (
+            '<h3>3.6 真实持仓拟合验证</h3>'
+            f'<p style="color:#92400e">未生成：{_h.get("reason") or "持仓数据不可用"}。'
+            '该结论缺失，不代表持仓拟合通过。</p>')
 
     # ---------------- 风格暴露
     exp = main["exposure"].copy()
@@ -686,6 +797,7 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
 <title>主动基金指数拟合与趋势估值择时 · 研究报告</title>
 <style>{CSS}</style></head><body><div class="wrap">
 
+{disclosure.html()}
 <header class="hero">
   <h1>主动基金的指数拟合与趋势 / 估值研究</h1>
   <p>用滚动 RBSA 风格分解把一只主动基金还原成「指数 + 风格因子」的组合，
@@ -693,6 +805,8 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
      严格的样本外检验与对照实验。<br/>
      样本：{extra_meta.get('n_funds','—')} 只 A 股主动权益基金 ·
      区间：{extra_meta.get('period','—')} · 数据源：天天基金 / 新浪指数 / 申万行业</p>
+  {_nav_html}
+  {_dq_html}
   <div class="kpis">{kpi_html}</div>
 </header>
 
@@ -825,7 +939,7 @@ r<sub>f,t</sub> = Σ w<sub>i</sub> · r<sub>i,t</sub> + ε<sub>t</sub>
 {_fig(figs.get('position',''), '综合信号分与建议仓位')}
 <div class="grid2">
   <div>{_fig(figs.get('gauge',''), '当前状态四象限定位')}</div>
-  <div><h4>当前决策快照</h4>{snap_tbl}
+  <div><h4>当前决策快照</h4>{snap_tbl}{_val_note}
   <p style="font-size:13px;color:#64748b">注：四象限由「趋势分」与「相对偏离分」共同决定。
   左上=趋势向上且相对低估（最佳买点），右下=趋势向下且相对高估（离场）。</p></div>
 </div>
@@ -853,6 +967,7 @@ ICIR = {_safe(main['backtest']['icir'], '.2f')}，
 
 <h3>3.5 风格漂移：这段区间的画像能代表当下吗</h3>
 {_drift_note}
+{_holdings_html}
 </section>
 
 <section>

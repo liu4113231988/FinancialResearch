@@ -15,7 +15,7 @@ import pandas as pd
 
 import market_research.config as C
 import market_research.funds.holdings as H
-from market_research.funds.payloads import model_payload
+from market_research.funds.payloads import holdings_payload, model_payload
 from market_research.modeling.engine import ModelReport
 from market_research.research.report import timing_comparison
 
@@ -83,25 +83,69 @@ def _holding_panel(n=10):
     return idx, pd.DataFrame({"801120": np.full(len(idx), 1.0)}, index=idx)
 
 
+def _coverage(mapped, unmapped=0.0):
+    total = mapped + unmapped
+    return pd.DataFrame({
+        "已映射权重": [mapped], "未映射权重": [unmapped],
+        "合计": [total], "覆盖率": [mapped / total if total else np.nan],
+    }, index=[pd.Timestamp("2021-12-31")])
+
+
 class HoldingBenchmarkCashTest(unittest.TestCase):
-    def _hr(self, weight):
+    def _hr(self, weight, coverage="default"):
         idx, panel = _holding_panel()
         exposure = pd.DataFrame({"801120": [weight]},
                                 index=[pd.Timestamp("2021-12-31")])
-        # 显式 0 股息：这里的断言只关心现金腿，不受 RBSA 配置影响
+        if isinstance(coverage, pd.DataFrame):
+            cov = coverage
+        elif coverage == "default":
+            cov = _coverage(weight)
+        else:
+            cov = None
+        # 显式 0 股息：这里的断言只关心残差腿，不受 RBSA 配置影响
         return H.holding_benchmark(exposure, panel, cash_rate=0.015,
-                                   dividend_yield=0.0)
+                                   dividend_yield=0.0, coverage=cov)
 
     def test_cash_leg_accrues(self):
         hr = self._hr(50.0)
         self.assertGreater(len(hr), 0)
         daily = (1.015 ** (1 / 252) - 1)
-        # 50% 未覆盖 → 每日约半份货币收益，旧实现为 0
+        # 50% 明确是现金/债券 → 每日约半份货币收益
         self.assertAlmostEqual(float(hr.iloc[0]), 0.5 * daily, places=9)
 
     def test_full_exposure_has_no_cash_leg(self):
         hr = self._hr(100.0)
         self.assertAlmostEqual(float(hr.iloc[0]), 0.0, places=12)
+
+    def test_unmapped_residual_does_not_accrue_cash_without_coverage(self):
+        """P2-23：没有覆盖率表时，残差不能被当成现金计息。"""
+        hr = self._hr(50.0, coverage=None)
+        self.assertGreater(len(hr), 0)
+        self.assertAlmostEqual(float(hr.iloc[0]), 0.0, places=12)
+
+    def test_unmapped_stock_is_zero_return_not_cash(self):
+        """P2-23：明确记账的未映射股票按 0 收益，只有现金/债券腿计息。"""
+        hr = self._hr(50.0, coverage=_coverage(50.0, 30.0))  # 合计 80 → 现金 20
+        daily = (1.015 ** (1 / 252) - 1)
+        self.assertAlmostEqual(float(hr.iloc[0]), 0.2 * daily, places=9)
+
+
+class HoldingBenchmarkPanelGapTest(unittest.TestCase):
+    """P3-B：行业面板缺列必须显式暴露，不能静默转成现金。"""
+
+    def test_missing_industry_is_exposed_and_not_cash(self):
+        idx, panel = _holding_panel()
+        exposure = pd.DataFrame({"801120": [40.0], "801780": [40.0]},
+                                index=[pd.Timestamp("2021-12-31")])
+        cov = _coverage(80.0)                       # 已映射 80，现金 20
+        hr = H.holding_benchmark(exposure, panel, cash_rate=0.015,
+                                 dividend_yield=0.0, coverage=cov)
+        self.assertEqual(hr.attrs["missing_industries"], ["801780"])
+        diag = hr.attrs["diagnostics"]
+        self.assertAlmostEqual(float(diag.iloc[0]["面板缺失权重"]), 40.0)
+        daily = (1.015 ** (1 / 252) - 1)
+        # 只有 20% 现金计息；缺失的 40% 不能变成现金（否则会是 0.6）
+        self.assertAlmostEqual(float(hr.iloc[0]), 0.2 * daily, places=9)
 
 
 class HoldingBenchmarkDividendTest(unittest.TestCase):
@@ -111,8 +155,9 @@ class HoldingBenchmarkDividendTest(unittest.TestCase):
         idx, panel = _holding_panel()
         exposure = pd.DataFrame({"801120": [weight]},
                                 index=[pd.Timestamp("2021-12-31")])
+        cov = None if weight < 0 else _coverage(max(weight, 0.0))
         return H.holding_benchmark(exposure, panel, cash_rate=0.015,
-                                   dividend_yield=div)
+                                   dividend_yield=div, coverage=cov)
 
     def test_dividend_leg_scales_with_stock_weight(self):
         daily_div = (1.02 ** (1 / 252) - 1)
@@ -186,6 +231,85 @@ class ExposureCoverageTest(unittest.TestCase):
         self.assertTrue(al["ok"])
         self.assertTrue(np.isnan(float(al["periods"]["未映射权重"].iloc[0])))
         self.assertIn("无法区分", al["coverage_note"])
+
+
+def _holdings_out():
+    """构造一次真实持仓拟合结果（DataFrame 均为真实结构，非 mock）。"""
+    return {
+        "ok": True, "code": "110022", "name": "易方达消费行业",
+        "n_periods": 3, "mad_mean": 0.081, "corr_mean": 0.62,
+        "corr_first": 0.55, "corr_last": 0.68, "corr_valid": 3,
+        "broad_exposure": 0.11, "unmapped_mean": 0.12,
+        "coverage_mean": 0.78, "dividend_yield": 0.02, "elapsed": 1.2,
+        "broad_note": "宽基暴露约 11%，单列报告",
+        "coverage_note": "未映射与现金已拆开",
+        "periods": pd.DataFrame({
+            "期数": ["2024Q2", "2024Q4", "2025Q2"],
+            "权重相关": [0.55, 0.63, 0.68],
+            "平均绝对偏差": [0.09, 0.08, 0.07],
+        }),
+        "by_industry": pd.DataFrame(
+            {"食品饮料": [52.0], "银行": [20.0]}, index=["2024Q2"]),
+        "detail": pd.DataFrame({
+            "期数": ["2024Q2"], "行业": ["食品饮料"], "权重": [52.0],
+        }),
+        "compare": {
+            "ok": True, "reason": None, "n_days": 240,
+            "stats": pd.DataFrame({
+                "基准": ["基金实际", "RBSA合成基准", "持仓基准"],
+                "信息比率IR": [0.0, 0.31, 0.42],
+            }),
+        },
+        "benchmark": {
+            "available": True, "missing_industries": ["801780", "801950"],
+            "residual_treatment": "缺失行业权重按 0 收益处理，不按现金计息",
+            "note": "", "diagnostics": pd.DataFrame(
+                {"季末": ["2024Q2"], "面板缺失权重": [12.0]}),
+        },
+    }
+
+
+class HoldingsPayloadTest(unittest.TestCase):
+    """P3-C：持仓 payload 必须带出真实内容，而不是只断言字段存在。"""
+
+    def test_payload_carries_summary_constraints_and_industry_rows(self):
+        p = holdings_payload(_holdings_out())
+        self.assertTrue(p["ok"])
+        self.assertEqual(p["code"], "110022")
+        self.assertEqual(p["name"], "易方达消费行业")
+        self.assertEqual(p["summary"]["n_periods"], 3)
+        self.assertAlmostEqual(p["summary"]["mad_mean"], 0.081)
+        self.assertAlmostEqual(p["summary"]["corr_last"], 0.68)
+        self.assertEqual([r["期数"] for r in p["periods"]],
+                         ["2024Q2", "2024Q4", "2025Q2"])
+        # 行业表首列统一为「行业」，且内容来自真实索引
+        self.assertEqual(list(p["by_industry"][0])[0], "行业")
+        self.assertEqual(p["by_industry"][0]["行业"], "2024Q2")
+        self.assertAlmostEqual(p["by_industry"][0]["食品饮料"], 52.0)
+        self.assertAlmostEqual(p["by_industry"][0]["银行"], 20.0)
+        # 披露约束原样带出（4 条，含 Q2/Q4 滞后与共同行业口径）
+        self.assertEqual(len(p["constraints"]), 4)
+        self.assertIn("+62 天", p["constraints"][1])
+        self.assertIn("+90 天", p["constraints"][1])
+        self.assertIn("共同行业", p["constraints"][2])
+        self.assertIn("≥60 个共同交易日", p["constraints"][3])
+        # 比较/基准的明细不能被摘要吞掉
+        self.assertEqual(p["compare"]["n_days"], 240)
+        self.assertEqual([r["基准"] for r in p["compare"]["stats"]],
+                         ["基金实际", "RBSA合成基准", "持仓基准"])
+        self.assertEqual(p["benchmark"]["missing_industries"],
+                         ["801780", "801950"])
+        self.assertEqual(p["benchmark"]["residual_treatment"],
+                         "缺失行业权重按 0 收益处理，不按现金计息")
+        self.assertAlmostEqual(
+            p["benchmark"]["diagnostics"][0]["面板缺失权重"], 12.0)
+
+    def test_failed_fit_is_explicit_and_keeps_constraints(self):
+        p = holdings_payload({"ok": False, "code": "110022",
+                              "reason": "共同行业不足 60 个交易日"})
+        self.assertFalse(p["ok"])
+        self.assertEqual(p["reason"], "共同行业不足 60 个交易日")
+        self.assertEqual(len(p["constraints"]), 4)
 
 
 class TimingComparisonTest(unittest.TestCase):
@@ -462,6 +586,76 @@ class IndustryMapCacheTest(unittest.TestCase):
                           return_value=pd.DataFrame({"证券代码": ["600519"]})):
             m3 = H.load_industry_map(verbose=False)
         self.assertIn("600519", m3.index)
+
+
+def _backtest_inputs(health_values):
+    idx = pd.bdate_range("2024-01-01", periods=60)
+    equity = pd.DataFrame({"拟合健康策略": np.linspace(1.0, 1.05, 60),
+                           "买入持有": np.linspace(1.0, 1.03, 60)}, index=idx)
+    health = pd.DataFrame({
+        "health_score": health_values,
+        "fit_r2": np.full(60, 0.9),
+        "te_ratio": np.full(60, 1.0),
+        "active_alpha": np.zeros(60),
+        "alpha_t": np.zeros(60),
+        "fit_reliable": np.ones(60),
+    }, index=idx)
+    decision = pd.Series([1] * 60, index=idx, dtype=int)
+    metrics = pd.DataFrame(
+        {"夏普": [0.5, 0.4], "算术夏普": [0.6, 0.5]},
+        index=["拟合健康策略", "买入持有"])
+    bt = {
+        "equity": equity, "metrics": metrics,
+        "window_start": idx[0], "window_end": idx[-1],
+        "control_name": "买入持有", "trades": [],
+        "timing_contrib": {"年化收益": 0.0, "夏普": 0.0, "最大回撤": 0.0},
+        "controls": {}, "timing_contrib_all": {"仅赛道估值通道": {}},
+        "avg_position_all": {}, "ic": 0.0, "icir": 0.0, "turnover": 0.0,
+        "avg_position": 1.0, "win_long": 0.5,
+    }
+    return bt, health, decision
+
+
+class BacktestCurrentPayloadTest(unittest.TestCase):
+    """P2 基金页「当前建议仓位/健康分」：缺数据或门控不可触发时必须标注。"""
+
+    def _payload(self, health_values, valuation=None):
+        from market_research.funds.payloads import _backtest_payload
+        bt, health, decision = _backtest_inputs(health_values)
+        return _backtest_payload("110022", "测试基金", "ridge", True,
+                                 bt, health, decision, 1.0,
+                                 valuation=valuation)
+
+    def test_current_position_and_degraded_reasons(self):
+        p = self._payload(np.linspace(0.6, 0.3, 60))       # 从未跌破 -0.5
+        cur = p["current"]
+        self.assertTrue(cur["available"])
+        self.assertEqual(cur["position"], 1)
+        self.assertAlmostEqual(cur["position_pct"], 1.0)
+        self.assertTrue(cur["degraded"])
+        self.assertIn("从未触及离场线", " ".join(cur["notes"]))
+        self.assertIn("非投资建议", cur["disclaimer"])
+
+    def test_missing_health_is_unavailable_not_normal(self):
+        p = self._payload(np.full(60, np.nan))
+        cur = p["current"]
+        self.assertFalse(cur["available"])
+        self.assertIsNone(cur["position"])
+        self.assertIsNone(cur["health"])
+        self.assertEqual(cur["state"], "不可用")
+        self.assertIn("健康分全部缺失", " ".join(cur["notes"]))
+
+    def test_valuation_fallback_reaches_variants_and_payload(self):
+        valuation = {"available": True, "degraded": True, "coverage": 0.5,
+                     "fallback_weight": 0.2,
+                     "fallback_assets": [{"code": "801780", "name": "银行",
+                                          "weight": 0.2, "kind": "行业"}],
+                     "note": "行业估值不可用，已用沪深300 宽基替代"}
+        p = self._payload(np.linspace(0.6, 0.3, 60), valuation=valuation)
+        self.assertTrue(p["valuation"]["degraded"])
+        variant = next(v for v in p["variants"] if "估值" in v["name"])
+        self.assertTrue(variant["degraded"])
+        self.assertIn("行业估值不可用", variant["note"])
 
 
 if __name__ == "__main__":

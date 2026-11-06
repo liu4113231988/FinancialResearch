@@ -28,6 +28,7 @@
   · RBSA 的宽基暴露无法与持仓对应，对齐只覆盖行业部分；
   · 抓不到行业的股票（新股/北交所/停牌股）不进暴露表，但**不是现金**：
     每期的未映射权重与覆盖率见 `exposure_coverage()`，也写进 H0/H1；
+    持仓基准对这类残差按 **0 收益**处理，只有 `100 − 合计` 的现金/债券部分计息；
   · 行业指数是价格指数，持仓基准缺股息这条腿，默认 0（历史口径），
     可用 `C.RBSA["index_dividend_annual"]` 做情景修正，实际取值会打印。
 """
@@ -61,53 +62,8 @@ def _corr_series(al: dict) -> pd.Series:
 
 
 def run_one(code: str, industry_map: pd.Series, refresh: bool = False) -> dict:
-    """单只基金：数据 → RBSA → 对齐 → 持仓基准。"""
-    t0 = time.time()
-    panel = D.load_panel(code, verbose=False)
-    hd = H.load_fund_holdings(code, refresh=refresh, verbose=False)
-    if hd.empty:
-        return {"code": code, "ok": False, "reason": "未取到持仓明细"}
-    exp = H.semiannual_exposure(hd, industry_map)
-    if exp.empty:
-        return {"code": code, "ok": False, "reason": "无完整（半年报/年报）持仓"}
-
-    fit = RBSA().fit_rolling(panel, verbose=False)
-    cov = H.exposure_coverage(hd, industry_map)
-    al = H.align_vs_rbsa(fit["weights"], exp, coverage=cov)
-    if not al.get("ok"):
-        return {"code": code, "ok": False, "reason": al.get("reason", "对齐失败")}
-
-    hr = H.holding_benchmark(exp, panel)
-    syn_nav = np.exp(fit["syn_ret"].cumsum())
-    cmp_ = H.compare_benchmarks(panel["__FUND__"], syn_nav, hr)
-
-    coverage_mean = (float(cov["覆盖率"].mean())
-                     if not cov.empty and "覆盖率" in cov.columns else np.nan)
-    out = {
-        "code": code,
-        "ok": True,
-        "name": C.EXTENDED_FUNDS.get(code, C.DEMO_FUNDS.get(code, code)),
-        "n_periods": al["n_periods"],
-        "mad_mean": al["mad_mean"],
-        "corr_mean": al["corr_mean"],
-        # ★ 取最后一个**有效**相关，不是最后一期：末期共同行业不足时相关为 NaN，
-        #   直接 iloc[-1] 会把 NaN 带进汇总，"相关变化"随之全变 NaN。
-        "corr_first": float(_corr_series(al).iloc[0]) if len(_corr_series(al)) else np.nan,
-        "corr_last": float(_corr_series(al).iloc[-1]) if len(_corr_series(al)) else np.nan,
-        "corr_valid": int(len(_corr_series(al))),
-        "broad_exposure": al["broad_exposure"],
-        "broad_note": al["broad_note"],
-        "coverage_note": al["coverage_note"],
-        "unmapped_mean": al["unmapped_mean"],
-        "coverage_mean": coverage_mean,
-        "dividend_yield": float(hr.attrs.get("dividend_yield", 0.0)) if len(hr) else np.nan,
-        "periods": al["periods"],
-        "by_industry": al["by_industry"],
-        "detail": al["detail"],
-        "compare": cmp_,
-        "elapsed": round(time.time() - t0, 1),
-    }
-    return out
+    """单只基金：数据 → RBSA → 对齐 → 持仓基准（实现见 funds/holdings.py）。"""
+    return H.fit_fund_holdings(code, industry_map, refresh=refresh)
 
 
 def main(argv=None, *, prog=None):
@@ -196,6 +152,10 @@ def main(argv=None, *, prog=None):
             print(f"  未映射权重均值 {r['unmapped_mean']:.2f}pt · "
                   f"覆盖率均值 {r['coverage_mean']:.1%} · "
                   f"持仓基准股息率 {r['dividend_yield']:.2%}")
+        miss = (r.get("benchmark") or {}).get("missing_industries") or []
+        if miss:
+            print(f"  [警示] 行业面板缺失 {len(miss)} 个持仓行业：{', '.join(miss)}"
+                  f" —— 这些权重与未映射股票一样按 0 收益计，不按现金")
         if c.get("ok"):
             st = c["stats"].set_index("基准")
             print(f"  年化：基金 {st.loc['基金实际','年化收益']:+.2%} · "
@@ -231,6 +191,7 @@ def main(argv=None, *, prog=None):
     print("    两者是不同频率/不同信息集的基准，差值只说明'ML 拟合多带来了/少带来了什么'")
     print("  · 未映射权重 ≠ 现金：抓不到行业的新股/北交所/停牌股同样是股票仓位，")
     print("    覆盖率低的期次，结构比（归一到 100%）偏差更可能被低估；")
+    print("    持仓基准对未映射与面板缺失行业按 0 收益计，只有现金/债券部分计息；")
     print("    持仓基准的股息腿默认 0，做情景修正时务必同时报告取值")
     return 0
 

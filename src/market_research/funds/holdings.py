@@ -601,13 +601,16 @@ def align_vs_rbsa(weights: pd.DataFrame, exposure: pd.DataFrame,
 def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
                       lag_days: Optional[int] = None,
                       cash_rate: float = 0.015,
-                      dividend_yield: Optional[float] = None) -> pd.Series:
+                      dividend_yield: Optional[float] = None,
+                      coverage: Optional[pd.DataFrame] = None) -> pd.Series:
     """
     只用真实持仓构造的基准组合**日收益**序列（index=交易日）。
 
-    做法：每期行业暴露 × 对应行业指数日收益，加权求和；未覆盖部分
-    （现金/债券/未映射行业）按 `cash_rate` 年化计息 —— 旧实现记 0 收益，
-    比"空仓也有货币收益"的真实口径更差，会把基金经理的现金管理算成 alpha。
+    做法：每期行业暴露 × 对应行业指数日收益，加权求和。**未映射股票**
+    （抓不到行业的持仓）与**面板缺失行业**一律按 0 收益处理，不再冒充现金
+    （P2-23 / P3-B）。只有 `coverage` 明确给出的「现金/债券」部分
+    （`100 − 合计`）才按 `cash_rate` 年化计息；未传 `coverage` 时残差也记 0。
+    该处理写入返回序列的 `attrs["diagnostics"]`，调用方必须显式展示。
 
     ★ 收益口径（P1-16）：返回**简单日收益**，权重按**每日再平衡**处理
       （半年度调仓只改权重向量；逐日不追踪漂移，这是显式约定）。股票腿用
@@ -636,13 +639,20 @@ def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
     if not np.isfinite(dividend_yield) or dividend_yield < 0:
         raise ValueError("dividend_yield 需为有限非负数值（年化，如 0.02）")
     exposure = _exposure_to_codes(exposure)
+    exposure = exposure.sort_index()
     cols = [c for c in exposure.columns if c in panel.columns]
+    missing = [c for c in exposure.columns if c not in panel.columns]
     if not cols:
-        return pd.Series(dtype=float)
+        out = pd.Series(dtype=float)
+        out.attrs["missing_industries"] = missing
+        out.attrs["note"] = "行业面板缺少全部持仓行业，无法构造持仓基准"
+        return out
 
     rets = panel[cols].astype(float).pct_change()
     daily_div = (1.0 + dividend_yield) ** (1.0 / 252.0) - 1.0
-    parts = []
+    daily_cash = (1.0 + float(cash_rate)) ** (1.0 / 252.0) - 1.0
+    has_cov = coverage is not None and not coverage.empty
+    parts, diag = [], []
     for qend in exposure.index:
         lag = int(lag_days) if lag_days is not None else disclosure_lag_days(qend)
         start = qend + pd.Timedelta(days=lag)
@@ -650,23 +660,42 @@ def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
         #   而 rets 是小数日收益。不除 100 会让每日收益被放大近百倍
         #   （实测症状：年化 −95%、年化波动 1650%）。
         w = exposure.loc[qend, cols].fillna(0.0) / 100.0
-        stock_weight = float(w.sum())
-        if stock_weight <= 0:
-            continue
+        mapped = float(w.sum())
+        missing_pct = float(exposure.loc[qend, missing].fillna(0.0).sum()) \
+            if missing else 0.0
+        unmapped_pct, cash_pct = np.nan, np.nan
+        if has_cov and qend in coverage.index:
+            row = coverage.loc[qend]
+            unmapped_pct = pd.to_numeric(row.get("未映射权重"), errors="coerce")
+            total_pct = pd.to_numeric(row.get("合计"), errors="coerce")
+            if np.isfinite(total_pct):
+                cash_pct = max(0.0, 100.0 - float(total_pct))
+        # 未映射股票与面板缺失行业是**股票仓位**，但无从知道行业收益，
+        # 只能按 0 收益处理；把它们算成现金会低估股票波动、并把收益
+        # 白送成现金利息。只有明确的现金/债券部分才按 cash_rate 计息。
+        cash_w = float(cash_pct) / 100.0 if np.isfinite(cash_pct) else 0.0
         seg = rets.loc[rets.index >= start]
-        if seg.empty:
+        if seg.empty or (mapped <= 0 and cash_w <= 0):
             continue
-        # 未覆盖部分（现金/债券/未映射行业）按年化 cash_rate 计息，
-        # 否则空仓期记 0 收益，等于把货币收益白送成基金经理的 alpha。
-        cash_weight = max(0.0, 1.0 - stock_weight)
-        daily_cash = (1.0 + float(cash_rate)) ** (1.0 / 252.0) - 1.0
         # 该期暴露从披露日一直生效，直到被**更晚一期**覆盖（下方按期末顺序赋值，
         # 后者覆盖前者）—— 这正是"每半年按最新披露调仓"的行为。
         parts.append((seg.index,
-                      (seg * w).sum(axis=1) + cash_weight * daily_cash
-                      + stock_weight * daily_div))
+                      (seg * w).sum(axis=1) + cash_w * daily_cash
+                      + mapped * daily_div))
+        diag.append({
+            "季末": qend,
+            "面板缺失行业": ",".join(missing),
+            "面板缺失权重": missing_pct,
+            "已映射权重": mapped * 100.0,
+            "未映射权重": unmapped_pct,
+            "现金债券权重": cash_pct,
+            "生效日": start,
+        })
     if not parts:
-        return pd.Series(dtype=float)
+        out = pd.Series(dtype=float)
+        out.attrs["missing_industries"] = missing
+        out.attrs["diagnostics"] = pd.DataFrame(diag)
+        return out
     idx = pd.DatetimeIndex(sorted(set().union(*[p[0] for p in parts])))
     out = pd.Series(0.0, index=idx)
     for i, v in parts:
@@ -676,6 +705,9 @@ def holding_benchmark(exposure: pd.DataFrame, panel: pd.DataFrame,
     out.attrs["cash_rate"] = float(cash_rate)
     out.attrs["returns"] = "simple"
     out.attrs["rebalance"] = "daily"
+    out.attrs["missing_industries"] = missing
+    out.attrs["residual_treatment"] = "面板缺失行业与未映射股票按 0 收益处理"
+    out.attrs["diagnostics"] = pd.DataFrame(diag)
     return out
 
 
@@ -753,3 +785,65 @@ def compare_benchmarks(fund_nav: pd.Series, rbsa_syn_nav: pd.Series,
         "IR参照": "RBSA合成基准",
     })
     return {"ok": True, "stats": pd.DataFrame(rows), "n_days": int(n)}
+
+
+def fit_fund_holdings(code: str, industry_map: pd.Series,
+                      refresh: bool = False) -> dict:
+    """单只基金：数据 → RBSA → 真实持仓对齐 → 持仓基准。
+
+    CLI、Web API 与报告共用这一条链路，避免三处各写一遍导致披露口径漂移。
+    """
+    import market_research.data.marketdata as D
+    from market_research.funds.rbsa import RBSA
+
+    t0 = time.time()
+    panel = D.load_panel(code, verbose=False)
+    hd = load_fund_holdings(code, refresh=refresh, verbose=False)
+    if hd.empty:
+        return {"code": code, "ok": False, "reason": "未取到持仓明细"}
+    exp = semiannual_exposure(hd, industry_map)
+    if exp.empty:
+        return {"code": code, "ok": False, "reason": "无完整（半年报/年报）持仓"}
+
+    fit = RBSA().fit_rolling(panel, verbose=False)
+    cov = exposure_coverage(hd, industry_map)
+    al = align_vs_rbsa(fit["weights"], exp, coverage=cov)
+    if not al.get("ok"):
+        return {"code": code, "ok": False, "reason": al.get("reason", "对齐失败")}
+
+    hr = holding_benchmark(exp, panel, coverage=cov)
+    syn_nav = np.exp(fit["syn_ret"].cumsum())
+    cmp_ = compare_benchmarks(panel["__FUND__"], syn_nav, hr)
+
+    coverage_mean = (float(cov["覆盖率"].mean())
+                     if not cov.empty and "覆盖率" in cov.columns else np.nan)
+    corr_series = al["periods"]["权重相关"].dropna()
+    return {
+        "code": code,
+        "ok": True,
+        "name": C.EXTENDED_FUNDS.get(code, C.DEMO_FUNDS.get(code, code)),
+        "n_periods": al["n_periods"],
+        "mad_mean": al["mad_mean"],
+        "corr_mean": al["corr_mean"],
+        "corr_first": float(corr_series.iloc[0]) if len(corr_series) else np.nan,
+        "corr_last": float(corr_series.iloc[-1]) if len(corr_series) else np.nan,
+        "corr_valid": int(len(corr_series)),
+        "broad_exposure": al["broad_exposure"],
+        "broad_note": al["broad_note"],
+        "coverage_note": al["coverage_note"],
+        "unmapped_mean": al["unmapped_mean"],
+        "coverage_mean": coverage_mean,
+        "dividend_yield": float(hr.attrs.get("dividend_yield", 0.0)) if len(hr) else np.nan,
+        "periods": al["periods"],
+        "by_industry": al["by_industry"],
+        "detail": al["detail"],
+        "compare": cmp_,
+        "benchmark": {
+            "available": bool(len(hr)),
+            "missing_industries": list(hr.attrs.get("missing_industries") or []),
+            "residual_treatment": hr.attrs.get("residual_treatment", ""),
+            "diagnostics": hr.attrs.get("diagnostics", pd.DataFrame()),
+            "note": hr.attrs.get("note", ""),
+        },
+        "elapsed": round(time.time() - t0, 1),
+    }

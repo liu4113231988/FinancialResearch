@@ -9,11 +9,44 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+import market_research.audit as audit
 import market_research.config as C
 import market_research.data.marketdata as D
 from market_research.modeling.backtest import run_backtest, score_to_position
 from market_research.funds.rbsa import RBSA
 from market_research.modeling.signals import SignalEngine, build_decision, health_stats
+
+
+def _completeness(res: dict) -> dict:
+    """报告路径的完整性契约（P2-31），与 Web 结果同构。"""
+    missing: list = []
+    sections: dict = {}
+
+    def check(name: str, ok: bool, reason: str, optional: bool = False) -> None:
+        sections[name] = {"status": "ok" if ok else
+                          ("unavailable" if optional else "failed")}
+        if not ok:
+            missing.append({"section": name, "item": name, "reason": reason})
+
+    check("nav", len(res["nav"]) > 0, "净值序列为空")
+    check("exposure", len(res["exposure"]) > 0, "风格暴露为空")
+    check("health", len(res["health"]) > 0, "健康分为空")
+    check("backtest", len(res["backtest"]["equity"]) > 0, "回测净值为空")
+    check("valuation", bool(res["valuation"].get("available")),
+          "估值数据不可用", optional=True)
+    check("style_drift", bool(res["style_drift"].get("ok")),
+          res["style_drift"].get("reason") or "风格漂移未计算", optional=True)
+
+    data_status = str((res.get("data_quality") or {}).get("status") or "ok")
+    sections["data"] = {"status": data_status}
+    fatal = any(s["status"] == "failed" for s in sections.values())
+    status = "failed" if fatal else (
+        "partial" if missing or data_status not in ("ok",) else "ok")
+    reasons = [m["reason"] for m in missing]
+    if data_status not in ("ok",):
+        reasons.extend((res.get("data_quality") or {}).get("reasons") or [])
+    return {"status": status, "ok": status != "failed",
+            "sections": sections, "missing": missing, "reasons": reasons}
 
 
 def run_fund(code: str, name: str = "", refresh: bool = False,
@@ -35,9 +68,20 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
     panel = D.load_panel(code, start=(window_start or C.START_DATE),
                          end=end_date, refresh=refresh, verbose=False)
     nav = panel["__FUND__"]
+    quality = dict(getattr(panel, "attrs", {}).get("data_quality") or {})
+    # P1-20：净值口径（总回报 / 累计净值降级）必须随结果一起输出
+    from market_research.funds.analysis import nav_basis_meta
+    nav_meta = nav_basis_meta(getattr(panel, "attrs", {}))
     if verbose:
         print(f"[data] {panel.shape[0]} 交易日 × {panel.shape[1]-1} 条指数  "
               f"{panel.index[0].date()} ~ {panel.index[-1].date()}")
+        print(f"[口径] 净值口径："
+              f"{'总回报' if nav_meta['nav_basis'] == 'total' else '累计净值（降级）'}"
+              f" — {nav_meta['data_basis']}")
+        if quality and quality.get("status") != "ok":
+            # P2-27：数据过期/缺失/口径降级/取数回退统一在这里提示
+            print(f"[警示] 数据质量 {quality.get('status')}："
+                  + "；".join(quality.get("reasons") or []))
 
     # ---------- 1. 风格拟合
     rbsa = RBSA()
@@ -60,13 +104,20 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
 
     # ---------- 3. 回测（含单通道归因 + 对照实验）
     vt = engine.vol_target_channel(syn_nav)
+    # P2-21：估值通道不可用时不能把 NaN 仓位塞进变体（会把回测净值污染成
+    # NaN）；与 Web 回测同一判断口径，不可用就不生成该曲线并显式标注。
+    valuation = dict(sig.attrs.get("valuation") or {})
     variants = {
         "仅趋势通道": score_to_position(sig["trend_score"]),
         "仅相对偏离通道": score_to_position(sig["dev_score"]),
-        "仅赛道估值通道": score_to_position(sig["val_score"]),
         "拟合健康决策": dec_pos,
         "波动率目标": vt["vol_target_pos"].reindex(nav_oos.index).ffill().fillna(1.0),
     }
+    if valuation.get("available") and sig["val_score"].notna().any():
+        variants["仅赛道估值通道"] = score_to_position(sig["val_score"])
+    else:
+        valuation.setdefault("note", "估值通道不可用，未生成该对照曲线")
+        valuation["excluded"] = True
     bt = run_backtest(nav_oos, sig, fund_name=name, variants=variants,
                       start_date=start_date, end_date=end_date,
                       decision_trades=dec_trades)
@@ -81,6 +132,19 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
         print(f"\n[结果] 最新风格暴露：")
         print(exposure.to_string(index=False))
         print(f"\n[结果] 当前决策：{json.dumps(snap, ensure_ascii=False, indent=2)}")
+        if valuation.get("degraded"):
+            assets = "、".join(
+                f"{a['name']}({a['code']}, {a['weight']:.1%})"
+                for a in (valuation.get("fallback_assets") or [])[:8])
+            cov = valuation.get("coverage")
+            print(f"\n[警示] 估值口径：{valuation.get('note') or '部分资产使用宽基兜底'}"
+                  f"；真实 PE 覆盖率={cov:.0%}" if cov is not None else
+                  f"\n[警示] 估值口径：{valuation.get('note') or '部分资产使用宽基兜底'}")
+            if assets:
+                print(f"       兜底资产（按权重）：{assets}")
+        elif valuation.get("excluded"):
+            print(f"\n[警示] 估值通道未生成对照曲线："
+                  f"{valuation.get('note') or '不可用'}")
         print(f"\n[结果] 绩效：")
         print(bt["metrics"].to_string(float_format=lambda x: f"{x:.4f}"))
         print(f"       RankIC={bt['ic']:.4f}  ICIR={bt['icir']:.3f}  "
@@ -127,7 +191,7 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
     if verbose and drift.get("ok"):
         print(f"\n[结果] 风格漂移：{drift['verdict']}")
 
-    return {
+    res = {
         "code": code, "name": name,
         "panel": panel, "nav": nav,
         "weights_hist": fit["weights"], "fit_diag": fit["diag"],
@@ -139,7 +203,24 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
         "decision_pos": dec_pos, "decision_trades": dec_trades,
         "backtest": bt,
         "exposure": exposure, "snapshot": snap,
+        "valuation": valuation,
+        "data_quality": quality,
+        # P1-20：与 Web 结果同构的净值口径标识（data_basis / nav_basis / 降级原因）
+        "meta": dict(nav_meta),
     }
+    completeness = _completeness(res)
+    res.update(status=completeness["status"], ok=completeness["ok"],
+               completeness=completeness)
+    # P2-26：CLI/报告链路同样留审计轨迹（只写状态与缺失项，不写行情数值）
+    audit.record("analysis.run", ok=completeness["ok"],
+                 subject=f"fund:{code}",
+                 detail={"code": code, "window": [str(nav.index[0].date()),
+                                                 str(nav.index[-1].date())],
+                         "status": completeness["status"],
+                         "missing": [item["item"] for item in
+                                     completeness["missing"]][:8],
+                         "data_quality": (quality or {}).get("status")})
+    return res
 
 
 def save_result(res: dict, outdir: Optional[Path] = None) -> Path:
@@ -165,6 +246,8 @@ def save_result(res: dict, outdir: Optional[Path] = None) -> Path:
         "健康门控交易数": len(res["backtest"]["trades"]),
         "健康分最低": round(health_stats(res["health"])["min"], 4),
         "离场线": C.SIGNAL["health_exit"],
+        "数据质量": res.get("data_quality") or {},
+        "完整性": res.get("completeness") or {},
     }
     (outdir / "meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

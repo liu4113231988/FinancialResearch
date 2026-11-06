@@ -19,6 +19,7 @@ warnings.filterwarnings("ignore")
 import numpy as np
 import pandas as pd
 
+import market_research.audit as audit
 import market_research.config as C
 from market_research.research.charts import build_all
 from market_research.funds.pipeline import run_fund
@@ -26,6 +27,63 @@ from market_research.research.report import build_report
 from market_research.research.experiments import summarize_funds
 from market_research.research.runinfo import write_fingerprint, fingerprint_lines
 from market_research.validation.window import add_window_args, apply_window
+
+# P2-32：发布门禁要求的关键段落（缺失即拒绝发布，需显式 --allow-incomplete）
+REQUIRED_TABLES = ("跨基金汇总", "E1_IC期限结构", "E2_通道消融",
+                   "E3_参数敏感性", "E4_周期匹配")
+
+
+class PublishRefused(RuntimeError):
+    """报告完整性/窗口一致性不达标。"""
+
+
+def _sample_days(df) -> list:
+    if df is None or getattr(df, "empty", True):
+        return []
+    col = next((c for c in ("样本天数", "样本") if c in df.columns), None)
+    if col is None:
+        return []
+    values = pd.to_numeric(df[col], errors="coerce").dropna()
+    return [float(v) for v in values]
+
+
+def validate_publish(main_res: dict, summary, experiments: dict) -> list:
+    """检查报告各部分能否发布；返回问题清单，空列表=通过。
+
+    能验证的窗口一致性：所有带「样本天数」的跨基金表，其最大样本天数应与
+    主案例的样本外天数同量级（容差 max(30 天, 15%)）；表格缺失直接算不通过。
+    """
+    problems = []
+    completeness = main_res.get("completeness") or {}
+    if completeness.get("status") == "failed":
+        reasons = "；".join(completeness.get("reasons") or []) or "原因未提供"
+        problems.append(f"主案例结果不完整（failed）：{reasons}")
+
+    tables = {
+        "跨基金汇总": summary,
+        "E1_IC期限结构": experiments.get("E1_IC期限结构"),
+        "E2_通道消融": experiments.get("E2_通道消融"),
+        "E3_参数敏感性": experiments.get("E3_参数敏感性"),
+        "E4_周期匹配": experiments.get("E4_周期匹配"),
+    }
+    for name in REQUIRED_TABLES:
+        frame = tables.get(name)
+        if frame is None or getattr(frame, "empty", True):
+            problems.append(f"缺少关键表格：{name}（对应报告章节无法生成）")
+
+    try:
+        main_days = float(main_res["backtest"]["metrics"]["样本天数"].iloc[0])
+    except Exception:                                      # noqa: BLE001
+        main_days = None
+    if main_days:
+        tolerance = max(30.0, main_days * 0.15)
+        for name in ("跨基金汇总", "E2_通道消融", "E3_参数敏感性"):
+            days = _sample_days(tables.get(name))
+            if days and abs(max(days) - main_days) > tolerance:
+                problems.append(
+                    f"窗口不一致：{name} 最大样本天数 {max(days):.0f} 天，"
+                    f"主案例 {main_days:.0f} 天（容差 {tolerance:.0f} 天）")
+    return problems
 
 
 def read_csv_safe(name: str):
@@ -41,6 +99,8 @@ def read_csv_safe(name: str):
 def main(argv=None, *, prog=None):
     ap = argparse.ArgumentParser(description=__doc__, prog=prog)
     add_window_args(ap)
+    ap.add_argument("--allow-incomplete", action="store_true",
+                    help="显式允许在关键表格缺失/窗口不一致时仍生成报告（默认拒绝）")
     ap.add_argument("code", nargs="?", default=C.MAIN_FUND,
                     help="主案例基金代码，默认 C.MAIN_FUND")
     args = ap.parse_args(argv)
@@ -89,6 +149,8 @@ def main(argv=None, *, prog=None):
     }
 
     # E1：跨基金平均后转成「信号 × 前瞻期」矩阵，按时间顺序排列
+    # 保留原始表用于发布门禁（后面的聚合会丢掉「样本天数」列）
+    raw_tables = {**experiments, "跨基金汇总": summary}
     e1 = experiments["E1_IC期限结构"]
     if e1 is not None and "基金" in e1.columns:
         order = ["5日", "20日", "60日", "120日", "250日"]
@@ -189,7 +251,33 @@ def main(argv=None, *, prog=None):
         "period": f"{main_res['nav'].index[0].date()} ~ {main_res['nav'].index[-1].date()}",
         "cross_fund_verdict": verdict,
         "evidence": evidence,
+        # P2-27：过期/缺失/口径降级/取数回退必须进报告，不能只在日志里
+        "data_quality": main_res.get("data_quality") or {},
+        # P2-31：完整性契约（完成/部分/失败 + 缺失项 + 原因）
+        "completeness": main_res.get("completeness") or {},
+        # P1-20：净值口径必须与 meta.data_basis 一致地出现在报告顶部
+        "data_basis": (main_res.get("meta") or {}).get("data_basis"),
+        "nav_basis": (main_res.get("meta") or {}).get("nav_basis"),
+        "nav_degraded": (main_res.get("meta") or {}).get("nav_degraded"),
+        "nav_degraded_reason": (main_res.get("meta") or {}).get("nav_degraded_reason"),
     }
+
+    # ---- 真实持仓拟合：与 CLI 同一链路，失败时在报告里显式说明而不是省略
+    try:
+        from market_research.funds.holdings import (
+            fit_fund_holdings, load_industry_map)
+        from market_research.funds.payloads import holdings_payload
+        print("[report] 运行真实持仓拟合……")
+        imap = load_industry_map(refresh=False)
+        if imap.empty:
+            meta_extra["holdings"] = {"ok": False, "code": code,
+                                      "reason": "申万行业映射不可用"}
+        else:
+            meta_extra["holdings"] = holdings_payload(
+                fit_fund_holdings(code, imap))
+    except Exception as exc:                            # noqa: BLE001
+        meta_extra["holdings"] = {"ok": False, "code": code,
+                                  "reason": f"{type(exc).__name__}: {str(exc)[:120]}"}
 
     # ---- 运行指纹（P1-09 / N-09）：结论必须能回答"是在哪套环境/数据/参数下跑的"
     fp = write_fingerprint(
@@ -202,8 +290,31 @@ def main(argv=None, *, prog=None):
     for ln in fingerprint_lines(fp):
         print(ln)
 
+    # ---- 发布门禁（P2-32）：关键表格缺失或窗口不一致时拒绝覆盖旧报告
+    problems = validate_publish(main_res, raw_tables["跨基金汇总"], raw_tables)
+    meta_extra["publish_gate"] = {"ok": not problems, "problems": problems,
+                                  "forced": bool(args.allow_incomplete)}
+    if problems:
+        print("[report][拒绝发布] 完整性/窗口校验未通过：")
+        for item in problems:
+            print(f"  - {item}")
+        if not args.allow_incomplete:
+            audit.record("report.publish", ok=False, subject=f"report:{code}",
+                         detail={"fund": code, "gate_ok": False,
+                                 "problems": problems[:10]},
+                         error="发布门禁未通过")
+            raise PublishRefused(
+                "报告未生成；确认无误后可加 --allow-incomplete 强制发布")
+        print("[report][警告] 已按 --allow-incomplete 强制发布，报告会标注门禁失败")
+
     path = build_report(main_res, summary, experiments, figs,
                         extra_meta=meta_extra, fingerprint=fp)
+    audit.record("report.publish", ok=not problems, subject=f"report:{code}",
+                 detail={"fund": code, "path": str(path),
+                         "gate_ok": not problems,
+                         "forced": bool(args.allow_incomplete),
+                         "quality": (meta_extra["data_quality"] or {}).get("status"),
+                         "completeness": (meta_extra["completeness"] or {}).get("status")})
     print(f"[report] 完成：{path}")
 
 

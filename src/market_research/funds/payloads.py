@@ -9,6 +9,7 @@ import market_research.config as C
 from market_research.modeling.models import MODELS, ModelReport
 from market_research.modeling.signals import health_stats
 from market_research.modeling.trends import trend_payload
+from market_research.market.technical import series_forecast, MIN_TRAIN
 
 
 
@@ -154,6 +155,140 @@ def nav_block(panel: pd.DataFrame, nav: pd.Series) -> dict:
             "current_vol60": _jnum(vol60.iloc[-1], 5),
         },
     }
+
+
+def fund_forecast_payload(nav: pd.Series, horizons=(5, 20),
+                          max_points: int = 400) -> dict:
+    """基金净值的方向概率。
+
+    与模型详情的「趋势色带」是两件事：色带只描述已经发生的形态，
+    这里给出的是**未来 H 日上涨的模型概率**。底层复用股票/指数同一套
+    `direction_forecast`（标签按成熟期截断、每 21 日滚动重训），
+    样本不足时显式返回不可用，不补 0.5 或历史均值。
+    """
+    s = pd.Series(nav).astype(float).dropna()
+    if len(s) < MIN_TRAIN + 65:
+        return {"basis": "fund_nav", "available": False, "dates": [],
+                "horizons": [], "reason": "净值样本不足以训练方向模型",
+                "disclaimer": "模型参考值，非投资建议"}
+    try:
+        step = max(1, len(s) // max_points)
+        items = []
+        sampled = None
+        for h in horizons:
+            f = series_forecast(s, h)
+            ser = pd.Series(f["series"], index=s.index, dtype=float)
+            sl = ser.iloc[::step]
+            if len(ser) and sl.index[-1] != ser.index[-1]:
+                sl = pd.concat([sl, ser.iloc[-1:]])
+            sampled = sl if sampled is None else sampled
+            ev = f["evaluation"] or {}
+            items.append({
+                "horizon": int(h),
+                "ok": bool(f["ok"]),
+                "probability": _jnum(f["probability"], 4),
+                "baseline": _jnum(f["baseline"], 4),
+                "training_rows": int(f["training_rows"] or 0),
+                "minimum_training_rows": int(f["minimum_training_rows"] or 0),
+                "evaluation": _jsafe(ev),
+                "advantage": bool(ev.get("advantage", False)),
+                "reason": f["reason"],
+                "series": [_jnum(v, 4) for v in sl.values],
+            })
+        return {
+            "basis": "fund_nav",
+            "available": any(i["ok"] for i in items),
+            "as_of": s.index[-1].strftime("%Y-%m-%d"),
+            "dates": _dates(sampled.index) if sampled is not None else [],
+            "horizons": items,
+            "disclaimer": "基于历史净值动量的模型参考值，非买卖建议，也不代表未来收益。",
+        }
+    except Exception as exc:                              # noqa: BLE001
+        return {"basis": "fund_nav", "available": False, "dates": [],
+                "horizons": [], "reason": f"方向模型计算失败：{exc}",
+                "disclaimer": "模型参考值，非投资建议"}
+
+
+def holdings_payload(out: dict) -> dict:
+    """真实持仓拟合的序列化结果（CLI / API / 报告共用）。
+
+    保留全部披露约束：只用半年报/年报、Q2 滞后 62 天 / Q4 滞后 90 天、
+    共同行业归一、持仓基准要求 ≥60 个共同交易日。任何一项不满足都走
+    `ok=False` 并给出原因，不静默降级。
+    """
+    if not out or not out.get("ok"):
+        return {"ok": False, "code": (out or {}).get("code"),
+                "reason": (out or {}).get("reason", "持仓拟合失败"),
+                "constraints": _HOLDING_CONSTRAINTS}
+    cmp_ = out.get("compare") or {}
+    stats = cmp_.get("stats") if isinstance(cmp_.get("stats"), pd.DataFrame) else None
+    bench = out.get("benchmark") or {}
+    diag = bench.get("diagnostics")
+    return {
+        "ok": True,
+        "code": out["code"],
+        "name": out.get("name"),
+        "summary": {
+            "n_periods": int(out.get("n_periods") or 0),
+            "mad_mean": _jnum(out.get("mad_mean"), 4),
+            "corr_mean": _jnum(out.get("corr_mean"), 4),
+            "corr_first": _jnum(out.get("corr_first"), 4),
+            "corr_last": _jnum(out.get("corr_last"), 4),
+            "corr_valid": int(out.get("corr_valid") or 0),
+            "broad_exposure": _jnum(out.get("broad_exposure"), 4),
+            "unmapped_mean": _jnum(out.get("unmapped_mean"), 4),
+            "coverage_mean": _jnum(out.get("coverage_mean"), 4),
+            "dividend_yield": _jnum(out.get("dividend_yield"), 4),
+            "elapsed": _jnum(out.get("elapsed"), 1),
+        },
+        "notes": {
+            "broad": out.get("broad_note"),
+            "coverage": out.get("coverage_note"),
+            "unmapped_not_cash": "未映射权重是抓不到行业的股票仓位，不是现金。",
+            "benchmark_compare": "持仓基准与 RBSA 基准频率/信息集不同，"
+                                 "年化更高不等于更好。",
+            "benchmark_residual": "未映射股票与行业面板缺失的权重按 0 收益处理，"
+                                  "不再按现金利率计息；只有明确现金/债券部分计息。",
+        },
+        "periods": _jsafe(out["periods"].to_dict("records"))
+        if isinstance(out.get("periods"), pd.DataFrame) else [],
+        "by_industry": _jsafe(_industry_rows(out.get("by_industry"))),
+        "detail": _jsafe(out["detail"].to_dict("records"))
+        if isinstance(out.get("detail"), pd.DataFrame) else [],
+        "compare": {
+            "ok": bool(cmp_.get("ok")),
+            "reason": cmp_.get("reason"),
+            "n_days": int(cmp_.get("n_days") or 0),
+            "stats": _jsafe(stats.to_dict("records")) if stats is not None else [],
+        },
+        "benchmark": {
+            "available": bool(bench.get("available")),
+            "missing_industries": list(bench.get("missing_industries") or []),
+            "residual_treatment": bench.get("residual_treatment", ""),
+            "note": bench.get("note", ""),
+            "diagnostics": _jsafe(diag.to_dict("records"))
+            if isinstance(diag, pd.DataFrame) else [],
+        },
+        "constraints": _HOLDING_CONSTRAINTS,
+    }
+
+
+def _industry_rows(df) -> list:
+    """按行业汇总表转记录；索引名缺失时统一补成「行业」，避免接口出现 `index`。"""
+    if not isinstance(df, pd.DataFrame):
+        return []
+    out = df.reset_index()
+    if "index" in out.columns:
+        out = out.rename(columns={"index": "行业"})
+    return out.to_dict("records")
+
+
+_HOLDING_CONSTRAINTS = [
+    "只用半年报/年报（Q2/Q4）的完整持仓，季报前十大不参与",
+    "披露滞后：Q2 季末 +62 天、Q4 季末 +90 天，从披露之后起算收益",
+    "RBSA 与真实持仓只对齐共同行业，并归一到 100%；宽基暴露单独报告",
+    "持仓基准与基金/合成基准要求 ≥60 个共同交易日",
+]
 
 
 def _weights_payload(w: pd.Series, min_w: float = 0.005,
@@ -564,9 +699,46 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
 
 def _backtest_payload(code: str, name: str, model_key: str, auto_equity: bool,
                       bt: dict, health: pd.DataFrame, decision: pd.Series,
-                      elapsed: float) -> dict:
+                      elapsed: float, valuation: dict | None = None,
+                      meta_extra: dict | None = None) -> dict:
     eq = bt["equity"]
     _mn = bt.get("main_name", "择时策略(融合)")
+    hs = health_stats(health)
+    exit_s = float(C.SIGNAL["health_exit"])
+    h = health["health_score"].dropna() if "health_score" in health else pd.Series(dtype=float)
+    h_last = float(h.iloc[-1]) if len(h) else None
+    pos = int(decision.iloc[-1]) if len(decision) else None
+    # 健康分缺失时不把回测仓位的默认值当成"当前建议"，否则页面会显示一个
+    # 看起来正常的仓位。缺数据就必须显式不可用。
+    if h_last is None:
+        pos = None
+    last_dt = decision.index[-1] if len(decision) else eq.index[-1]
+    notes: List[str] = []
+    if h_last is None:
+        notes.append("健康分全部缺失，无法给出建议仓位。")
+    if hs.get("n_below_exit", 0) == 0 and hs.get("gap_to_exit") is not None:
+        notes.append(f"健康分从未触及离场线（阈值 {exit_s:+.2f}，最低 {hs['min']:+.2f}），"
+                     "门控实际不可触发，当前建议等价于买入持有。")
+    if float(hs.get("unreliable_ratio") or 0.0) >= 0.5:
+        notes.append(f"拟合在 {hs['unreliable_ratio']:.0%} 的交易日不可信，卖出被停用。")
+    if len(bt["trades"]) == 0:
+        notes.append("回测区间内没有产生任何交易。")
+    unavailable = h_last is None or pos is None
+    degraded = bool(unavailable or float(hs.get("unreliable_ratio") or 0.0) >= 0.5
+                    or (hs.get("n_below_exit", 0) == 0))
+    current = {
+        "date": last_dt.strftime("%Y-%m-%d"),
+        "available": not unavailable,
+        "degraded": degraded,
+        "position": pos,
+        "position_pct": (1.0 if pos == 1 else 0.0) if pos is not None else None,
+        "state": ("不可用" if unavailable else ("持有" if pos == 1 else "空仓")),
+        "health": _jnum(h_last, 4),
+        "distance_to_exit": (_jnum(h_last - exit_s, 3)
+                             if h_last is not None else None),
+        "notes": notes,
+        "disclaimer": "模型参考值，非投资建议；决策在 t 日收盘做出、t+1 生效。",
+    }
     return {
         "meta": {
             "code": code, "name": name,
@@ -580,8 +752,18 @@ def _backtest_payload(code: str, name: str, model_key: str, auto_equity: bool,
             # 门控诊断：零交易时必须让用户看到"健康分离离场线还有多远"，
             # 否则"无触发交易"会被误读成"信号判断为一直持有"。
             "no_trades": len(bt["trades"]) == 0,
-            "health_stats": _jsafe(health_stats(health)),
+            "health_stats": _jsafe(hs),
+            # P1-20/P2-27：口径与数据质量随回测结果一起展示
+            **(meta_extra or {}),
         },
+        "current": current,
+        "valuation": _jsafe(valuation or {}),
+        "variants": [
+            {"name": k,
+             "note": (valuation or {}).get("note") if "估值" in k else None,
+             "degraded": bool((valuation or {}).get("degraded")) if "估值" in k else False}
+            for k in (bt.get("timing_contrib_all") or {})
+        ],
         "equity": {
             "dates": _dates(eq.index),
             "series": {k: [_jnum(v, 5) for v in eq[k]] for k in eq.columns},

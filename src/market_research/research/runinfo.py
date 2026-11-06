@@ -115,6 +115,8 @@ def data_summary() -> Dict[str, Any]:
         import market_research.data.marketdata as D
         import market_research.data.storage as storage
         return {
+            "environment": getattr(C, "ENV", None),
+            "data_dir": str(getattr(C, "DATA_DIR", "")),
             "data_stamp": D.data_stamp(),
             **storage.summary(),
             "start_date": getattr(C, "START_DATE", None),
@@ -128,6 +130,31 @@ def data_summary() -> Dict[str, Any]:
         }
     except Exception as e:                                    # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+_CODE_CACHE: Dict[str, Any] = {}
+
+
+def result_provenance(data_stamp: Optional[str] = None) -> Dict[str, Any]:
+    """每个结果附带的轻量指纹（P2-34）：环境 / 代码 / 配置 / 数据版本。
+
+    git 查询在进程内只做一次；结果缓存会连同指纹一起落盘，读取旧结果时
+    仍能看到它当初的代码与配置版本，而不是被新版本覆盖。
+    """
+    import market_research.config as C
+
+    if "git" not in _CODE_CACHE:
+        _CODE_CACHE["git"] = {"commit": _git_head(), "dirty": _git_dirty()}
+    git = _CODE_CACHE["git"]
+    return {
+        "environment": getattr(C, "ENV", None),
+        "code_version": getattr(C, "CACHE_VERSION", None),
+        "config_version": getattr(C, "DATA_CACHE_VERSION", None),
+        "git_commit": git.get("commit"),
+        "git_dirty": git.get("dirty"),
+        "data_stamp": data_stamp,
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 def run_fingerprint(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
