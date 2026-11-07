@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 import market_research.config as C
+from market_research.ordering import ranked_frame
 from market_research.modeling.models import ModelZoo
 
 
@@ -151,5 +152,5 @@ class RBSA:
             "名称": [C.NAME_OF.get(c, c) for c in weights.index],
             "层级": [C.LAYER_OF.get(c, "其他") for c in weights.index],
             "权重": weights.values,
-        }).sort_values("权重", ascending=False).reset_index(drop=True)
+        }).pipe(ranked_frame, "权重", ascending=False, tie="名称")
         return df

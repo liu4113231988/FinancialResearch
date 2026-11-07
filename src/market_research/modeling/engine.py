@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 import market_research.config as C
+from market_research.ordering import ranked_frame
 from market_research.modeling.catalog import MODELS, ModelSpec
 from market_research.modeling.estimators import fit_window, estimate_equity, _score
 def _failed_report(key: str, err: Exception) -> ModelReport:
@@ -187,8 +188,8 @@ class ModelZoo:
             return {}
 
         if workers == 0:
-            import os
-            workers = max(1, min(len(keys), (os.cpu_count() or 4) - 1))
+            from market_research.resources import model_workers
+            workers = model_workers(len(keys))
         use_pool = workers > 1 and len(keys) > 1
 
         out: Dict[str, ModelReport] = {}
@@ -389,4 +390,4 @@ class ModelZoo:
         if key not in df.columns:
             key = "样本外R²"
         asc = key in ("样本外TE", "窗口内TE", "耗时")
-        return df.sort_values(key, ascending=asc).reset_index(drop=True)
+        return ranked_frame(df, key, ascending=asc)

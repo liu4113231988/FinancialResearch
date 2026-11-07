@@ -4,6 +4,7 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 import pandas as pd
 import market_research.config as C
+from market_research.ordering import ranked_series
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
 from sklearn.kernel_ridge import KernelRidge
@@ -73,7 +74,7 @@ def _clean_weights(w: np.ndarray, cols: List[str], equity_ratio: float,
         m = np.zeros_like(w)
         m[int(np.argmax(w))] = max(equity_ratio, 1e-3)
     m = m * equity_ratio / m.sum()
-    return pd.Series(m, index=cols).sort_values(ascending=False)
+    return ranked_series(pd.Series(m, index=cols))
 
 
 def _alpha_ladder(base: float, scale: float) -> List[float]:
@@ -433,7 +434,7 @@ def _fit_gbr(X, y, cols, equity_ratio, prm):
     imp = np.nan_to_num(imp)
     if imp.sum() > 0:
         imp = imp / imp.sum() * equity_ratio
-    w = pd.Series(imp, index=cols).sort_values(ascending=False)
+    w = ranked_series(pd.Series(imp, index=cols))
     r2, te = _score(pred, y)
     return FitResult(weights=w, pred=pred, r2=r2, te=te,
                      extra={"learning_rate": float(mdl.learning_rate),
@@ -458,7 +459,7 @@ def _fit_rf(X, y, cols, equity_ratio, prm):
     imp = np.asarray(mdl.feature_importances_, dtype=float)
     if imp.sum() > 0:
         imp = imp / imp.sum() * equity_ratio
-    w = pd.Series(imp, index=cols).sort_values(ascending=False)
+    w = ranked_series(pd.Series(imp, index=cols))
     r2, te = _score(pred, y)
     return FitResult(weights=w, pred=pred, r2=r2, te=te,
                      extra={"n_estimators": int(mdl.n_estimators),
@@ -534,7 +535,7 @@ def _fit_mlp(X, y, cols, equity_ratio, prm):
     imp = np.nan_to_num(imp)
     if imp.sum() > 0:
         imp = imp / imp.sum() * equity_ratio
-    w = pd.Series(imp, index=cols).sort_values(ascending=False)
+    w = ranked_series(pd.Series(imp, index=cols))
     r2, te = _score(pred, y)
     return FitResult(weights=w, pred=pred, r2=r2, te=te,
                      extra={"hidden": list(hidden), "alpha": float(mdl.alpha),

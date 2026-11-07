@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 import numpy as np
 import pandas as pd
 import market_research.config as C
+from market_research.ordering import ranked_series
 from market_research.modeling.models import MODELS, ModelReport
 from market_research.modeling.signals import health_stats
 from market_research.modeling.trends import trend_payload
@@ -37,7 +38,7 @@ def correlation_block(panel: pd.DataFrame, nav: pd.Series,
     assets = list(corr.index)
     mat = R.drop(columns=["__FUND__"]).corr()
     # 只保留与基金相关的前 top_n 个指数做矩阵展示，避免 43×43 糊成一团
-    keep = [c for c in corr.abs().sort_values(ascending=False).index[:top_n]]
+    keep = [c for c in ranked_series(corr.abs()).index[:top_n]]
     sub = mat.loc[keep, keep].copy()
     # 加上基金这一行/列，方便一眼看出谁最相关
     sub.insert(0, "【基金】", corr.reindex(keep))
@@ -55,7 +56,7 @@ def correlation_block(panel: pd.DataFrame, nav: pd.Series,
             }
 
     top_rows = []
-    for code_, v in corr.abs().sort_values(ascending=False).head(top_n).items():
+    for code_, v in ranked_series(corr.abs()).head(top_n).items():
         top_rows.append({
             "code": code_,
             "name": C.NAME_OF.get(code_, code_),
@@ -72,7 +73,7 @@ def correlation_block(panel: pd.DataFrame, nav: pd.Series,
                    "avg_corr": _jnum(float(np.mean(v)), 4),
                    "n": len(v)}
                   for k, v in layer_corr.items()]
-    layer_rows.sort(key=lambda r: -abs(r["avg_corr"] or 0))
+    layer_rows.sort(key=lambda r: (-abs(r["avg_corr"] or 0), r["layer"]))
 
     # 风格漂移：基金与 Top3 指数的滚动相关是否发生明显变化
     drift = []
@@ -326,7 +327,7 @@ def _weights_hist_payload(wh: pd.DataFrame, assets_limit: int = 8,
     """滚动权重历史：Top-N 资产的权重随时间变化（堆叠面积图）。"""
     if wh is None or wh.empty:
         return {"dates": [], "series": [], "assets": []}
-    total_w = wh.abs().sum(axis=0).sort_values(ascending=False)
+    total_w = ranked_series(wh.abs().sum(axis=0))
     top = list(total_w.head(assets_limit).index)
     step = max(1, len(wh) // max_points)
     sl = wh.iloc[::step][top].tail(max_points)

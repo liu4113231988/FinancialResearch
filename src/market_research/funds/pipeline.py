@@ -11,6 +11,7 @@ import pandas as pd
 
 import market_research.audit as audit
 import market_research.config as C
+from market_research.ordering import ranked_series
 import market_research.data.marketdata as D
 from market_research.modeling.backtest import run_backtest, score_to_position
 from market_research.funds.rbsa import RBSA
@@ -124,7 +125,7 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
 
     # ---------- 4. 打包
     latest_w = fit["weights"].iloc[-1]
-    latest_w = latest_w[latest_w > 0].sort_values(ascending=False)
+    latest_w = ranked_series(latest_w[latest_w > 0])
     exposure = RBSA.latest_exposure(latest_w)
     snap = SignalEngine.snapshot(sig, name)
 

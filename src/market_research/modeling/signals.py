@@ -38,6 +38,7 @@ import numpy as np
 import pandas as pd
 
 import market_research.config as C
+from market_research.ordering import rows_order
 
 # 候选指数 → 估值/股息面板列名。取数源为 csindex 官方接口
 # （`stock_zh_index_value_csindex`，日频），列名→代码映射见
@@ -211,7 +212,7 @@ class SignalEngine:
             "weight": round(float(last.get(a, 0.0)), 5),
             "kind": "行业" if str(a).startswith("801") else "其他",
         } for a in fallback_of if float(last.get(a, 0.0)) > 1e-4]
-        fb_assets.sort(key=lambda r: -r["weight"])
+        fb_assets = rows_order(fb_assets, value="weight", tie="code")
         fb_last = float(fb_w.iloc[-1]) if len(fb_w) else 0.0
         cov_last = coverage.dropna()
         degraded = bool(fb_assets) or fb_last > 1e-12 or len(syms) == 0

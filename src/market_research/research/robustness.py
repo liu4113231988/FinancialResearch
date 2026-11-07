@@ -36,6 +36,7 @@ import numpy as np
 import pandas as pd
 
 import market_research.config as C
+from market_research.ordering import ranked_frame
 
 
 def _label_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -139,7 +140,7 @@ def common_factor_analysis(excess: pd.DataFrame,
         })
     df = pd.DataFrame(rows)
     if len(df):
-        df = df.sort_values("NW_t值", ascending=False).reset_index(drop=True)
+        df = ranked_frame(df, "NW_t值", ascending=False, tie="基金")
     return {"per_fund": df,
             "n_sig": int(df["显著(5%)"].sum()) if len(df) else 0,
             "n_total": int(len(df)),

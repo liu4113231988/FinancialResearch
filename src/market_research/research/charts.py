@@ -14,6 +14,7 @@ import pandas as pd
 from matplotlib.ticker import FuncFormatter
 
 import market_research.config as C
+from market_research.ordering import ranked_series
 
 plt.rcParams.update({
     "font.sans-serif": ["Microsoft YaHei", "Noto Sans SC", "SimHei", "DejaVu Sans"],
@@ -98,7 +99,7 @@ def chart_equity(res: dict) -> str:
 # ------------------------------------------------------------------ 2 风格暴露演变
 def chart_exposure(res: dict, top_n: int = 6) -> str:
     w = res["weights_hist"]
-    tot = w.sum(0).sort_values(ascending=False)
+    tot = ranked_series(w.sum(0))
     keep = [c for c in tot.index[:top_n] if tot[c] > 0]
     sub = w[keep].copy()
     other = w.drop(columns=keep).sum(1)

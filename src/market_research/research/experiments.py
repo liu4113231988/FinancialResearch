@@ -22,6 +22,7 @@ import pandas as pd
 from scipy.stats import rankdata
 
 import market_research.config as C
+from market_research.ordering import ranked_series, series_order
 from market_research.modeling.backtest import perf_metrics, score_to_position, _fwd_ret
 from market_research.modeling.signals import SignalEngine
 
@@ -429,7 +430,7 @@ def _top_moves(a: pd.Series, b: pd.Series, nm=None, k: int = 2,
     """把一次权重变化写成人话："沪深300 +12.3%、中证500 −8.1%"。"""
     delta = (pd.Series(b, dtype=float) - pd.Series(a, dtype=float))
     delta = delta.fillna(0.0)
-    order = delta.abs().sort_values(ascending=False).index
+    order = series_order(delta.abs())
     parts = []
     for c in order[:k]:
         dv = float(delta[c])
@@ -501,7 +502,7 @@ def style_drift(weights: pd.DataFrame,
     zv = _robust_z(sv) if len(sv) else np.array([])
 
     hits = [i for i in range(len(sv)) if zv[i] >= z_thresh]
-    hits = sorted(hits, key=lambda i: -sv[i])[:max(1, int(top_k))]
+    hits = sorted(hits, key=lambda i: (-sv[i], i))[:max(1, int(top_k))]
     change_points = [{
         "日期": str(w.index[i + 1].date()),
         "变化幅度": round(float(sv[i]), 4),
@@ -515,7 +516,7 @@ def style_drift(weights: pd.DataFrame,
     half_dist = float((wa - wb).abs().sum())
 
     def _top(s: pd.Series, k: int = 3):
-        o = s[s > 1e-6].sort_values(ascending=False).head(k)
+        o = ranked_series(s[s > 1e-6]).head(k)
         return [{"名称": nm.get(c, c), "权重": round(float(v), 4)}
                 for c, v in o.items()]
 

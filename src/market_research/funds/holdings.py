@@ -45,6 +45,7 @@ import numpy as np
 import pandas as pd
 
 import market_research.config as C
+from market_research.ordering import ranked_frame
 from market_research.data.files import _atomic_csv_write
 
 LOG = logging.getLogger(__name__)
@@ -558,10 +559,12 @@ def align_vs_rbsa(weights: pd.DataFrame, exposure: pd.DataFrame,
     df = pd.DataFrame(rows).sort_values("季末")
     dd = pd.DataFrame(detail)
     # 汇总：跨期平均
-    agg = (dd.groupby("行业")
-           .agg(RBSA权重=("RBSA权重", "mean"), 真实暴露=("真实暴露", "mean"),
-                偏差=("偏差", "mean"), 平均绝对偏差=("偏差", lambda s: s.abs().mean()))
-           .sort_values("平均绝对偏差", ascending=False))
+    agg = ranked_frame(dd.groupby("行业")
+                       .agg(RBSA权重=("RBSA权重", "mean"), 真实暴露=("真实暴露", "mean"),
+                            偏差=("偏差", "mean"),
+                            平均绝对偏差=("偏差", lambda s: s.abs().mean())
+                            ).reset_index(),
+                       "平均绝对偏差", ascending=False, tie="行业")
     broad = float(df["RBSA宽基暴露"].mean())
     broad_note = (
         f"RBSA 拟合出的宽基暴露平均 {broad:.1%} —— 这部分**无法与持仓对应**"

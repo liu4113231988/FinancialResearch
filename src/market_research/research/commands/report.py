@@ -21,6 +21,7 @@ import pandas as pd
 
 import market_research.audit as audit
 import market_research.config as C
+from market_research.ordering import ranked_frame
 from market_research.research.charts import build_all
 from market_research.funds.pipeline import run_fund
 from market_research.research.report import build_report
@@ -173,7 +174,8 @@ def main(argv=None, *, prog=None):
                             "超额夏普_vs对照", "超额年化_vs对照"]
                 if c in e2.columns]
         agg = (e2.groupby("方案", as_index=False)[cols[1:]].mean()
-               .sort_values("超额夏普_vs对照", ascending=False).round(4))
+               .pipe(ranked_frame, "超额夏普_vs对照", ascending=False, tie="方案")
+               .round(4))
         # 买入持有不是"相对恒定仓位"的方案，超额列留空以免误读
         bh = agg["方案"].astype(str).str.startswith("买入持有")
         agg.loc[bh, ["超额夏普_vs对照", "超额年化_vs对照"]] = np.nan
