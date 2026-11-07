@@ -556,10 +556,15 @@ function renderWatchlist() {
   if (!sel || !$('btnWatch')) return;          // 兼容旧缓存页面缺控件
   const kind = currentKind();
   const codes = getWatchlist();
-  // 非基金种类下，自选控件对基金无意义，隐藏即可（基金页才显示）
+  // 非基金种类下自选控件不可用；保留占位而不是 display:none，避免顶栏横向跳动
   const isFund = kind === 'fund';
-  sel.hidden = !isFund;
-  if ($('btnWatch')) $('btnWatch').hidden = !isFund;
+  const slot = $('fundSearchControls');
+  if (slot) {
+    slot.classList.toggle('is-off', !isFund);
+    slot.setAttribute('aria-hidden', String(!isFund));
+  }
+  sel.disabled = !isFund;
+  $('btnWatch').disabled = !isFund;
   if (!isFund) return;
   const names = Object.fromEntries((S.cat?.known_funds || []).map(f => [f.code, f.name]));
   sel.innerHTML = '';

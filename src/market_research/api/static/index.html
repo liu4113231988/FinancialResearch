@@ -48,10 +48,12 @@
     <select id="presetSel" title="示例基金">
       <option value="">— 示例 —</option>
     </select>
-    <select id="watchSel" title="自选基金">
-      <option value="">— 自选 —</option>
-    </select>
-    <button type="button" id="btnWatch" class="btn ghost" title="把当前基金加入/移出自选">☆</button>
+    <span class="search-fund is-off" id="fundSearchControls" aria-hidden="true">
+      <select id="watchSel" title="自选基金">
+        <option value="">— 自选 —</option>
+      </select>
+      <button type="button" id="btnWatch" class="btn ghost" title="把当前基金加入/移出自选">☆</button>
+    </span>
   </form>
 </header>
 

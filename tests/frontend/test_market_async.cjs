@@ -37,9 +37,11 @@ function setup(handler) {
   assert(calls.includes('/api/job/pending/cancel'));
   assert.equal(h.d.getElementById('runBtn').disabled,false);
   h.d.querySelector('[data-asset="fund"]').click();
-  assert.equal(h.d.getElementById('watchSel').hidden,false);
+  assert.equal(h.d.getElementById('fundSearchControls').classList.contains('is-off'), false);
+  assert.equal(h.d.getElementById('watchSel').disabled, false);
   h.d.querySelector('[data-asset="stock"]').click();
-  assert.equal(h.d.getElementById('watchSel').hidden,true);
+  assert.equal(h.d.getElementById('fundSearchControls').classList.contains('is-off'), true);
+  assert.equal(h.d.getElementById('watchSel').disabled, true);
   h.close();
 
   let reads=0;

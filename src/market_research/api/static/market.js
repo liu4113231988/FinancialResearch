@@ -30,6 +30,8 @@ window.MarketApp = (() => {
     el('main').hidden = kind !== 'fund' || !fund.hasResult();
     el('empty').hidden = kind !== 'fund' || fund.hasResult();
     el('progressWrap').hidden = true;
+    // 两个视图高度不同，切换后若停在旧偏移会看到空白或页面被压缩，统一回到顶部
+    if (window.scrollY > 0) window.scrollTo({ top: 0, behavior: 'auto' });
     el('runBtn').disabled = false;
     el('marketRecalculate').disabled = el('marketRefresh').disabled = false;
     el('fundApply').disabled = false;

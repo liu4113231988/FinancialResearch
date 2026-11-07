@@ -13,6 +13,7 @@
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{background:var(--bg);color:var(--fg);
   font:14px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+html{scrollbar-gutter:stable}
 body{min-height:100vh}
 
 /* ---------------- 顶栏 ---------------- */
@@ -52,7 +53,13 @@ body{min-height:100vh}
   border:1px solid var(--line);white-space:nowrap;letter-spacing:.2px}
 
 /* ---- 搜索区 ---- */
-.search{display:flex;gap:10px;align-items:center;flex:none}
+.search{display:flex;gap:10px;align-items:center;flex:0 1 auto;min-width:0}
+/* 基金专有的自选控件保留占位：切换资产类型时搜索区/居中导航不因显隐而位移 */
+.search-fund{display:flex;align-items:center;gap:10px;flex:none}
+.search-fund.is-off{visibility:hidden;pointer-events:none}
+.search input{flex:0 1 auto;min-width:90px}
+.search .control-select{flex:0 1 auto;min-width:96px}
+.asset-nav{flex:none}
 .search input{width:252px;padding:10px 14px;border-radius:10px;
   border:1px solid var(--line2);background:var(--bg2);color:var(--fg);
   font-size:13.5px;font-family:var(--mono);letter-spacing:.6px;
