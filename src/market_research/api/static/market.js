@@ -22,7 +22,6 @@ window.MarketApp = (() => {
     if (fund.invalidate) fund.invalidate();
     kind = next;
     result = views[kind].result || null;
-    if (fund.renderWatchlist) fund.renderWatchlist();
     charts.forEach(c => c.dispose()); charts.clear();
     document.querySelectorAll('[data-asset]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.asset === kind)));
     el('marketView').hidden = kind === 'fund';
@@ -44,6 +43,8 @@ window.MarketApp = (() => {
     el('presetSel').replaceChildren(new Option('— 示例 —', ''), ...items.map(x => new Option(`${x.code} ${x.name}`, x.code)));
     el('presetSel').setAttribute('aria-label', kind === 'fund' ? '示例基金' : kind === 'stock' ? '示例股票' : '示例指数');
     el('presetSel').title = kind === 'fund' ? '示例基金' : kind === 'stock' ? '示例股票' : '示例指数';
+    // 自选列表与 ☆/★ 依赖当前代码，必须放在 codeInput 回填之后
+    if (fund.renderWatchlist) fund.renderWatchlist();
     if (kind === 'fund') {
       if (fund.hasResult()) fund.show();
       return;

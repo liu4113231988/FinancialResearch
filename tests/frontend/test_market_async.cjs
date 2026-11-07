@@ -13,7 +13,9 @@ function setup(handler) {
   w.echarts = {init:()=>({setOption() {},resize() {},dispose() {}})};
   w.eval(source);
   w.$ = id => d.getElementById(id); w.currentKind = () => w.MarketApp.kind;
-  w.getWatchlist = () => []; w.S = {cat:{known_funds:[]}};
+  w.getWatchlist = () => ({fund:['110022'],stock:['600519'],index:['sh000300']})[w.currentKind()] || [];
+  w.S = {cat:{known_funds:[{code:'110022',name:'测试基金'}],
+    assets:{stocks:[{code:'600519',name:'贵州茅台'}],indices:[{code:'sh000300',name:'沪深300'}]}}};
   w.eval(app.slice(app.indexOf('function renderWatchlist()'), app.indexOf('function toggleWatchlist()')));
   w.MarketApp.init({known_funds:[],assets:{stocks:[],indices:[]}}, {
     request:handler, alert() {}, fund:{invalidate() {},hasResult:()=>false,renderWatchlist:w.renderWatchlist}
@@ -36,12 +38,17 @@ function setup(handler) {
   resolvePost({job_id:'pending'}); await first;
   assert(calls.includes('/api/job/pending/cancel'));
   assert.equal(h.d.getElementById('runBtn').disabled,false);
+  const watchOptions = () => [...h.d.getElementById('watchSel').options].map(o => o.textContent);
   h.d.querySelector('[data-asset="fund"]').click();
-  assert.equal(h.d.getElementById('fundSearchControls').classList.contains('is-off'), false);
+  assert.equal(h.d.getElementById('fundSearchControls'), null);   // 旧占位槽已移除
   assert.equal(h.d.getElementById('watchSel').disabled, false);
+  assert.deepEqual(watchOptions(), ['— 自选 (1) —', '110022 测试基金']);
+  // 股票/指数同样支持自选，且各自读取独立的列表与名称
   h.d.querySelector('[data-asset="stock"]').click();
-  assert.equal(h.d.getElementById('fundSearchControls').classList.contains('is-off'), true);
-  assert.equal(h.d.getElementById('watchSel').disabled, true);
+  assert.equal(h.d.getElementById('watchSel').disabled, false);
+  assert.deepEqual(watchOptions(), ['— 自选 (1) —', '600519 贵州茅台']);
+  h.d.querySelector('[data-asset="index"]').click();
+  assert.deepEqual(watchOptions(), ['— 自选 (1) —', 'sh000300 沪深300']);
   h.close();
 
   let reads=0;

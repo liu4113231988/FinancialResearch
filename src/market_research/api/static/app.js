@@ -556,17 +556,11 @@ function renderWatchlist() {
   if (!sel || !$('btnWatch')) return;          // 兼容旧缓存页面缺控件
   const kind = currentKind();
   const codes = getWatchlist();
-  // 非基金种类下自选控件不可用；保留占位而不是 display:none，避免顶栏横向跳动
-  const isFund = kind === 'fund';
-  const slot = $('fundSearchControls');
-  if (slot) {
-    slot.classList.toggle('is-off', !isFund);
-    slot.setAttribute('aria-hidden', String(!isFund));
-  }
-  sel.disabled = !isFund;
-  $('btnWatch').disabled = !isFund;
-  if (!isFund) return;
-  const names = Object.fromEntries((S.cat?.known_funds || []).map(f => [f.code, f.name]));
+  // 三种资产各自一份自选池；基金沿用旧 key 兼容既有数据，股票/指数各用独立 key。
+  const pool = kind === 'fund'
+    ? (S.cat?.known_funds || [])
+    : ((kind === 'stock' ? S.cat?.assets?.stocks : S.cat?.assets?.indices) || []);
+  const names = Object.fromEntries(pool.map(item => [item.code, item.name]));
   sel.innerHTML = '';
   const head = document.createElement('option');
   head.value = '';
@@ -578,18 +572,24 @@ function renderWatchlist() {
     opt.textContent = `${code} ${names[code] || ''}`.trim();
     sel.appendChild(opt);
   });
-  const current = S.result?.code || $('codeInput').value.trim();
+  const typed = $('codeInput').value.trim();
+  const current = kind === 'fund' ? (S.result?.code || typed) : typed;
   $('btnWatch').textContent = codes.includes(current) ? '★' : '☆';
 }
 function toggleWatchlist() {
   const kind = currentKind();
-  if (kind !== 'fund') { showAlert('当前不是基金页面，自选仅对基金可用。'); return; }
-  const code = S.result?.code || $('codeInput').value.trim();
-  if (!/^\d{6}$/.test(code)) { showAlert('请先输入有效的 6 位基金代码'); return; }
+  const label = {fund: '基金', stock: '股票', index: '指数'}[kind];
+  const typed = $('codeInput').value.trim();
+  const code = kind === 'fund' ? (S.result?.code || typed) : typed;
+  if (!validWatchCode(code, kind)) {
+    const example = kind === 'fund' ? '110022' : kind === 'stock' ? '600519' : 'sh000300';
+    showAlert(`请先输入有效的${label}代码，例如 ${example}`);
+    return;
+  }
   const codes = getWatchlist();
   const i = codes.indexOf(code);
-  if (i >= 0) { codes.splice(i, 1); showAlert(`已把 ${code} 移出自选。`); }
-  else { codes.push(code); showAlert(`已把 ${code} 加入自选。`); }
+  if (i >= 0) { codes.splice(i, 1); showAlert(`已把 ${code} 移出${label}自选。`); }
+  else { codes.push(code); showAlert(`已把 ${code} 加入${label}自选。`); }
   setWatchlist(codes);
   renderWatchlist();
 }
@@ -721,10 +721,11 @@ function exportResult() {
   renderWatchlist();
   $('btnWatch').onclick = toggleWatchlist;
   $('watchSel').onchange = e => {
-    if (currentKind() !== 'fund') return;
-    if (!e.target.value) return;
-    $('codeInput').value = e.target.value;
-    run(e.target.value);
+    const code = e.target.value;
+    if (!code) return;
+    $('codeInput').value = code;
+    if (window.MarketApp && MarketApp.kind !== 'fund') MarketApp.submit(code);
+    else run(code);
     e.target.value = '';            // 复位，便于下次从同一入口选择
   };
   $('btnExport').onclick = exportResult;

@@ -36,25 +36,6 @@
     <button type="button" data-asset="fund" aria-pressed="false"><span>02</span> 基金</button>
     <button type="button" data-asset="index" aria-pressed="false"><span>03</span> 指数</button>
   </nav>
-  <form class="search" id="searchForm" autocomplete="off">
-    <label class="sr-only" for="codeInput">证券代码</label><input id="codeInput" placeholder="股票代码，如 600519" maxlength="8" />
-    <button type="submit" id="runBtn" class="btn primary">
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
-        aria-hidden="true"><path d="M2.6 8h9.2M8.4 4.2 12.2 8l-3.8 3.8"
-        stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
-        stroke-linejoin="round"/></svg>
-      开始分析
-    </button>
-    <select id="presetSel" title="示例基金">
-      <option value="">— 示例 —</option>
-    </select>
-    <span class="search-fund is-off" id="fundSearchControls" aria-hidden="true">
-      <select id="watchSel" title="自选基金">
-        <option value="">— 自选 —</option>
-      </select>
-      <button type="button" id="btnWatch" class="btn ghost" title="把当前基金加入/移出自选">☆</button>
-    </span>
-  </form>
 </header>
 
 <div class="workspace-bar">
@@ -62,9 +43,33 @@
   <button class="data-center-toggle" id="openDataCenter" type="button" aria-haspopup="dialog"><span id="syncIndicator">读取同步状态…</span><span aria-hidden="true"> ↗</span></button>
 </div>
 
-<!-- P2-36：数据来源与免责声明（显著位置；文案/位置可由后端配置） -->
-<div class="disclosure-banner" id="disclosureBanner" role="note">
-  <b>数据与使用声明</b>　数据来源为公开抓取，存在延迟与不完整；结论仅用于研究参考，不构成投资建议。
+<!-- 内容区顶部：工具栏在上、声明横幅在下，两者与视图共用同一内容宽度 -->
+<div class="research-entry">
+  <!-- 内容区工具栏：搜索、示例与自选；三种资产共用，顶栏只保留品牌与切换 -->
+  <section class="research-toolbar" aria-label="证券研究入口">
+    <form class="search" id="searchForm" autocomplete="off">
+      <label class="sr-only" for="codeInput">证券代码</label><input id="codeInput" placeholder="股票代码，如 600519" maxlength="8" />
+      <button type="submit" id="runBtn" class="btn primary">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
+          aria-hidden="true"><path d="M2.6 8h9.2M8.4 4.2 12.2 8l-3.8 3.8"
+          stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+          stroke-linejoin="round"/></svg>
+        开始分析
+      </button>
+      <select id="presetSel" title="示例基金">
+        <option value="">— 示例 —</option>
+      </select>
+      <select id="watchSel" title="自选">
+        <option value="">— 自选 —</option>
+      </select>
+      <button type="button" id="btnWatch" class="btn ghost" title="把当前证券加入/移出自选">☆</button>
+    </form>
+  </section>
+
+  <!-- P2-36：数据来源与免责声明（显著位置；文案/位置可由后端配置） -->
+  <div class="disclosure-banner" id="disclosureBanner" role="note">
+    <b>数据与使用声明</b>　数据来源为公开抓取，存在延迟与不完整；结论仅用于研究参考，不构成投资建议。
+  </div>
 </div>
 
 <dialog id="dataCenter" aria-labelledby="dataCenterTitle">
