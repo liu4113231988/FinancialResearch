@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import market_research.config as C
+from market_research import logs
 
 _JOB_HANDLE = None
 
@@ -19,6 +20,7 @@ def contain_children():
         return
     import ctypes
     from ctypes import wintypes as W
+    from market_research.resources import job_memory_mb
     class Basic(ctypes.Structure):
         _fields_=[('process_time',ctypes.c_int64),('job_time',ctypes.c_int64),('flags',W.DWORD),
                   ('min_memory',ctypes.c_size_t),('max_memory',ctypes.c_size_t),('process_limit',W.DWORD),
@@ -38,6 +40,12 @@ def contain_children():
     if not handle:
         raise ctypes.WinError(ctypes.get_last_error())
     limits=Limits();limits.basic.flags=0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    memory_mb=job_memory_mb()
+    if memory_mb:
+        # 进程级内存上限：超限时 Windows 让分配失败并可能终止进程，
+        # supervisor 会按崩溃重试，最终给出明确失败原因。
+        limits.basic.flags|=0x100             # JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        limits.process_memory=memory_mb*1024*1024
     if not kernel.SetInformationJobObject(handle,9,ctypes.byref(limits),ctypes.sizeof(limits)) or not kernel.AssignProcessToJobObject(handle,kernel.GetCurrentProcess()):
         error=ctypes.get_last_error();kernel.CloseHandle(handle);raise ctypes.WinError(error)
     _JOB_HANDLE=handle
@@ -85,9 +93,16 @@ def exclusive(name):
 
 
 def launch(module,*arguments,log_name='worker.log'):
-    C.DATA_DIR.mkdir(parents=True,exist_ok=True)
+    # 子进程的标准输出由父进程重定向到日志文件；该句柄在子进程整个生命周期
+    # 内不可重命名（Windows），因此轮转只能在启动前做一次。任务日志按保留期
+    # 清理，长跑进程的日志则靠下次启动时轮转。
+    path=logs.log_dir()/log_name
+    path.parent.mkdir(parents=True,exist_ok=True)
+    logs.rotate(path)
+    if not log_name.startswith('job-'):
+        logs.prune_job_logs(path.parent)
     environment={**os.environ,'FIL_HOME':str(C.ROOT),'FIL_DATA_DIR':str(C.DATA_DIR),'PYTHONUNBUFFERED':'1','PYTHONUTF8':'1'}
-    with (C.DATA_DIR/log_name).open('ab') as log:
+    with path.open('ab') as log:
         return subprocess.Popen([sys.executable,'-m',module,*arguments],cwd=C.ROOT,env=environment,
                                 stdin=subprocess.DEVNULL,stdout=log,stderr=log,
                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0,

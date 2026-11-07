@@ -18,6 +18,7 @@ import pandas as pd
 
 import market_research.config as C
 import market_research.data.storage as storage
+from market_research import logs
 
 LOG = logging.getLogger(__name__)
 SHANGHAI = timezone(timedelta(hours=8))
@@ -318,13 +319,8 @@ def serve():
         LOG.info("FIL_SYNC_ENABLED=0，跳过同步调度")
         return
     schedule_time()
-    from logging.handlers import RotatingFileHandler
     if not LOG.handlers:
-        C.DATA_DIR.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(C.DATA_DIR / "sync.log", maxBytes=2_000_000,
-                                      backupCount=3, encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        LOG.addHandler(handler)
+        logs.configure("sync")
     while True:
         try:
             tick()
@@ -343,7 +339,7 @@ def main():
         os.environ["FIL_SYNC_TIME"] = args.time
     schedule_time()
     C.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(level=logging.INFO, filename=str(C.DATA_DIR / "sync.log"), encoding="utf-8")
+    logs.configure("sync")
     if args.once:
         tick()
     else:

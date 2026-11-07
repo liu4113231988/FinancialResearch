@@ -2,10 +2,12 @@
 import argparse
 import logging
 import os
+import sys
 import threading
 import time
 
 import market_research.config as C
+from market_research import logs
 from market_research.tasks.jobs import JOBS
 from market_research.tasks.processes import exclusive, launch, contain_children, terminate_tree
 from market_research.settings import Settings
@@ -38,6 +40,8 @@ def execute(jid,token):
     if not job or job['token']!=token or job['status']!='running':
         return
     contain_children()
+    from market_research.resources import apply_memory_limit, job_memory_mb
+    apply_memory_limit()          # POSIX 在此生效；Windows 由 Job Object 限制
     done=threading.Event()
     def heartbeat():
         while not done.wait(5):
@@ -54,6 +58,10 @@ def execute(jid,token):
         with bind_attempt(token):
             from market_research.services.analysis import execute as calculate
             JOBS.finish(jid,calculate(job['operation'],job['arguments'],jid))
+    except MemoryError:
+        LOG.exception('任务超出内存上限 %s',jid)
+        JOBS.fail(jid,f'计算超出内存上限（FIL_JOB_MEMORY_MB={job_memory_mb()}MB），'
+                      '请减小窗口/模型数或提高上限后重试',token=token)
     except Exception as error:
         LOG.exception('任务失败 %s',jid)
         JOBS.fail(jid,f'{type(error).__name__}: {str(error)[:400]}',token=token)
@@ -125,7 +133,15 @@ def main():
     parser.add_argument('--execute',help=argparse.SUPPRESS)
     parser.add_argument('--token',help=argparse.SUPPRESS)
     args=parser.parse_args()
-    logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(name)s %(message)s')
+    if args.execute:
+        # 任务子进程的 stdout/stderr 已被 supervisor 重定向到 job-<id>.log，
+        # 保持流式写入即可（该文件随任务结束而停止增长，由保留期清理）。
+        logging.basicConfig(level=logs.level(),
+                            format='%(asctime)s %(levelname)s %(name)s %(message)s')
+    else:
+        logs.configure('worker')
+        if sys.stderr.isatty():
+            logging.getLogger().addHandler(logging.StreamHandler())
     if args.stop:
         C.DATA_DIR.mkdir(parents=True,exist_ok=True)
         (C.DATA_DIR/'worker.stop').touch()

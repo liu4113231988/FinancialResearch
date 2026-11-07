@@ -18,6 +18,9 @@ class Settings:
     job_timeout: int = 900
     max_attempts: int = 3
     auto_services: bool = True
+    job_workers: int = 0
+    job_workers_max: int = 0
+    job_memory_mb: int = 0
 
     @classmethod
     def load(cls):
@@ -27,4 +30,7 @@ class Settings:
                    queue_limit=max(1, int(os.environ.get("FIL_QUEUE_LIMIT", "100"))),
                    job_timeout=max(1, int(os.environ.get("FIL_JOB_TIMEOUT", "900"))),
                    max_attempts=max(1, int(os.environ.get("FIL_JOB_ATTEMPTS", "3"))),
-                   auto_services=os.environ.get("FIL_AUTO_SERVICES", "1") != "0")
+                   auto_services=os.environ.get("FIL_AUTO_SERVICES", "1") != "0",
+                   job_workers=max(0, int(os.environ.get("FIL_JOB_WORKERS", "0"))),
+                   job_workers_max=max(0, int(os.environ.get("FIL_JOB_WORKERS_MAX", "0"))),
+                   job_memory_mb=max(0, int(os.environ.get("FIL_JOB_MEMORY_MB", "0"))))
