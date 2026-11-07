@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html as _html
+import base64
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -13,6 +14,22 @@ import pandas as pd
 import market_research.config as C
 import market_research.disclosure as disclosure
 import market_research.research.charts as CH
+
+
+def _head_icons() -> str:
+    """报告多以本地 HTML 打开，图标内嵌 data URI，避免相对路径失效。"""
+    try:
+        from importlib.resources import files
+        static = files("market_research.api") / "static"
+        svg = (static / "favicon.svg").read_text(encoding="utf-8")
+        png = (static / "apple-touch-icon.png").read_bytes()
+    except Exception:
+        return ""
+    svg_uri = ("data:image/svg+xml;base64,"
+               + base64.b64encode(svg.encode("utf-8")).decode("ascii"))
+    png_uri = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+    return (f'<link rel="icon" type="image/svg+xml" href="{svg_uri}"/>\n'
+            f'<link rel="apple-touch-icon" href="{png_uri}"/>')
 
 
 # ------------------------------------------------------------------ 工具
@@ -794,6 +811,7 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
+{_head_icons()}
 <title>主动基金指数拟合与趋势估值择时 · 研究报告</title>
 <style>{CSS}</style></head><body><div class="wrap">
 

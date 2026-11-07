@@ -71,6 +71,30 @@ class VersionHeader:
         await self.app(scope,receive,wrapped)
 
 
+_CACHEABLE_SUFFIXES=('.ico','.svg','.png','.webmanifest')
+
+
+class IconCache:
+    """图标与 manifest 允许浏览器缓存；内容变化时仍由 ETag/Last-Modified 校验。"""
+    def __init__(self,app,seconds=86400):
+        self.app=app
+        self.seconds=seconds
+
+    async def __call__(self,scope,receive,send):
+        if scope['type']!='http' or not scope['path'].lower().endswith(_CACHEABLE_SUFFIXES):
+            return await self.app(scope,receive,send)
+        async def wrapped(message):
+            if message['type']=='http.response.start':
+                headers=list(message.get('headers') or [])
+                if not any(key.lower()==b'cache-control' for key,_ in headers):
+                    headers.append((b'cache-control',
+                                    f'public, max-age={self.seconds}'.encode('ascii')))
+                    message={**message,'headers':headers}
+            await send(message)
+        await self.app(scope,receive,wrapped)
+
+
+
 @asynccontextmanager
 async def lifespan(app):
     JOBS.migrate()
@@ -86,6 +110,7 @@ def create_app():
                 responses={400:{'model':ErrorResponse},429:{'model':ErrorResponse}})
     app.add_middleware(VersionHeader)
     app.add_middleware(BodyLimit)
+    app.add_middleware(IconCache)
     # P2-24：默认单用户不启用认证；开启后用身份上下文贯通调用链。
     app.add_middleware(AccessControl)
     LOG.info('访问控制：%s', mode_description())
@@ -119,6 +144,25 @@ def create_app():
     async def unexpected(request:Request,error:Exception):
         LOG.error('请求处理失败 %s',request.url.path,exc_info=error)
         return JSONResponse({'ok':False,'error':'服务处理失败，请查看运行日志后重试'},status_code=500)
+
+    # 浏览器与 iOS 会直接请求根路径图标；显式路由保证类型与缓存头，
+    # 也避免静态目录之外的默认图标请求落到 SPA 兜底。
+    @app.get('/favicon.ico',include_in_schema=False)
+    def favicon_ico():
+        return FileResponse(STATIC/'favicon.ico',media_type='image/x-icon')
+
+    @app.get('/favicon.svg',include_in_schema=False)
+    def favicon_svg():
+        return FileResponse(STATIC/'favicon.svg',media_type='image/svg+xml')
+
+    @app.get('/apple-touch-icon.png',include_in_schema=False)
+    def apple_touch_icon():
+        return FileResponse(STATIC/'apple-touch-icon.png',media_type='image/png')
+
+    @app.get('/site.webmanifest',include_in_schema=False)
+    def web_manifest():
+        return FileResponse(STATIC/'site.webmanifest',
+                            media_type='application/manifest+json')
 
     @app.get('/',include_in_schema=False)
     def index():

@@ -5,6 +5,8 @@
 用最小 main 字典渲染，不依赖网络、缓存或 akshare。
 """
 import os
+import base64
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -254,6 +256,24 @@ class HoldingsSectionRenderTests(unittest.TestCase):
         self.assertIn("3.6 真实持仓拟合验证", html)
         self.assertIn("未生成：共同行业不足 60 个交易日", html)
         self.assertIn("不代表持仓拟合通过", html)
+
+
+class ReportIconTests(unittest.TestCase):
+    """报告是本地 HTML，图标必须以 data URI 内嵌，图标声明先于标题。"""
+
+    def test_report_head_embeds_decodable_icons(self):
+        html = _render(_main())
+        icon = html.find('rel="icon"')
+        title = html.find("<title>")
+        self.assertGreater(icon, -1)
+        self.assertLess(icon, title)
+
+        svg = re.search(r'href="data:image/svg\+xml;base64,([^"]+)"', html)
+        png = re.search(r'href="data:image/png;base64,([^"]+)"', html)
+        self.assertIsNotNone(svg)
+        self.assertIsNotNone(png)
+        self.assertTrue(base64.b64decode(svg.group(1)).startswith(b"<svg"))
+        self.assertTrue(base64.b64decode(png.group(1)).startswith(b"\x89PNG"))
 
 
 if __name__ == "__main__":

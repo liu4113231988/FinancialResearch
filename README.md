@@ -284,7 +284,7 @@ node tests/frontend/test_refit.js
 node tests/frontend/test_ui_async.cjs
 ```
 
-最新完整回归 402 项 unittest（2026-11-07 执行通过）、两套脚本式回归及两套前端回归通过；当轮改动未重跑真实浏览器渲染检查与 `uv build`，wheel 独立安装的历史记录不代表本轮重新打包验证。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
+最新完整回归 407 项 unittest（2026-11-07 执行通过）、两套脚本式回归及两套前端回归通过；本轮未重跑真实浏览器渲染检查，已执行 `uv build` 确认 wheel 包含新增图标资源。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
 
 依赖以 `pyproject.toml` 和 `uv.lock` 为准。`requirements.txt` 引用运行依赖兼容导出，更新命令为：
 

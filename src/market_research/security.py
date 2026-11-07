@@ -22,7 +22,9 @@ LOG = logging.getLogger(__name__)
 
 # 探针与静态资源不需要业务授权；/api/v1 与兼容路径同时公开。
 PUBLIC_PATHS = frozenset({"/", "/api/health", "/api/ready", "/api/disclosure",
-                          "/api/v1/health", "/api/v1/ready", "/api/v1/disclosure"})
+                          "/api/v1/health", "/api/v1/ready", "/api/v1/disclosure",
+                          "/favicon.ico", "/favicon.svg",
+                          "/apple-touch-icon.png", "/site.webmanifest"})
 PUBLIC_PREFIXES = ("/static/", "/vendor/")
 
 

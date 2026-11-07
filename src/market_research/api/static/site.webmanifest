@@ -1,0 +1,15 @@
+{
+  "name": "Market Research · 市场研究工作台",
+  "short_name": "Market Research",
+  "description": "股票、基金、指数研究",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "/static/favicon.svg", "sizes": "any", "type": "image/svg+xml"},
+    {"src": "/static/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"}
+  ]
+}

@@ -37,4 +37,5 @@ namespaces = false
 
 [tool.setuptools.package-data]
 "market_research.data" = ["migrations/*.sql"]
-"market_research.api" = ["static/*.html", "static/*.js", "static/*.css", "static/vendor/*"]
+"market_research.api" = ["static/*.html", "static/*.js", "static/*.css", "static/vendor/*",
+                         "static/*.ico", "static/*.svg", "static/*.png", "static/*.webmanifest"]
