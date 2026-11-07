@@ -1,17 +1,17 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 import market_research.services.analysis as services
+from market_research.api.schemas import JobResponse, ResultResponse
 
 router=APIRouter()
 
 
-@router.get('/api/job/{jid}')
+@router.get('/job/{jid}',response_model=JobResponse)
 def status(jid:str):
     job=services.JOBS.public(jid)
     return job if job else JSONResponse({'error':'任务不存在或已过期'},status_code=404)
 
-
-@router.get('/api/result/{jid}')
+@router.get('/result/{jid}',response_model=ResultResponse)
 def result(jid:str):
     job=services.JOBS.get(jid)
     if not job:
@@ -27,6 +27,6 @@ def result(jid:str):
             'result': payload}
 
 
-@router.post('/api/job/{jid}/cancel')
+@router.post('/job/{jid}/cancel')
 def cancel(jid:str):
     return {'ok':services.JOBS.cancel(jid)}

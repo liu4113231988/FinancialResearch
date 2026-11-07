@@ -6,18 +6,18 @@ from market_research.api.schemas import SyncAssetRequest, SyncRetryRequest
 router=APIRouter()
 
 
-@router.get('/api/sync')
+@router.get('/sync')
 def status():
     return {'enabled':os.environ.get('FIL_SYNC_ENABLED','1')!='0','time':sync.schedule_time().strftime('%H:%M'),
             'timezone':'Asia/Shanghai','assets':sync.assets()}
 
 
-@router.post('/api/sync/assets')
+@router.post('/sync/assets')
 def add(payload:SyncAssetRequest):
     key=sync.register(payload.kind,payload.code,payload.basis)
     return {'ok':True,'asset_key':key}
 
 
-@router.post('/api/sync/retry')
+@router.post('/sync/retry')
 def retry(payload:SyncRetryRequest):
     return {'ok':True,'queued':sync.request_sync(payload.asset_key)}

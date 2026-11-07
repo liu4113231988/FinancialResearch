@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import market_research.config as C
+from market_research import logs
 from market_research.errors import JobsBusy, StorageBusy
 from market_research.security import AccessControl, mode_description
 from market_research.tasks.jobs import JOBS
@@ -24,6 +25,7 @@ import market_research.api.routes.meta as meta
 import market_research.api.routes.sync as sync
 import market_research.api.routes.tasks as tasks
 from market_research.api.schemas import ErrorResponse
+from market_research.api.version import API_PREFIX, API_VERSION, SERVICE_VERSION, VERSIONED_PREFIX
 
 LOG=logging.getLogger(__name__)
 STATIC=Path(str(files('market_research.api')/'static'))
@@ -52,19 +54,37 @@ class BodyLimit:
         await self.app(scope,replay,send)
 
 
+class VersionHeader:
+    """给所有 HTTP 响应标记协议版本，便于调用方判断契约（P3-H）。"""
+    def __init__(self,app):
+        self.app=app
+
+    async def __call__(self,scope,receive,send):
+        if scope['type']!='http':
+            return await self.app(scope,receive,send)
+        async def wrapped(message):
+            if message['type']=='http.response.start':
+                headers=list(message.get('headers') or [])
+                headers.append((b'x-api-version',API_VERSION.encode('ascii')))
+                message={**message,'headers':headers}
+            await send(message)
+        await self.app(scope,receive,wrapped)
+
+
 @asynccontextmanager
 async def lifespan(app):
     JOBS.migrate()
     if Settings.load().auto_services:
         # The independent singleton supervisor survives API restart. Every
         # analysis has its own process; duplicate supervisors exit on file lock.
-        launch('market_research.tasks.worker')
+        launch('market_research.tasks.worker',log_name='worker-process.log')
     yield
 
 
 def create_app():
-    app=FastAPI(title='Market Research API',version='0.3.0',lifespan=lifespan,
+    app=FastAPI(title='Market Research API',version=SERVICE_VERSION,lifespan=lifespan,
                 responses={400:{'model':ErrorResponse},429:{'model':ErrorResponse}})
+    app.add_middleware(VersionHeader)
     app.add_middleware(BodyLimit)
     # P2-24：默认单用户不启用认证；开启后用身份上下文贯通调用链。
     app.add_middleware(AccessControl)
@@ -104,8 +124,11 @@ def create_app():
     def index():
         return FileResponse(STATIC/'index.html')
 
-    for module in (meta,analysis,market,sync,tasks):
-        app.include_router(module.router)
+    # /api/v1 是正式契约路径；/api 保留为兼容路径，两者挂同一批路由，
+    # OpenAPI 同时列出，避免新旧调用方各自维护一套实现。
+    for prefix in (API_PREFIX,VERSIONED_PREFIX):
+        for module in (meta,analysis,market,sync,tasks):
+            app.include_router(module.router,prefix=prefix)
     app.mount('/static',StaticFiles(directory=STATIC),name='static')
     app.mount('/vendor',StaticFiles(directory=STATIC/'vendor'),name='vendor')
     return app
@@ -115,6 +138,7 @@ app=create_app()
 
 
 def main():
+    logs.configure('api')
     settings=Settings.load()
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host',default=settings.host)

@@ -1,0 +1,5 @@
+"""协议版本单一来源：服务版本与对外 API 版本。"""
+SERVICE_VERSION = "0.3.0"
+API_VERSION = "1"
+API_PREFIX = "/api"
+VERSIONED_PREFIX = "/api/v1"

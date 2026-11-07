@@ -152,6 +152,52 @@ class SubmissionResponse(BaseModel):
     result: dict | None = None
 
 
+class JobResponse(BaseModel):
+    """任务状态契约（`/api/v1/job/{jid}`）：字段变化必须同步版本说明。"""
+    id: str
+    code: str | None = None
+    models: list[str] | None = None
+    status: str
+    stage: str | None = None
+    progress: float | None = None
+    detail: list[str] | None = None
+    created: float | None = None
+    updated: float | None = None
+    attempts: int = 0
+    error: str | None = None
+
+
+class ResultResponse(BaseModel):
+    """任务结果信封契约；`result` 的内容随 operation 不同。"""
+    ok: bool
+    status: str
+    completeness: dict[str, Any]
+    result: dict[str, Any]
+
+
+class HealthResponse(BaseModel):
+    ok: bool
+    version: str
+    api_version: str
+    framework: str
+    models: int
+    pid: int
+    uptime_s: float
+    environment: str
+    access_control: dict[str, Any]
+    probe: str
+
+
+class ReadyResponse(BaseModel):
+    ok: bool
+    status: Literal["ok", "degraded", "unhealthy"]
+    checks: dict[str, Any]
+    version: str
+    api_version: str
+    uptime_s: float
+    probe: str
+
+
 class ErrorResponse(BaseModel):
     ok: bool = False
     error: str

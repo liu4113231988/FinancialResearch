@@ -20,8 +20,9 @@ import os
 
 LOG = logging.getLogger(__name__)
 
-# 探针与静态资源不需要业务授权；健康检查被监控系统调用时也不该要令牌。
-PUBLIC_PATHS = frozenset({"/", "/api/health", "/api/ready", "/api/disclosure"})
+# 探针与静态资源不需要业务授权；/api/v1 与兼容路径同时公开。
+PUBLIC_PATHS = frozenset({"/", "/api/health", "/api/ready", "/api/disclosure",
+                          "/api/v1/health", "/api/v1/ready", "/api/v1/disclosure"})
 PUBLIC_PREFIXES = ("/static/", "/vendor/")
 
 

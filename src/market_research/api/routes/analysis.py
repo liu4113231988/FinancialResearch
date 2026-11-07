@@ -17,27 +17,27 @@ router=APIRouter()
 # 占名额；请求线程自始至终不联网。/api/name 未命中则回落"未查"状态。
 
 
-@router.post('/api/analyze',response_model=SubmissionResponse,response_model_exclude_none=True)
+@router.post('/analyze',response_model=SubmissionResponse,response_model_exclude_none=True)
 def analyze(payload:AnalysisRequest):
     return services.submit('analyze',payload.model_dump())
 
 
-@router.post('/api/refit',response_model=SubmissionResponse,response_model_exclude_none=True)
+@router.post('/refit',response_model=SubmissionResponse,response_model_exclude_none=True)
 def refit(payload:RefitRequest):
     return services.submit('refit',payload.model_dump())
 
 
-@router.post('/api/backtest',response_model=SubmissionResponse,response_model_exclude_none=True)
+@router.post('/backtest',response_model=SubmissionResponse,response_model_exclude_none=True)
 def backtest(payload:BacktestRequest):
     return services.submit('backtest',payload.model_dump())
 
 
-@router.post('/api/holdings',response_model=SubmissionResponse,response_model_exclude_none=True)
+@router.post('/holdings',response_model=SubmissionResponse,response_model_exclude_none=True)
 def holdings(payload:HoldingsRequest):
     return services.submit('holdings',payload.model_dump())
 
 
-@router.get('/api/name/{code}')
+@router.get('/name/{code}')
 def name(code:str):
     if len(code)!=6 or not code.isdigit():
         raise ValueError('请输入六位基金代码')
@@ -54,7 +54,7 @@ def name(code:str):
                 'error':str(error)[:80]}
 
 
-@router.get('/api/corr')
+@router.get('/corr')
 def correlation(code:str,win:int=120,start:str|None=None,end:str|None=None):
     if len(code)!=6 or not code.isdigit():
         raise ValueError('请输入六位基金代码')

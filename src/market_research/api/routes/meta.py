@@ -7,6 +7,9 @@ from datetime import date
 import market_research.config as C
 import market_research.disclosure as disclosure
 from market_research.data import storage
+from market_research.api.schemas import HealthResponse, ReadyResponse
+from market_research.api.version import API_VERSION, SERVICE_VERSION
+from market_research.resources import limits_snapshot
 from market_research.security import access_mode, mode_description
 from market_research.modeling.catalog import MODEL_ORDER, model_catalog
 from market_research.market.analysis import STOCKS, INDICES
@@ -86,10 +89,11 @@ def _sync_check() -> dict:
             "reason": None if ok else f"估值面板已 {age} 天未成功同步（阈值 {limit} 天）"}
 
 
-@router.get('/api/health')
+@router.get('/health',response_model=HealthResponse)
 def health():
     """存活探针：只证明 API 进程还在，依赖故障看 /api/ready。"""
-    return {"ok": True, "version": "0.3.0", "framework": "fastapi",
+    return {"ok": True, "version": SERVICE_VERSION, "api_version": API_VERSION,
+            "framework": "fastapi",
             "models": len(MODEL_ORDER), "pid": os.getpid(),
             "uptime_s": round(time.time() - _STARTED, 1),
             "environment": C.ENV,
@@ -98,28 +102,30 @@ def health():
             "probe": "liveness"}
 
 
-@router.get('/api/ready')
+@router.get('/ready',response_model=ReadyResponse)
 def ready(response: Response):
     """就绪探针：区分「进程活着」与「依赖不可用」。"""
     checks = {"storage": _storage_check(), "worker": _worker_check(),
               "jobs": _jobs_check(), "sync": _sync_check(),
-              "lock": dict(storage.LOCK_STATS)}
+              "lock": dict(storage.LOCK_STATS),
+              "limits": {"ok": True, **limits_snapshot()}}
     required = [checks["storage"], checks["worker"], checks["jobs"]]
     status = "unhealthy" if any(not c["ok"] for c in required) else (
         "degraded" if not checks["sync"]["ok"] else "ok")
     if status == "unhealthy":
         response.status_code = 503
     return {"ok": status != "unhealthy", "status": status, "checks": checks,
-            "version": "0.3.0", "uptime_s": round(time.time() - _STARTED, 1),
+            "version": SERVICE_VERSION, "api_version": API_VERSION,
+            "uptime_s": round(time.time() - _STARTED, 1),
             "probe": "readiness"}
 
-@router.get('/api/disclosure')
+@router.get('/disclosure')
 def disclosure_info():
     """P2-36：Web 页与报告共用的数据/免责声明（文案与位置可配置）。"""
     return {"ok": True, **disclosure.payload()}
 
 
-@router.get('/api/catalog')
+@router.get('/catalog')
 def catalog():
     known = []
     for d in (C.DEMO_FUNDS, C.EXTENDED_FUNDS):
