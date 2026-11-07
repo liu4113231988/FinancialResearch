@@ -24,6 +24,12 @@ market-research-sync = "market_research.tasks.sync:main"
 
 market-research-cli = "market_research.cli.main:main"
 
+# 短别名：与上面的入口完全等价，保留旧入口以兼容既有脚本。
+fil = "market_research.cli.main:main"
+fil-serve = "market_research.api.app:main"
+fil-worker = "market_research.tasks.worker:main"
+fil-sync = "market_research.tasks.sync:main"
+
 [tool.setuptools.packages.find]
 where = ["src", "compat"]
 include = ["market_research*", "src", "webapp", "webapp.api"]

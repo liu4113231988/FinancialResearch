@@ -13,6 +13,15 @@ uv sync --locked
 uv run --locked market-research --port 8877
 ```
 
+日常启动也可用一键脚本（优先 `.venv` 内的入口，缺少时回退 `uv run --locked`；不改默认端口与目录）：
+
+```powershell
+.\scripts\start.ps1
+.\scripts\start.ps1 -Port 8877 -NoWorker
+```
+
+安装后另有短入口名，与原有命令完全等价：`fil`（研究 CLI）、`fil-serve`（Web）、`fil-worker`、`fil-sync`；`market-research*` 入口继续可用。项目根目录存在 `.env` 时，启动脚本会设置 `FIL_ENV_FILE` 交给应用读取（已存在的环境变量优先，不会被覆盖）；直接运行其它入口时可自行设置 `FIL_ENV_FILE`。
+
 打开 [研究工作台](http://127.0.0.1:8877/)。接口文档位于 `/docs`，协议位于 `/openapi.json`，存活探针为 `/api/v1/health`（旧 `/api/health` 兼容），就绪检查为 `/api/v1/ready`（存储/worker/队列异常返回 503）。未传 `--port` 时默认端口为 8760；8877 是上述示例及浏览器测试使用的端口。
 
 Web 启动时默认拉起单实例 worker。分析任务在独立子进程计算；API 关闭后 worker 继续处理已提交任务与同步调度。停止 worker：
@@ -132,7 +141,7 @@ uv run python run.py market-snapshot --help
 uv run python run.py market-validate --help
 ```
 
-也可使用 `uv run market-research-cli ...` 或 `uv run python -m market_research.cli ...`。原 `uv run python run.py 110022` 仍默认基金分析；不带参数仍分析全部演示基金。查看帮助不会执行研究计算。
+也可使用 `uv run market-research-cli ...`、安装后的 `fil ...` 或 `uv run python -m market_research.cli ...`。原 `uv run python run.py 110022` 仍默认基金分析；不带参数仍分析全部演示基金。查看帮助不会执行研究计算。
 
 原来 10 个 `run_*` 文件归档到 `compat/entrypoints/`；原 `python run_experiments.py` 改为 `uv run python run.py experiments`。根目录另保留报告和缓存维护的 3 个兼容脚本。完整命令映射见[模块与入口](docs/模块与入口.md)。
 
@@ -194,6 +203,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_sync_task.ps
 | FIL_DISCLOSURE_SCOPE / TEXT / POSITION | internal / 内置文案 / top | 免责披露作用域、自定义文案与位置（`top` 或 `footer`） |
 | FIL_CORS_ORIGINS | 空 | 逗号分隔跨域来源；同源页面无需配置 |
 | FIL_START_DATE | 未设置 | 固定基金分析起点，覆盖滚动默认值，用于研究复现 |
+| FIL_ENV_FILE | 未设置 | 指定 `.env` 路径；仅在该变量存在时读取，逐行 `KEY=VALUE`，不覆盖已有环境变量 |
 | FIL_JOB_WORKERS / FIL_JOB_WORKERS_MAX | 0 / 0 | 单任务模型并行进程数（0=自动，取 `min(模型数, CPU-1)`）；全局上限（0=不限） |
 | FIL_JOB_MEMORY_MB | 0 | 单任务内存上限（MB，0=不限）；POSIX 用 `RLIMIT_AS`，Windows 用 Job Object |
 | FIL_LOG_DIR | FIL_DATA_DIR | 应用与进程日志目录 |
@@ -241,9 +251,10 @@ src/market_research/
   logs.py       应用日志轮转、级别与任务日志保留
   ordering.py   确定性排序与并列 tie-break
   resources.py  CPU/内存上限与单任务模型并行预算
+  envfile.py    可选 .env 读取（FIL_ENV_FILE）
 compat/         旧导入转发与 entrypoints/ 归档脚本
 tests/          按业务与测试类型分组
-scripts/        Windows 同步任务安装脚本、真实数据冒烟入口（smoke_real.py）
+scripts/        Windows 同步任务安装、一键启动（start.ps1）、真实数据冒烟入口（smoke_real.py）
 .github/        CI：compileall、node --check、全量离线 unittest
 ```
 
@@ -273,7 +284,7 @@ node tests/frontend/test_refit.js
 node tests/frontend/test_ui_async.cjs
 ```
 
-最新完整回归 397 项 unittest（2026-11-07 执行通过）、两套脚本式回归及两套前端回归通过；当轮改动未重跑真实浏览器渲染检查与 `uv build`，wheel 独立安装的历史记录不代表本轮重新打包验证。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
+最新完整回归 402 项 unittest（2026-11-07 执行通过）、两套脚本式回归及两套前端回归通过；当轮改动未重跑真实浏览器渲染检查与 `uv build`，wheel 独立安装的历史记录不代表本轮重新打包验证。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
 
 依赖以 `pyproject.toml` 和 `uv.lock` 为准。`requirements.txt` 引用运行依赖兼容导出，更新命令为：
 

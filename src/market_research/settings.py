@@ -3,6 +3,10 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from market_research import envfile
+
+envfile.load()  # FIL_ENV_FILE 未设置时是空操作
+
 
 def home_dir():
     default = next((p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()), Path.cwd())
