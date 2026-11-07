@@ -2,7 +2,7 @@
 
 本地研究工作台，包含股票技术分析与方向估计、基金滚动 RBSA 与多模型比较、指数走势与风险分析。后端使用 FastAPI、独立计算进程和 DuckDB，环境与依赖由 uv 管理。
 
-文档核对日期：2026-11-06。本轮按代码实际行为回查 TODO 关闭项并同步文档，配置、端点与数据契约以本文件及三份运维文档为准；未重抓全市场行情或重算全部基金研究。
+文档核对日期：2026-11-07。本轮关闭生产评估 P3 六项（日志轮转、入队去重、阶段检查点、确定性排序、API 版本与契约、资源上限）并同步文档，配置、端点与数据契约以本文件及三份运维文档为准；未重抓全市场行情或重算全部基金研究。
 
 ## 安装与启动
 
@@ -13,7 +13,7 @@ uv sync --locked
 uv run --locked market-research --port 8877
 ```
 
-打开 [研究工作台](http://127.0.0.1:8877/)。接口文档位于 `/docs`，协议位于 `/openapi.json`，存活探针为 `/api/health`，就绪检查为 `/api/ready`（存储/worker/队列异常返回 503）。未传 `--port` 时默认端口为 8760；8877 是上述示例及浏览器测试使用的端口。
+打开 [研究工作台](http://127.0.0.1:8877/)。接口文档位于 `/docs`，协议位于 `/openapi.json`，存活探针为 `/api/v1/health`（旧 `/api/health` 兼容），就绪检查为 `/api/v1/ready`（存储/worker/队列异常返回 503）。未传 `--port` 时默认端口为 8760；8877 是上述示例及浏览器测试使用的端口。
 
 Web 启动时默认拉起单实例 worker。分析任务在独立子进程计算；API 关闭后 worker 继续处理已提交任务与同步调度。停止 worker：
 
@@ -43,7 +43,7 @@ docker run -d --init --name market-research -p 127.0.0.1:8877:8877 -v market-res
 
 访问 `http://127.0.0.1:8877/`。镜像使用 Python 3.13，通过 `uv.lock` 安装运行依赖和非 editable 项目包；最终镜像只复制安装环境，包含前端和 SQL 包资源，以 UID/GID 10001 运行。`.dockerignore` 采用允许列表，本机 `.venv`、行情、结果、Git、Node 依赖及测试产物不进入构建上下文。
 
-> **安全边界**：默认以单用户模式运行（`FIL_ACCESS_CONTROL=off`，无登录/鉴权）。设置 `FIL_ACCESS_CONTROL=token` 并配置 `FIL_API_TOKENS` 后，业务接口要求 `Authorization: Bearer <token>` 或 `X-API-Key`；`/`、`/api/health`、`/api/ready`、`/api/disclosure` 与静态资源始终公开。令牌模式是最小认证，尚无注册/登录、租户数据分区与按用户配额。无论是否开启认证，`-p 8877:8877` 都会把 API 发布到所有网卡；只在本机使用时请写 `-p 127.0.0.1:8877:8877`，确需局域网或公网访问时仍应放在带鉴权的反向代理之后。
+> **安全边界**：默认以单用户模式运行（`FIL_ACCESS_CONTROL=off`，无登录/鉴权）。设置 `FIL_ACCESS_CONTROL=token` 并配置 `FIL_API_TOKENS` 后，业务接口要求 `Authorization: Bearer <token>` 或 `X-API-Key`；`/`、`/api/v1/health`、`/api/v1/ready`、`/api/v1/disclosure` 与静态资源始终公开（旧 `/api/*` 等价路径同样公开）。令牌模式是最小认证，尚无注册/登录、租户数据分区与按用户配额。无论是否开启认证，`-p 8877:8877` 都会把 API 发布到所有网卡；只在本机使用时请写 `-p 127.0.0.1:8877:8877`，确需局域网或公网访问时仍应放在带鉴权的反向代理之后。
 
 命名卷 `market-research-data` 挂载到 `/data`，行情数据库、队列和日志位于 `/data/output/data`，研究输出也保存在该卷中。容器首次运行创建独立数据，**不会自动导入本机已有行情**。若使用宿主目录代替命名卷，应确保该目录可由容器 UID/GID 10001 写入。停止/删除容器不会删除命名卷；备份或迁移 DuckDB 前先停止容器内所有写入进程。
 
@@ -55,7 +55,7 @@ docker exec market-research market-research-cli --help
 docker stop market-research
 ```
 
-容器 HEALTHCHECK 使用 `/api/ready`（依赖异常时返回 503 并标记 unhealthy）；`/api/health` 仅作存活探针。后台计算和同步日志保留在数据卷中。多阶段安装与非 editable 环境复制方式参考 [uv 官方 Docker 指南](https://docs.astral.sh/uv/guides/integration/docker/)。当前维护环境未安装 Docker，本次仅完成文件及配置核对，镜像构建和容器运行需在具备 Docker 的环境验证。
+容器 HEALTHCHECK 使用 `/api/v1/ready`（依赖异常时返回 503 并标记 unhealthy）；`/api/v1/health` 仅作存活探针（旧 `/api/ready`、`/api/health` 兼容）。后台计算和同步日志保留在数据卷中。多阶段安装与非 editable 环境复制方式参考 [uv 官方 Docker 指南](https://docs.astral.sh/uv/guides/integration/docker/)。当前维护环境未安装 Docker，本次仅完成文件及配置核对，镜像构建和容器运行需在具备 Docker 的环境验证。
 
 ## 页面功能
 
@@ -159,7 +159,7 @@ uv run market-research-sync
 uv run market-research-sync --once
 ```
 
-`--once` 仅检查当前到期/待处理资产，不会强制刷新所有已成功同步的资产。手动重试通过数据中心或 `/api/sync/retry` 提交。调度器通过同一同步锁互斥。
+`--once` 仅检查当前到期/待处理资产，不会强制刷新所有已成功同步的资产。手动重试通过数据中心或 `/api/v1/sync/retry` 提交。调度器通过同一同步锁互斥。
 
 Windows 每日任务安装或更新：
 
@@ -194,24 +194,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_sync_task.ps
 | FIL_DISCLOSURE_SCOPE / TEXT / POSITION | internal / 内置文案 / top | 免责披露作用域、自定义文案与位置（`top` 或 `footer`） |
 | FIL_CORS_ORIGINS | 空 | 逗号分隔跨域来源；同源页面无需配置 |
 | FIL_START_DATE | 未设置 | 固定基金分析起点，覆盖滚动默认值，用于研究复现 |
+| FIL_JOB_WORKERS / FIL_JOB_WORKERS_MAX | 0 / 0 | 单任务模型并行进程数（0=自动，取 `min(模型数, CPU-1)`）；全局上限（0=不限） |
+| FIL_JOB_MEMORY_MB | 0 | 单任务内存上限（MB，0=不限）；POSIX 用 `RLIMIT_AS`，Windows 用 Job Object |
+| FIL_LOG_DIR | FIL_DATA_DIR | 应用与进程日志目录 |
+| FIL_LOG_MAX_BYTES / FIL_LOG_BACKUPS | 5000000 / 3 | 单个日志大小上限与保留份数 |
+| FIL_LOG_LEVEL | INFO | 应用日志级别（`DEBUG/INFO/WARNING/ERROR`） |
+| FIL_LOG_RETENTION_DAYS | 7 | `job-{id}.log` 等任务日志按天清理 |
+| FIL_CHECKPOINT_DIR / FIL_CHECKPOINT_TTL_DAYS | FIL_DATA_DIR/checkpoints / 2 | 阶段检查点目录与保留天数 |
 
-任务通过 `POST /api/analyze`、`/api/refit`、`/api/backtest`、`POST /api/holdings` 或 `/api/market/analyze` 提交，再查询 `/api/job/{jid}` 与 `/api/result/{jid}`。完成的基金计算可能直接命中结果缓存；以实际返回字段为准。取消为 `POST /api/job/{jid}/cancel`，进入错误终态并由 worker 终止对应进程；切换页面入口不会自动取消后台任务。`/api/holdings` 与 CLI `holdings` 共用 `fit_fund_holdings` 口径，返回逐期行业暴露、持仓基准对比与 `benchmark` 诊断（缺失行业、已映射/未映射/现金权重、`residual_treatment`）。
+任务通过 `POST /api/v1/analyze`、`/api/v1/refit`、`/api/v1/backtest`、`POST /api/v1/holdings` 或 `/api/v1/market/analyze` 提交，再查询 `/api/v1/job/{jid}` 与 `/api/v1/result/{jid}`。旧 `/api/*` 路径保留兼容（与 v1 由同一实现提供，两套路径都出现在 `/openapi.json`），推荐新调用使用 `/api/v1`。所有响应带 `X-API-Version: 1` 头；关键响应有固定契约：任务状态 `JobResponse`、结果信封 `ResultResponse`、探针 `HealthResponse`/`ReadyResponse`，由 Pydantic 在返回时校验并过滤未声明字段。完成的基金计算可能直接命中结果缓存；以实际返回字段为准。取消为 `POST /api/v1/job/{jid}/cancel`，进入错误终态并由 worker 终止对应进程；切换页面入口不会自动取消后台任务。`/api/v1/holdings` 与 CLI `holdings` 共用 `fit_fund_holdings` 口径，返回逐期行业暴露、持仓基准对比与 `benchmark` 诊断（缺失行业、已映射/未映射/现金权重、`residual_treatment`）。
 
 结果契约（Web、API 与导出同源）：
 
 - `meta.data_basis` / `meta.nav_basis` / `meta.nav_degraded` / `meta.nav_degraded_reason`：实际净值口径。total 构造失败默认 `reject`，仅在 `FIL_NAV_DEGRADED_POLICY=allow_cum` 时降级为累计净值并显式标注，且不写入 total 缓存。研究 CLI 输出同一组字段，报告顶部固定显示「总回报（分红再投资）」或「累计净值（降级）+ 原因」。
 - `meta.data_quality`：`status=ok|partial|degraded|failed`（stale 单独只升到 `partial`，缺失比例 ≥20% 或净值降级/取数回退升到 `degraded`）、`data_end/as_of/stale_days`、`missing_assets/n_missing/n_expected/missing_ratio`、`source_error`，以及 `provenance`（来源键、端点、抓取时间、成功/降级/错误次数）。
-- `status` / `ok` / `completeness`：`completeness` 含 `sections`、`missing[{section,item,reason}]`、`reasons`；`/api/result` 透传 `status/completeness`（外层信封 `ok` 保持 true）。
+- `status` / `ok` / `completeness`：`completeness` 含 `sections`、`missing[{section,item,reason}]`、`reasons`；`/api/v1/result` 透传 `status/completeness`（外层信封 `ok` 保持 true）。
 - `meta.provenance`：`environment`、`code_version`、`config_version`、`git_commit`、`git_dirty`、`data_stamp`、`generated_at`。`data_stamp` 是本次结果依赖的数据版本：基金类操作收窄到本基金本窗口（与结果缓存键同口径），市场/持仓类为全局指纹；缓存命中时保留产出时的版本。
 - `meta.valuation` 与回测 `variants[].note/degraded/excluded`：估值通道可用性、沪深300 兜底资产与降级说明；不可用时 CLI 与研究回测都不生成「仅赛道估值通道」曲线并标 `excluded`。
 
-公开端点：`/api/health`（存活）、`/api/ready`（依赖就绪，异常 503）、`/api/disclosure`（免责与数据来源披露，页面和报告同源读取）；三者不受 `FIL_ACCESS_CONTROL` 限制。
+公开端点：`/api/v1/health`（存活）、`/api/v1/ready`（依赖就绪，异常 503）、`/api/v1/disclosure`（免责与数据来源披露，页面和报告同源读取）；旧 `/api/health` 等路径等价可用，三者都不受 `FIL_ACCESS_CONTROL` 限制。
 
-参数错误为 400，容量不足为 429，存储锁超时为 **503**（`ok=false`、`field=storage`、可读原因与 `retry_after_s`，代表暂时性故障、可稍后重试），未完成结果为 202，不存在/过期任务为 404。`/api/corr` 与 `/api/name` 只读本地缓存，**不会为单个请求联网取数**：缓存未预热时前者返回 409 并提示先跑一次分析，后者返回 `found: null`（`found: false` 表示名录确实拉到过、没有该代码）。队列及结果在 API 重启后可继续查询，终态满 24 小时后在新任务提交时清理。持久任务不等于长期研究档案。
+参数错误为 400，容量不足为 429，存储锁超时为 **503**（`ok=false`、`field=storage`、可读原因与 `retry_after_s`，代表暂时性故障、可稍后重试），未完成结果为 202，不存在/过期任务为 404。设置 `FIL_JOB_MEMORY_MB` 后任务超出单进程内存上限会进入 `error` 终态并给出含配置项与调整建议的可读原因（Windows 上通常表现为进程被终止，最终按进程中断重试规则处理）。`/api/v1/corr` 与 `/api/v1/name` 只读本地缓存，**不会为单个请求联网取数**：缓存未预热时前者返回 409 并提示先跑一次分析，后者返回 `found: null`（`found: false` 表示名录确实拉到过、没有该代码）。队列及结果在 API 重启后可继续查询，终态满 24 小时后在新任务提交时清理。持久任务不等于长期研究档案。
 
-同步接口为 `GET /api/sync`、`POST /api/sync/assets`（`kind/code/basis`）、`POST /api/sync/retry`（`asset_key`）。股票 basis 为 `qfq`、空字符串或 `hfq`，指数为空，基金为 `total` 或 `cum`。
+同步接口为 `GET /api/v1/sync`、`POST /api/v1/sync/assets`（`kind/code/basis`）、`POST /api/v1/sync/retry`（`asset_key`）。股票 basis 为 `qfq`、空字符串或 `hfq`，指数为空，基金为 `total` 或 `cum`。
 
-API 使用 Uvicorn 日志；worker、单任务与同步日志位于 `FIL_DATA_DIR` 下的 `worker.log`、`job-{id}.log`、`sync-process.log` 和 `sync.log`。
+应用日志按 `FIL_LOG_MAX_BYTES`/`FIL_LOG_BACKUPS` 轮转、按 `FIL_LOG_LEVEL` 过滤，目录由 `FIL_LOG_DIR` 指定（默认 `FIL_DATA_DIR`）：API 写 `api.log`，worker 监督进程写 `worker.log`、子进程输出写 `worker-process.log`，同步写 `sync.log`/`sync-process.log`，单任务写 `job-{id}.log`。任务日志超过 `FIL_LOG_RETENTION_DAYS` 天后自动清理。为兼容 Windows 下目录操作，应用日志采用“追加后立即关闭句柄”的方式轮转；子进程 stdout 重定向文件在进程存活期间不能重命名，其轮转在下次启动时生效（与审计日志做法一致）。
 
 ## 代码与文档导航
 
@@ -231,6 +238,9 @@ src/market_research/
   security.py   可选令牌认证与身份/租户上下文
   disclosure.py 免责披露文案、作用域与位置
   audit.py      JSONL 操作审计（轮转与脱敏）
+  logs.py       应用日志轮转、级别与任务日志保留
+  ordering.py   确定性排序与并列 tie-break
+  resources.py  CPU/内存上限与单任务模型并行预算
 compat/         旧导入转发与 entrypoints/ 归档脚本
 tests/          按业务与测试类型分组
 scripts/        Windows 同步任务安装脚本、真实数据冒烟入口（smoke_real.py）
@@ -263,7 +273,7 @@ node tests/frontend/test_refit.js
 node tests/frontend/test_ui_async.cjs
 ```
 
-最新完整回归 366 项 unittest（2026-11-06 执行通过）、两套脚本式回归及两套前端回归通过；当轮改动未重跑真实浏览器渲染检查与 `uv build`，wheel 独立安装的历史记录不代表本轮重新打包验证。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
+最新完整回归 397 项 unittest（2026-11-07 执行通过）、两套脚本式回归及两套前端回归通过；当轮改动未重跑真实浏览器渲染检查与 `uv build`，wheel 独立安装的历史记录不代表本轮重新打包验证。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
 
 依赖以 `pyproject.toml` 和 `uv.lock` 为准。`requirements.txt` 引用运行依赖兼容导出，更新命令为：
 

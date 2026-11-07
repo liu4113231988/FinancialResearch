@@ -396,35 +396,46 @@
 
 ### P3（可迭代）
 
-- **P3-D（缺失功能）：日志不轮转、无保留策略**
-  - 现状：`tasks/processes.py:87-94` 以 `ab` 追加打开 `worker.log`/`job-{id}.log`/`sync-process.log`，永不轮转；只有 `tasks/sync.py:321-327` 的 `sync.log` 用 `RotatingFileHandler`（2MB×3）。
-  - 风险：长跑后数据卷被日志占满，进而影响 DuckDB 写入；`job-*.log` 按任务累积且无清理。
-  - 建议：统一 `RotatingFileHandler` 或按天/大小保留；`job-*.log` 设保留天数；容器场景使用 Docker log driver；加磁盘水位告警。
+- **P3-D（缺失功能）：日志不轮转、无保留策略** — **已修复（2026-11-07）**
+  - 现状（修复前）：`tasks/processes.py:87-94` 以 `ab` 追加打开 `worker.log`/`job-{id}.log`/`sync-process.log`，永不轮转；只有 `tasks/sync.py` 的 `sync.log` 用 `RotatingFileHandler`。
+  - 已落地：新增 `logs.py`（append-and-close 的 `RotatingAppendHandler`，按 `FIL_LOG_MAX_BYTES`/`FIL_LOG_BACKUPS` 轮转，`FIL_LOG_DIR`/`FIL_LOG_LEVEL` 可配）；API→`api.log`、worker→`worker.log`、sync→`sync.log` 统一走该 handler；`launch()` 在打开重定向文件前先轮转，任务日志按 `FIL_LOG_RETENTION_DAYS`（默认 7 天）清理。Windows 下不保留常驻句柄（测试直接重命名/删除已验证）。
+  - 剩余：子进程 stdout 重定向文件的句柄在进程生命周期内不可重命名，长跑进程的轮转只在下次启动生效（与审计日志同样的取舍）；未做磁盘水位告警、未接 Docker log driver。
+  - 回归：`tests/data/test_logs.py`（6 项：大小轮转/备份份数、环境变量、无句柄占用、幂等配置、任务日志保留期）。
 
-- **P3-E（逻辑/设计问题）：入队去重非原子**
-  - 现状：`tasks/store.py:47-60` 先 `SELECT` 再 `INSERT`，`task_key` 没有唯一约束；多 API 进程或线程并发提交同一参数时可能各插一条。
-  - 风险：重复计算、浪费并发名额；结果幂等性只能靠后写覆盖。
-  - 建议：对 `(task_key, status IN queued/running)` 建部分唯一索引，或在同一事务内 `INSERT ... WHERE NOT EXISTS` 并处理冲突重试。
+- **P3-E（逻辑/设计问题）：入队去重非原子** — **已修复（2026-11-07）**
+  - 现状（修复前）：`tasks/store.py:47-60` 先 `SELECT` 再 `INSERT`，`task_key` 没有唯一约束；多 API 进程或线程并发提交同一参数时可能各插一条。
+  - 已落地：改为单条 `INSERT ... SELECT ... WHERE NOT EXISTS (同 key 且 status IN ('queued','running'))`，插入后按 key 回读并返回 `(jid, merged)`；队列上限检查仍在同一事务内，已存在同 key 时直接返回而不报 429。跨进程由 `storage.connection()` 的文件锁串行化，单进程内由线程锁保证。
+  - 回归：`tests/tasks/test_taskstore.py:test_concurrent_processes_enqueue_same_key_once`（6 个 spawn 进程并发提交同 key，只返回一个 jid、仅一次 `merged=False`、库中只有一条排队/running 记录）。
+  - 剩余：DuckDB 无部分唯一索引，原子性由写入语句+文件锁保证；绕过 `DurableJobStore` 直接写表仍可能产生重复。
 
-- **P3-F（逻辑/设计问题）：重试无断点，崩溃后从头开始**
-  - 现状：`tasks/worker.py:64-95` 的崩溃重试重新执行整个任务；模型级无检查点；`settings.py:20` 的超时固定 900s，无进度续期；POSIX 下 supervisor 自身崩溃时 `start_new_session` 的子进程可能成为孤儿（`processes.py:87-94`）。
-  - 风险：长任务重复消耗 CPU/上游配额；孤儿进程占用资源且不会被新 supervisor 接管。
-  - 建议：按模型/阶段落临时结果或断点；超时按进度续期或可配置；启动时按 pid/进程组清理孤儿；与 P3 第 100 行的僵尸等待一并处理。
+- **P3-F（逻辑/设计问题）：重试无断点，崩溃后从头开始** — **已修复（2026-11-07，阶段级）**
+  - 现状（修复前）：`tasks/worker.py:64-95` 的崩溃重试重新执行整个任务；模型级无检查点。
+  - 已落地：新增 `tasks/checkpoints.py`（`StageCheckpoint`，按 `job_id` 持久化到 `FIL_DATA_DIR/checkpoints/<jid>/`，默认保留 2 天）。`analyze` 对数据、净值、方向概率、相关性、模型结果五个阶段读写检查点；`refit`/`backtest` 对数据与单模型；`holdings` 对行业映射与拟合结果。检查点写参数、窗口与数据版本指纹，重启后指纹不一致或 pickle 损坏则整体丢弃并从零执行；失败保留供重试，成功或最终完成时删除。
+  - 行为差异：仅进程中断/超时后的重试会跳过已完成阶段；正常首次运行行为不变（检查点写入是附加开销，失败不影响计算）。`FIL_CHECKPOINT_DIR`/`FIL_CHECKPOINT_TTL_DAYS` 可配。
+  - 回归：`tests/tasks/test_checkpoints.py`（6 项：阶段读写、指纹变更丢弃、损坏阶段丢弃、过期清理、`_dispatch` 失败后重试不重算、真实 `analyze` 阶段接线）。
+  - 剩余：粒度是阶段（模型阶段整体一个产物），单模型内部中断仍会从该阶段起点重跑；孤儿进程清理与超时续期未在本条处理（超时已由 `FIL_JOB_TIMEOUT` 提供固定上限）。
 
-- **P3-G（逻辑/设计问题）：排名并列时结果顺序不稳定**
-  - 现状：`modeling/engine.py:194-216` 按进程完成顺序写入 `out`；`modeling/engine.py:377-392` 的 `sort_values` 无稳定 tie-break。
-  - 风险：样本外 R² 并列时 `best_model`/insights 可能在不同运行间切换，破坏「同输入同输出」。
-  - 建议：排序加模型 key 作为次级键（稳定排序）；并列时明确选择规则并在 meta 记录。
+- **P3-G（逻辑/设计问题）：排名并列时结果顺序不稳定** — **已修复（2026-11-07）**
+  - 现状（修复前）：`modeling/engine.py:194-216` 按进程完成顺序写入 `out`；`modeling/engine.py:377-392` 的 `sort_values` 无稳定 tie-break，多处权重/相关性排序同样只按值排序。
+  - 已落地：新增 `ordering.py`（`series_order`/`ranked_series`/`ranked_frame`/`rows_order`：并列按名称或代码升序、NaN 统一排最后、稳定排序），统一替换 11 处排序点：模型排名、估计器权重、RBSA 最新暴露、相关系数 top N 与分层、总权重、每日信号回退资产、NW t 值、图表暴露、实验特征/命中/权重、持仓行业偏差、研究报告方案排名；命中并列按时间序、相关性并列按代码。
+  - 行为差异：仅并列时的先后顺序固定，不改变入选集合与数值；`best_model` 在并列时选择 key 升序的第一个。
+  - 回归：`tests/modeling/test_ordering.py`（6 项：frame 并列、NaN 置底与输入顺序无关、Series 并列、rows 并列、ModelZoo.rank 两种插入顺序一致、RBSA 暴露并列按名称）。
+  - 剩余：`funds/universe.py` 按基金代码排序（本身唯一，无需 tie-break）；`payloads.py:605` 的超限计数列表只做数值降序，不承载顺序语义。
 
-- **P3-H（缺失功能）：API 版本与响应契约**
-  - 现状：路由为未版本化的 `/api/*`；`api/schemas.py` 只定义请求模型，响应多以裸 dict 返回；版本在 `api/app.py:65` 与 `api/routes/meta.py:10` 两处硬编码。
-  - 风险：破坏性变更无兼容层；OpenAPI 不能描述响应结构；外部调用方升级困难。
-  - 建议：引入 `/api/v1` 或显式兼容策略；为关键响应定义模型；版本单一来源；补弃用说明。
+- **P3-H（缺失功能）：API 版本与响应契约** — **已修复（2026-11-07）**
+  - 现状（修复前）：路由为未版本化的 `/api/*`；`api/schemas.py` 只定义请求模型，响应多以裸 dict 返回；版本在 `api/app.py` 与 `api/routes/meta.py` 两处硬编码。
+  - 已落地：新增 `api/version.py` 作为版本单一来源（`SERVICE_VERSION=0.3.0`、`API_VERSION=1`）。同一批路由同时挂在 `/api`（兼容）与 `/api/v1`（正式契约），两者都在 `/openapi.json` 中可见；所有 HTTP 响应带 `X-API-Version: 1` 头；`/api/health` 与 `/api/ready` 增加 `api_version` 字段。关键响应定义 Pydantic 契约：任务状态 `JobResponse`、结果信封 `ResultResponse`、存活/就绪 `HealthResponse`/`ReadyResponse`，由 FastAPI 在返回时校验并过滤未声明字段。认证模式下 v1 的 health/ready/disclosure 与旧路径一样公开。
+  - 前端：`api/static/*` 继续调用兼容路径（两个路径由同一实现提供），本轮未改动，避免打断；旧路径未标记删除，文档注明 v1 为推荐路径。
+  - 回归：`tests/api/test_contract.py`（6 项：新旧路径同体、版本头、OpenAPI 同时列出、v1 校验/提交、任务状态字段集合、结果信封字段集合、就绪版本）。`tests/api/test_routes.py` 18 项保持通过。
+  - 剩余：旧 `/api/*` 未设置 `Deprecation`/`Sunset` 头，也没有自动迁移脚本；兼容路径何时移除待后续拍板。
 
-- **P3-I（缺失功能）：资源上限与容器配额**
-  - 现状：`modeling/engine.py:189-199` 每个任务默认 `cpu_count()-1` 个子进程；`settings.py:16` 允许 2 个并发任务，理论上可同时占用约 `2×(CPU-1)` 个进程；`Dockerfile` 未设 CPU/内存限制，代码也不读取 cgroup。
-  - 风险：小规格机器上 CPU 超卖、内存 OOM 可能同时打挂 API 与同步写入。
-  - 建议：按 cgroup 配额计算 worker 数并设全局上限；容器设置 `--cpus/--memory`；为单任务加内存/耗时保护与告警。
+- **P3-I（缺失功能）：资源上限与容器配额** — **已修复（2026-11-07）**
+  - 现状（修复前）：`modeling/engine.py` 每个任务默认开 `cpu_count()-1` 个子进程；`FIL_MAX_JOBS=2` 时理论上同时占用约 `2×(CPU-1)` 个进程；不读取 cgroup，也没有单任务内存上限。
+  - 已有并保留：并发任务上限 `FIL_MAX_JOBS`、队列总量 `FIL_QUEUE_LIMIT`（超限 429）、单任务超时 `FIL_JOB_TIMEOUT`（900s，超时终止并明确报错）、结果图表点数/相关性 top N/持仓季度行等既有截断。
+  - 已落地：新增 `resources.py`。`cpu_limit()` 依次读 cgroup v2 `cpu.max`、v1 `cfs_quota/cfs_period`、进程亲和性、物理核；`model_workers()` 默认 `min(模型数, max(1, CPU-1))`，可用 `FIL_JOB_WORKERS`（0=auto）与 `FIL_JOB_WORKERS_MAX`（0=不限）收紧；`FIL_JOB_MEMORY_MB`（0=不限制）在 POSIX 子进程设 `RLIMIT_AS`，在 Windows 通过已有 Job Object 设 `JOB_OBJECT_LIMIT_PROCESS_MEMORY`；`MemoryError` 映射为含配置项与建议的失败原因。`/api/ready` 新增 `checks.limits` 展示当前上限。
+  - 行为差异：默认值保持原行为（内存不限制、worker 仍按 CPU-1，但容器内按 cgroup 而非宿主机核数）；仅在显式设置时收紧。
+  - 回归：`tests/tasks/test_resources.py`（6 项：auto/cap/显式 worker、超时与内存默认值、平台差异下的内存限制、MemoryError 可读错误）。
+  - 剩余：Windows 内存超限通常表现为进程被终止而非 Python `MemoryError`，最终错误是「进程退出」重试耗尽，未在错误里自动归因到内存；Dockerfile 未内置 `--cpus/--memory` 默认值（仍由部署参数控制）；按用户/租户配额未做（本产品为单用户形态）。
 
 ### 已具备（看似缺失但实际已有，不重复列项）
 
