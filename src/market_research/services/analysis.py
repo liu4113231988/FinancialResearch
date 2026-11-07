@@ -11,6 +11,7 @@ from market_research.research.runinfo import result_provenance
 from market_research.security import current_identity
 import market_research.data.marketdata as D
 import market_research.tasks.sync as sync
+from market_research.tasks import checkpoints
 from market_research.tasks.jobs import JOBS
 from market_research.market.analysis import analyze_market
 CACHE_DIR = C.DATA_DIR / "webcache"
@@ -30,21 +31,28 @@ def refit_single(**arguments):
     from market_research.funds.analysis import refit_single as calculate
     return calculate(**arguments)
 
-def holdings(code, refresh=False, job_id=None, **_):
+def holdings(code, refresh=False, job_id=None, checkpoint=None, **_):
     """真实持仓拟合：数据、RBSA、对齐与持仓基准都跑在任务队列里。"""
     from market_research.funds.holdings import fit_fund_holdings, load_industry_map
     from market_research.funds.payloads import holdings_payload
 
-    if job_id:
-        JOBS.update(job_id, stage="加载申万行业映射", progress=0.12)
-    industry_map = load_industry_map(refresh=refresh)
-    if industry_map.empty:
-        return {"ok": False, "code": code,
-                "reason": "申万行业映射构造失败（无法取得成分股）"}
+    cp = checkpoint or checkpoints.NullCheckpoint()
+    industry_map = cp.load("industry_map")
+    if industry_map is None:
+        if job_id:
+            JOBS.update(job_id, stage="加载申万行业映射", progress=0.12)
+        industry_map = load_industry_map(refresh=refresh)
+        if industry_map.empty:
+            return {"ok": False, "code": code,
+                    "reason": "申万行业映射构造失败（无法取得成分股）"}
+        cp.save("industry_map", industry_map)
     if job_id:
         JOBS.update(job_id, stage="加载持仓与行情并拟合", progress=0.4)
-    return holdings_payload(fit_fund_holdings(code, industry_map,
-                                              refresh=refresh))
+    fitted = cp.load("fit")
+    if fitted is None:
+        fitted = fit_fund_holdings(code, industry_map, refresh=refresh)
+        cp.save("fit", fitted)
+    return holdings_payload(fitted)
 
 
 def correlation(**arguments):
@@ -226,11 +234,31 @@ def _stamp(result, data_stamp=None):
     return result
 
 
+_CHECKPOINT_OPERATIONS = ("analyze", "refit", "backtest", "holdings")
+
+
+def _checkpoint_for(operation, params, jid, stamp):
+    """P3-F：为长任务建阶段检查点；行情/相关性等短任务用空实现。"""
+    if not jid or operation not in _CHECKPOINT_OPERATIONS:
+        return checkpoints.NullCheckpoint()
+    fingerprint = {"operation": operation, "stamp": stamp,
+                   "args": {key: value for key, value in params.items()
+                            if key != "job_id"}}
+    return checkpoints.StageCheckpoint(jid, fingerprint)
+
+
 def _dispatch(operation, params, jid):
+    stamp_before = _data_stamp_for(operation, params)
+    cp = _checkpoint_for(operation, params, jid, stamp_before)
+    result = _dispatch_stage(operation, params, jid, cp, stamp_before)
+    cp.clear()                       # 只有整体成功才丢弃阶段产物
+    return result
+
+
+def _dispatch_stage(operation, params, jid, checkpoint, stamp_before):
     if operation == "analyze":
-        stamp_before = _data_stamp_for(operation, params)
         initial_path = fund_cache_path(params, stamp_before)
-        result=_stamp(analyze(**params,job_id=jid), stamp_before)
+        result=_stamp(analyze(**params,job_id=jid,checkpoint=checkpoint), stamp_before)
         try:
             if fund_cache_path(params, _data_stamp_for(operation, params)) == initial_path:
                 _atomic_pickle_dump(result,initial_path)
@@ -240,25 +268,22 @@ def _dispatch(operation, params, jid):
             LOG.exception("分析完成，但缓存写入失败")
         return result
     if operation == "market":
-        return _stamp(analyze_market(**params,job_id=jid),
-                      _data_stamp_for(operation, params))
+        return _stamp(analyze_market(**params,job_id=jid), stamp_before)
     if operation == "corr":
-        return _stamp(correlation(**params, job_id=jid),
-                      _data_stamp_for(operation, params))
+        return _stamp(correlation(**params, job_id=jid), stamp_before)
     if operation == "refit":
         JOBS.update(jid,stage="重新学习模型",progress=.2)
         arguments=dict(params)
         arguments["model_key"]=arguments.pop("model")
-        return _stamp(refit_single(**arguments),
-                      _data_stamp_for(operation, params))
+        return _stamp(refit_single(**arguments,checkpoint=checkpoint), stamp_before)
     if operation == "backtest":
         arguments=dict(params)
         arguments["model_key"]=arguments.pop("model")
         arguments["start_date"]=arguments.pop("start",None)
         arguments["end_date"]=arguments.pop("end",None)
-        return _stamp(backtest_fund(**arguments,job_id=jid),
-                      _data_stamp_for(operation, params))
+        return _stamp(backtest_fund(**arguments,job_id=jid,checkpoint=checkpoint),
+                      stamp_before)
     if operation == "holdings":
-        return _stamp(holdings(**params, job_id=jid),
-                      _data_stamp_for(operation, params))
+        return _stamp(holdings(**params, job_id=jid, checkpoint=checkpoint),
+                      stamp_before)
     raise ValueError("未知任务操作")

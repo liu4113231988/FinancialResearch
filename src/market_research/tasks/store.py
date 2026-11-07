@@ -59,19 +59,31 @@ class DurableJobStore:
 
     def enqueue(self, code, models, operation, arguments, key=None):
         settings, current = Settings.load(), time.time()
+        jid = uuid.uuid4().hex[:16]
         with storage.connection() as db:
             _schema(db)
             db.execute("DELETE FROM analysis_jobs WHERE status IN ('done','error') AND updated < ?", [current - 86400])
             if key:
-                found = db.execute("SELECT id FROM analysis_jobs WHERE task_key=? AND status IN ('queued','running') ORDER BY created LIMIT 1", [key]).fetchone()
+                found = db.execute("SELECT id FROM analysis_jobs WHERE task_key=? AND status IN ('queued','running') ORDER BY created,id LIMIT 1", [key]).fetchone()
                 if found:
                     return found[0], True
             count = db.execute("SELECT count(*) FROM analysis_jobs WHERE status IN ('queued','running')").fetchone()[0]
             if count >= settings.queue_limit:
                 raise JobsBusy(f"待处理任务已达上限 {settings.queue_limit}，请稍后重试")
-            jid = uuid.uuid4().hex[:16]
-            db.execute("INSERT INTO analysis_jobs(id,code,models,operation,arguments,task_key,status,stage,progress,detail,created,updated) VALUES (?,?,?,?,?,?,'queued','等待计算进程',0,'[]',?,?)",
-                       [jid, code, json.dumps(models), operation, json.dumps(arguments, ensure_ascii=False, allow_nan=False), key, current, current])
+            values = [jid, code, json.dumps(models), operation, json.dumps(arguments, ensure_ascii=False, allow_nan=False), key, current, current]
+            if key:
+                # P3-E：检查与插入用同一条 INSERT..WHERE NOT EXISTS 完成，
+                # 不再依赖「先查后插」的两个时间点；并发进程各自提交时，
+                # 只有第一个能看到“不存在”，其余读到已插入的那条记录。
+                db.execute("INSERT INTO analysis_jobs(id,code,models,operation,arguments,task_key,status,stage,progress,detail,created,updated) "
+                           "SELECT ?,?,?,?,?,?,'queued','等待计算进程',0,'[]',?,? "
+                           "WHERE NOT EXISTS (SELECT 1 FROM analysis_jobs WHERE task_key=? AND status IN ('queued','running'))",
+                           [*values, key])
+                found = db.execute("SELECT id FROM analysis_jobs WHERE task_key=? AND status IN ('queued','running') ORDER BY created,id LIMIT 1", [key]).fetchone()
+                if found:
+                    return found[0], found[0] != jid
+                return jid, False
+            db.execute("INSERT INTO analysis_jobs(id,code,models,operation,arguments,task_key,status,stage,progress,detail,created,updated) VALUES (?,?,?,?,?,?,'queued','等待计算进程',0,'[]',?,?)", values)
             return jid, False
 
     def submit(self, code, models, operation, arguments, key=None):

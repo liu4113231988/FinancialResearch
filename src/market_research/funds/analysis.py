@@ -33,6 +33,7 @@ from market_research.data.files import _atomic_pickle_dump
 from market_research.modeling.backtest import run_backtest, score_to_position
 from market_research.modeling.models import MODELS, MODEL_ORDER, ModelZoo
 from market_research.modeling.signals import SignalEngine, build_decision
+from market_research.tasks.checkpoints import NullCheckpoint
 
 CACHE_DIR = C.DATA_DIR / "webcache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -144,7 +145,8 @@ def analyze(code: str, models: Optional[List[str]] = None,
             max_rebal: Optional[int] = None,
             auto_equity: bool = True,
             start: Optional[str] = None,
-            end: Optional[str] = None) -> dict:
+            end: Optional[str] = None,
+            checkpoint=None) -> dict:
     """
     完整分析流程。models 为空表示全部 11 个模型。
 
@@ -155,6 +157,7 @@ def analyze(code: str, models: Optional[List[str]] = None,
     models = models or MODEL_ORDER
     models = [m for m in models if m in MODELS]
     t0 = time.time()
+    cp = checkpoint or NullCheckpoint()
 
     def prog(stage, pct, detail=""):
         if job_id:
@@ -163,8 +166,11 @@ def analyze(code: str, models: Optional[List[str]] = None,
     # ---------- 0. 数据
     prog("抓取基金与指数数据", 0.05)
     win_start, win_end = _parse_window(start, end)
-    panel = D.load_panel(code, start=(win_start or C.START_DATE),
-                         end=win_end, refresh=refresh, verbose=False)
+    panel = cp.load("panel")
+    if panel is None:
+        panel = D.load_panel(code, start=(win_start or C.START_DATE),
+                             end=win_end, refresh=refresh, verbose=False)
+        cp.save("panel", panel)
     nav = panel["__FUND__"]
     name = (C.DEMO_FUNDS.get(code) or C.EXTENDED_FUNDS.get(code) or
             _guess_name(code))
@@ -172,28 +178,43 @@ def analyze(code: str, models: Optional[List[str]] = None,
 
     # ---------- 1. 净值
     prog("计算净值序列与回撤", 0.22)
-    navb = nav_block(panel, nav)
+    navb = cp.load("nav")
+    if navb is None:
+        navb = nav_block(panel, nav)
+        cp.save("nav", navb)
     # 方向概率：与趋势色带（形态描述）分开发布，样本不足时 available=False
     prog("估计净值方向概率", 0.26)
-    forecast = fund_forecast_payload(nav)
+    forecast = cp.load("forecast")
+    if forecast is None:
+        forecast = fund_forecast_payload(nav)
+        cp.save("forecast", forecast)
 
     # ---------- 2. 相关性
     prog("计算与指数的相关性", 0.32)
-    corr = correlation_block(panel, nav)
+    corr = cp.load("correlation")
+    if corr is None:
+        corr = correlation_block(panel, nav)
+        cp.save("correlation", corr)
 
     # ---------- 3. 多模型拟合（耗时主体，占 0.35~0.9）
-    prog("机器学习拟合中", 0.35, f"{len(models)} 个模型")
+    reps = cp.load("models")
+    if reps is None:
+        prog("机器学习拟合中", 0.35, f"{len(models)} 个模型")
 
-    def on_progress(key, done, total, r2):
-        JOBS.update(job_id, progress=0.35 + 0.5 * done / max(total, 1),
-                    stage=f"拟合 {MODELS[key].name}",
-                    detail=f"({done}/{total}) 样本外R²="
-                           f"{'—' if r2 is None or (isinstance(r2, float) and not math.isfinite(r2)) else f'{r2:.3f}'}")
+        def on_progress(key, done, total, r2):
+            JOBS.update(job_id, progress=0.35 + 0.5 * done / max(total, 1),
+                        stage=f"拟合 {MODELS[key].name}",
+                        detail=f"({done}/{total}) 样本外R²="
+                               f"{'—' if r2 is None or (isinstance(r2, float) and not math.isfinite(r2)) else f'{r2:.3f}'}")
 
-    zoo_cfg = {**C.RBSA, "auto_equity": bool(auto_equity)}
-    zoo = ModelZoo(zoo_cfg)
-    reps = zoo.run(panel, models, params=params, max_rebal=max_rebal,
-                   progress=on_progress if job_id else None)
+        zoo_cfg = {**C.RBSA, "auto_equity": bool(auto_equity)}
+        zoo = ModelZoo(zoo_cfg)
+        reps = zoo.run(panel, models, params=params, max_rebal=max_rebal,
+                       progress=on_progress if job_id else None)
+        cp.save("models", reps)
+    else:
+        prog("复用已完成阶段：模型拟合", 0.88, "崩溃重试跳过已完成阶段")
+        zoo = ModelZoo({**C.RBSA, "auto_equity": bool(auto_equity)})
 
     # ---------- 4. 序列化
     prog("组装结果", 0.9)
@@ -416,7 +437,8 @@ def refit_single(code: str, model_key: str,
                  max_rebal: Optional[int] = None,
                  auto_equity: bool = True,
                  start: Optional[str] = None,
-                 end: Optional[str] = None) -> dict:
+                 end: Optional[str] = None,
+                 checkpoint=None) -> dict:
     """
     只重跑一个模型（"重新学习"按钮）。
 
@@ -426,12 +448,19 @@ def refit_single(code: str, model_key: str,
     而页面其它区块是用户选的窗口，结果混在两个区间上。
     """
     win_start, win_end = _parse_window(start, end)
-    panel = D.load_panel(code, start=(win_start or C.START_DATE),
-                         end=win_end, verbose=False)
+    cp = checkpoint or NullCheckpoint()
+    panel = cp.load("panel")
+    if panel is None:
+        panel = D.load_panel(code, start=(win_start or C.START_DATE),
+                             end=win_end, verbose=False)
+        cp.save("panel", panel)
     zoo_cfg = {**C.RBSA, "auto_equity": bool(auto_equity)}
     zoo = ModelZoo(zoo_cfg)
-    rep = zoo.run(panel, [model_key], params={model_key: params or {}},
-                  workers=1, max_rebal=max_rebal)[model_key]
+    rep = cp.load("model")
+    if rep is None:
+        rep = zoo.run(panel, [model_key], params={model_key: params or {}},
+                      workers=1, max_rebal=max_rebal)[model_key]
+        cp.save("model", rep)
     R = np.log(panel.astype(float)).diff().dropna()
     nav_oos = panel["__FUND__"].reindex(R.index[C.RBSA["window"]:])
     return model_payload(rep, nav_oos)
@@ -449,7 +478,8 @@ def backtest_fund(code: str, model_key: str = "enet_slsqp",
                   window_start: Optional[str] = None,
                   window_end: Optional[str] = None,
                   params: Optional[dict] = None,
-                  max_rebal: Optional[int] = None) -> dict:
+                  max_rebal: Optional[int] = None,
+                  checkpoint=None) -> dict:
     """
     拟合 → 健康度买卖决策 → 指定日期区间的回测。
 
@@ -471,8 +501,12 @@ def backtest_fund(code: str, model_key: str = "enet_slsqp",
     params = _check_params({model_key: params or {}})
 
     prog("加载数据", 0.1)
-    panel = D.load_panel(code, start=window_start or C.START_DATE,
-                         end=window_end, verbose=False)
+    cp = checkpoint or NullCheckpoint()
+    panel = cp.load("panel")
+    if panel is None:
+        panel = D.load_panel(code, start=window_start or C.START_DATE,
+                             end=window_end, verbose=False)
+        cp.save("panel", panel)
     nav = panel["__FUND__"]
     name = (C.DEMO_FUNDS.get(code) or C.EXTENDED_FUNDS.get(code)
             or _guess_name(code))
@@ -480,8 +514,11 @@ def backtest_fund(code: str, model_key: str = "enet_slsqp",
     prog(f"滚动拟合 {MODELS[model_key].name}", 0.25)
     zoo_cfg = {**C.RBSA, "auto_equity": bool(auto_equity)}
     zoo = ModelZoo(zoo_cfg)
-    rep = zoo.run(panel, [model_key], params=params, workers=1,
-                  max_rebal=C.RBSA["max_rebal"] if max_rebal is None else max_rebal)[model_key]
+    rep = cp.load("model")
+    if rep is None:
+        rep = zoo.run(panel, [model_key], params=params, workers=1,
+                      max_rebal=C.RBSA["max_rebal"] if max_rebal is None else max_rebal)[model_key]
+        cp.save("model", rep)
 
     syn_ret = rep.syn_ret
     syn_nav = np.exp(syn_ret.cumsum())

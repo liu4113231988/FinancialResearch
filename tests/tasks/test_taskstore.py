@@ -17,6 +17,16 @@ from market_research.tasks.store import DurableJobStore, bind_attempt, LEASE_SEC
 from market_research.errors import JobsBusy
 
 
+def _enqueue_same_key(payload):
+    """独立进程提交同一个 key，验证跨进程去重是原子的（P3-E）。"""
+    data_dir, key = payload
+    import market_research.config as _C
+    _C.DATA_DIR = Path(data_dir)
+    from market_research.tasks.store import DurableJobStore as _Store
+    return _Store().enqueue('sh000300', ['index'], 'market',
+                            {'kind': 'index', 'code': 'sh000300'}, key=key)
+
+
 class TaskTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(dir=C.ROOT/'output')
@@ -40,6 +50,23 @@ class TaskTests(unittest.TestCase):
         other=DurableJobStore()
         self.assertEqual(other.public(results[0][0])['status'],'queued')
         self.assertNotIn('result',other.public(results[0][0]))
+
+    def test_concurrent_processes_enqueue_same_key_once(self):
+        """P3-E：多进程同时提交同一 key，数据库只应有一条排队记录。"""
+        from concurrent.futures import ProcessPoolExecutor
+        import multiprocessing
+        payloads = [(self.temp.name, 'cross-process-key') for _ in range(6)]
+        with ProcessPoolExecutor(max_workers=6,
+                                 mp_context=multiprocessing.get_context('spawn')) as pool:
+            results = list(pool.map(_enqueue_same_key, payloads))
+        self.assertEqual(len({jid for jid, _ in results}), 1)
+        self.assertEqual(sum(1 for _, merged in results if not merged), 1)
+        with storage.connection() as db:
+            count = db.execute(
+                "SELECT count(*) FROM analysis_jobs WHERE task_key=? "
+                "AND status IN ('queued','running')",
+                ['cross-process-key']).fetchone()[0]
+        self.assertEqual(count, 1)
 
     def test_lease_recovery_fences_late_progress_and_result(self):
         jid,_=self.enqueue()
