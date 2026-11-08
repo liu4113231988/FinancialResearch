@@ -200,9 +200,14 @@ def _load_prices(record: dict, today: date, fetch: bool):
         basis = record.get("price_basis") or NAV_BASIS_TOTAL
         if basis not in (NAV_BASIS_TOTAL, NAV_BASIS_CUM):
             basis = NAV_BASIS_TOTAL
-        return load_fund_nav_cached(code, start=start, end=end,
-                                    refresh=fetch, basis=basis,
-                                    allow_fetch=fetch, fresh=not fetch)
+        nav = load_fund_nav_cached(code, start=start, refresh=fetch,
+                                   basis=basis, allow_fetch=fetch,
+                                   fresh=not fetch)
+        # 该 loader 没有 end 参数：命中同步历史时序列会延伸到判定日之后，
+        # 不截断会把未来净值带进收益计算。结算只允许用到今天为止的净值。
+        if len(nav):
+            nav = nav.loc[_normalize(nav.index) <= pd.Timestamp(today)]
+        return nav
     if fetch:
         from market_research.market.analysis import load_bars
         return load_bars(kind, code, start, end, basis, refresh=True)

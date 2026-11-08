@@ -66,11 +66,11 @@
 
 ### P1（优先修复）
 
-- [ ] **G-01：基金预测结算传入不存在的 `end` 参数，所有基金记录都无法结算**
+- [x] **G-01：基金预测结算传入不存在的 `end` 参数，所有基金记录都无法结算——已修复（2026-11-08）**
   - 位置：`src/market_research/predictions/judge.py:180-207`；`src/market_research/data/panels.py:222-226`。
   - 触发与影响：`_load_prices()` 的基金分支调用 `load_fund_nav_cached(..., end=end)`，真实函数签名没有 `end`。`predictions settle` 或 worker 自动结算遇到任意基金记录都会抛出 `TypeError`；当前异常分支虽会保持 `pending`，但每轮都会重试失败，基金命中率、收益和 Brier 永远没有有效结算样本。
   - 已复现：直接读取一条基金记录得到 `TypeError: load_fund_nav_cached() got an unexpected keyword argument 'end'`。
-  - 修复与验收：移除该调用的 `end`，取得序列后按结算截止日截断；新增真实函数签名的基金端到端结算测试，mock 必须使用 `autospec=True` 或调用真实 loader，覆盖 `total/cum` 两种冻结口径。现有 `tests/predictions/test_ledger.py:299-305` 的普通 mock 会接受任意关键字参数，无法防止回退。
+  - 已修复：移除该调用的 `end`，取回序列后按判定日截断；回归 `tests/predictions/test_ledger.py:test_fund_settlement_runs_through_real_loader`（走真实 loader，断言基金记录实际判对且不使用未来净值），`total` 口径的冻结 basis 仍由 `test_fund_settlement_uses_recorded_nav_basis` 覆盖。
 
 - [ ] **G-04：不可信拟合日仍累计卖出确认天数，恢复可信的第一天可能立即误卖**
   - 位置：`src/market_research/modeling/signals.py:615-640`。

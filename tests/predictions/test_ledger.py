@@ -325,6 +325,33 @@ class ConsistencyTests(unittest.TestCase):
             judge._load_prices(record, date(2026, 12, 10), fetch=False)
         self.assertFalse(cached.call_args.kwargs["fresh"])
 
+    def test_fund_settlement_runs_through_real_loader(self):
+        # G-01 回归：基金分支必须用真实签名调用 load_fund_nav_cached，且只用
+        # 判定日之前的净值。旧实现传了不存在的 end=，结算必然 TypeError；
+        # 即使去掉该参数，命中同步历史时序列也会延伸到判定日之后。
+        as_of, today = date(2026, 10, 20), date(2026, 11, 8)
+        dates = pd.bdate_range("2026-09-01", "2026-11-13")
+        history = pd.DataFrame(
+            {"close": [1.0 + 0.01 * n for n in range(len(dates))]},
+            index=dates)
+        record = {"id": "fund-1", "asset_kind": "fund", "asset_code": "110022",
+                  "asset_name": "测试基金", "price_basis": "total",
+                  "source": "direction", "direction": "up", "horizon": 5,
+                  "as_of": as_of.isoformat(),
+                  "params": json.dumps({"horizon_basis": "observed_bars"})}
+        self.assertGreater(history.index.max(), pd.Timestamp(today))
+        with patch("market_research.tasks.sync.cached", return_value=history):
+            prices = judge._load_prices(record, today, fetch=False)
+            self.assertIsInstance(prices, pd.Series)
+            self.assertLessEqual(prices.index.max(), pd.Timestamp(today))
+            with patch.object(ledger, "pending_records", return_value=[record]), \
+                    patch.object(ledger, "update_record") as update:
+                counts = judge.settle(today=today)
+        self.assertEqual(counts["unavailable"], 0)
+        self.assertEqual(counts["correct"], 1)
+        self.assertEqual(update.call_args.kwargs["judge_date"], "2026-10-27")
+        self.assertGreater(update.call_args.kwargs["realized_return"], 0)
+
 
 class SettleAndSummaryTests(unittest.TestCase):
     def setUp(self):
