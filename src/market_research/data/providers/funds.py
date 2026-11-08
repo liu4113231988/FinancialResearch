@@ -208,36 +208,35 @@ def calibrate_total_return(cum_nav: pd.Series, unit_nav: pd.Series,
     F = (1.0 + r).cumprod()
 
     anchors = cum_ret[(cum_ret.index >= idx[0]) & (cum_ret.index <= idx[-1])]
+    scale = {}
+    for d, v in anchors.items():
+        j = F.index.asof(d)
+        if j is None or pd.isna(j) or j not in F.index:
+            continue
+        fm = float(F.loc[j])
+        if np.isfinite(fm) and fm > 0:
+            scale[d] = (1.0 + float(v) / 100.0) / fm
     degraded = False
-    if len(anchors) >= 2:
-        scale = {}
-        for d, v in anchors.items():
-            j = F.index.asof(d)
-            if j is None or pd.isna(j) or j not in F.index:
-                continue
-            fm = float(F.loc[j])
-            if np.isfinite(fm) and fm > 0:
-                scale[d] = (1.0 + float(v) / 100.0) / fm
-        if len(scale) >= 2:
-            s = pd.Series(scale).sort_index()
-            sc = s.reindex(F.index).replace([np.inf, -np.inf], np.nan).ffill()
-            first = sc.first_valid_index()
-            if first is not None and first > F.index[0]:
-                # 首个锚点之前没有"当时已知"的系数，丢弃这段（旧实现用 bfill
-                # 拿未来锚点回填）。分析窗口起点通常比抓取起点晚数年。
-                F = F.loc[first:]
-                sc = sc.loc[first:]
-            sc = sc.ffill().fillna(1.0)
-            F = F * sc
-        else:
-            # ★ 复查发现：锚点存在但全部落在净值区间之外时，这里会**静默**
-            #   跳过校准，返回只有分红修正的 F。必须打 degraded 标记，否则
-            #   调用方会把未校准序列以 basis="total" 永久写入缓存并进入同步
-            #   正史，口径错误无从察觉。
-            LOG.warning(
-                "累计收益率锚点 %d 个全部落在净值区间 [%s ~ %s] 之外，拆分校准未生效",
-                len(anchors), idx[0].date(), idx[-1].date())
-            degraded = True
+    if scale:
+        s = pd.Series(scale).sort_index()
+        sc = s.reindex(F.index).replace([np.inf, -np.inf], np.nan).ffill()
+        first = sc.first_valid_index()
+        if first is not None and first > F.index[0]:
+            # 首个锚点之前没有"当时已知"的系数，丢弃这段（旧实现用 bfill
+            # 拿未来锚点回填）。分析窗口起点通常比抓取起点晚数年。
+            F = F.loc[first:]
+            sc = sc.loc[first:]
+        sc = sc.ffill().fillna(1.0)
+        F = F * sc
+    else:
+        # ★ 复查发现：没有任何可用锚点（锚点为空或全部落在净值区间之外）
+        #   时这里会**静默**跳过校准，返回只有分红修正的 F。必须打 degraded
+        #   标记，否则调用方会把未校准序列以 basis="total" 永久写入缓存，
+        #   口径错误无从察觉。
+        LOG.warning(
+            "累计收益率锚点 %d 个在净值区间 [%s ~ %s] 内均不可用，拆分校准未生效",
+            len(anchors), idx[0].date(), idx[-1].date())
+        degraded = True
     F = F.clip(lower=1e-8)
     F.name = "total_return"
     if degraded:
@@ -268,6 +267,9 @@ def fetch_fund_total_return(code: str,
     if rr.empty:
         LOG.warning("%s 拿不到累计收益率锚点，只用分红修正（拆分未校准）", code)
         idx = cum.index.intersection(unit.index)
+        if not len(idx):
+            cum.attrs["degraded"] = True
+            return cum
         C, U = cum.reindex(idx), unit.reindex(idx)
         r = (C.diff() / U.shift(1)).fillna(0.0)
         r.iloc[0] = 0.0

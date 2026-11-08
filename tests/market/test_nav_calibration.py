@@ -54,6 +54,24 @@ class CalibrationCausalityTest(unittest.TestCase):
             got = float(out.loc[:d].iloc[-1])
             self.assertAlmostEqual(got / (1.0 + v / 100.0), 1.0, places=6)
 
+    def test_single_anchor_is_applied_not_silently_skipped(self):
+        cum, unit, anchors = _setup()
+        out = calibrate_total_return(cum, unit, anchors.iloc[:1])
+        self.assertFalse(bool(out.attrs.get("degraded")))
+        anchor = anchors.index[0]
+        got = float(out.loc[:anchor].iloc[-1])
+        self.assertAlmostEqual(got / (1.0 + anchors.iloc[0] / 100.0), 1.0, places=6)
+
+    def test_no_usable_anchor_is_marked_degraded(self):
+        # 锚点为空时旧实现静默返回未校准序列，随后会被当作 total 口径缓存。
+        cum, unit, _ = _setup()
+        empty = pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+        with self.assertLogs("market_research.data.providers.funds",
+                             level="WARNING"):
+            out = calibrate_total_return(cum, unit, empty)
+        self.assertTrue(bool(out.attrs.get("degraded")))
+        self.assertGreater(len(out), 50)
+
 
 if __name__ == "__main__":
     unittest.main()
