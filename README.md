@@ -127,7 +127,7 @@ docker stop market-research
 
 ## 统一研究命令
 
-根目录只保留 `run.py` 作为研究入口，业务实现位于 `market_research` 包。16 个命令共用注册表，支持帮助与显式参数转发：
+根目录只保留 `run.py` 作为研究入口，业务实现位于 `market_research` 包。17 个命令共用注册表，支持帮助与显式参数转发：
 
 ```powershell
 uv run python run.py --help
@@ -139,7 +139,11 @@ uv run python run.py cache-warm 110022
 uv run python run.py cache-migrate
 uv run python run.py market-snapshot --help
 uv run python run.py market-validate --help
+uv run python run.py predictions summary
+uv run python run.py predictions settle --limit 500
 ```
+
+实盘最新收盘的方向概率与规则买卖信号会写入 `prediction_records`；到期后用 `predictions settle` 结算，`predictions summary` 查看命中率/Brier。口径与边界见[预测台账与回验](docs/预测台账与回验.md)。
 
 也可使用 `uv run market-research-cli ...`、安装后的 `fil ...` 或 `uv run python -m market_research.cli ...`。原 `uv run python run.py 110022` 仍默认基金分析；不带参数仍分析全部演示基金。查看帮助不会执行研究计算。
 
@@ -260,7 +264,8 @@ scripts/        Windows 同步任务安装、一键启动（start.ps1）、真�
 
 | 文档 | 用途 |
 | --- | --- |
-| [模块与入口](docs/模块与入口.md) | 当前目录、模块职责、16 个命令与旧入口映射 |
+| [模块与入口](docs/模块与入口.md) | 当前目录、模块职责、17 个命令与旧入口映射 |
+| [预测台账与回验](docs/预测台账与回验.md) | 预测落盘字段、5/20 日结算口径、blocked/insufficient 与汇总命令 |
 | [架构设计](docs/架构设计.md) | 当前数据流、进程与恢复规则、部署约束 |
 | [功能完整性检查](docs/功能完整性检查.md) | 当前已实现能力、缺口与验证边界 |
 | [研究方案](docs/研究方案.md) | 基金研究方法、带样本/窗口口径的历史实验 |
