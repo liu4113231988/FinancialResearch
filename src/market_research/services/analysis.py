@@ -255,6 +255,15 @@ def _dispatch(operation, params, jid):
     return result
 
 
+def _record_predictions(operation, params, result):
+    """把实盘最新收盘的预测写入台账；失败不影响分析结果。"""
+    try:
+        from market_research.predictions.ledger import record_result
+        record_result(operation, params, result)
+    except Exception:
+        LOG.warning("预测台账写入失败，不影响分析结果", exc_info=True)
+
+
 def _dispatch_stage(operation, params, jid, checkpoint, stamp_before):
     if operation == "analyze":
         initial_path = fund_cache_path(params, stamp_before)
@@ -266,9 +275,12 @@ def _dispatch_stage(operation, params, jid, checkpoint, stamp_before):
                 LOG.info("分析期间行情发生变化，跳过结果缓存写入")
         except Exception:
             LOG.exception("分析完成，但缓存写入失败")
+        _record_predictions("analyze", params, result)
         return result
     if operation == "market":
-        return _stamp(analyze_market(**params,job_id=jid), stamp_before)
+        result = _stamp(analyze_market(**params,job_id=jid), stamp_before)
+        _record_predictions("market", params, result)
+        return result
     if operation == "corr":
         return _stamp(correlation(**params, job_id=jid), stamp_before)
     if operation == "refit":
@@ -281,8 +293,10 @@ def _dispatch_stage(operation, params, jid, checkpoint, stamp_before):
         arguments["model_key"]=arguments.pop("model")
         arguments["start_date"]=arguments.pop("start",None)
         arguments["end_date"]=arguments.pop("end",None)
-        return _stamp(backtest_fund(**arguments,job_id=jid,checkpoint=checkpoint),
-                      stamp_before)
+        result = _stamp(backtest_fund(**arguments,job_id=jid,checkpoint=checkpoint),
+                        stamp_before)
+        _record_predictions("backtest", params, result)
+        return result
     if operation == "holdings":
         return _stamp(holdings(**params, job_id=jid, checkpoint=checkpoint),
                       stamp_before)

@@ -27,6 +27,7 @@ COMMAND_SPECS = (
     Command('walkforward', 'research.commands.walkforward', '时间向前验证', 'run_walkforward.py'),
     Command('market-snapshot', 'research.market_snapshot', '固定证券验证快照与日历准备'),
     Command('market-validate', 'research.market_validation', '股票指数方向与成交验证'),
+    Command('predictions', 'predictions.commands', '预测台账：结算与汇总'),
 )
 
 COMMANDS = {command.name: command.module for command in COMMAND_SPECS}
