@@ -107,6 +107,28 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(out['closed_trades'],0)
         self.assertTrue(out['open_position'])
 
+    def test_flat_round_trip_does_not_depress_win_rate(self):
+        # 一笔盈利 + 一笔平局：旧口径 0.5，修复后应为 1.0 且平局单列。
+        frame=bars([100,110,120,120,120])
+        signal=pd.Series([1,0,1,0,np.nan],index=frame.index)
+        out=simulate_execution(frame,signal,0,0)
+        self.assertEqual(out['closed_trades'],2)
+        self.assertEqual(out['flat_trades'],1)
+        self.assertEqual(out['win_rate'],1.0)
+        json.dumps(_jsafe(out),allow_nan=False)
+
+    def test_constraint_data_missing_is_explicit_and_t1_is_declared(self):
+        frame=bars([100]*3)
+        signal=pd.Series([1.,0.,np.nan],index=frame.index)
+        out=simulate_execution(frame,signal,0,0)
+        self.assertFalse(out['constraint_data_available'])
+        self.assertEqual(out['t1_locked_count'],0)
+        self.assertTrue(any('T+1' in text for text in out['assumptions']))
+        loaded=bars([100]*3); loaded['limit_up']=[110.,110.,110.]
+        with_limit=simulate_execution(loaded,signal,0,0)
+        self.assertTrue(with_limit['constraint_data_available'])
+        self.assertEqual(with_limit['constraint_coverage']['limit_up'],3)
+
     def test_summaries_keep_constraints_and_are_json_safe(self):
         frame=bars([100]*10)
         out=execution_diagnostics(frame,pd.Series(np.nan,index=frame.index))

@@ -57,12 +57,44 @@ class DurableJobStore:
                     "SELECT status, count(*) FROM analysis_jobs GROUP BY status").fetchall()
         return {str(status): int(count) for status, count in rows}
 
+    def _expire(self, db, current, settings):
+        """终态与排队任务的过期清理（每次入队/领取都跑，避免 worker 久停后永久 429）。
+
+        · 终态按 updated 保留 `job_terminal_ttl` 后物理删除；
+        · queued 超过 `job_queued_ttl` 转为 error 并留痕，用户查得到
+          "排队超时" 而不是 404；recover() 把中断任务转回 queued 时会刷新
+          updated，因此重试任务仍有一个完整 TTL 的领取窗口。
+        """
+        db.execute("DELETE FROM analysis_jobs WHERE status IN ('done','error') "
+                   "AND updated < ?", [current - settings.job_terminal_ttl])
+        db.execute("UPDATE analysis_jobs SET status='error',stage='排队超时',"
+                   "error='排队超时：工作进程未在有效期内领取该任务，请重新提交',"
+                   "updated=?,token=NULL WHERE status='queued' AND updated < ?",
+                   [current, current - settings.job_queued_ttl])
+
+    def _active_count(self, db, current, settings):
+        """并发名额：running + 刚异常终态、进程尚未确认退出的任务。
+
+        取消/超时把 status 立刻改成 error，但旧子进程可能仍在写 DuckDB；
+        名额瞬时释放会让 supervisor 马上再 claim 一个，出现 max_jobs+1 个
+        并发写进程。给这类任务一段纯时间衰减的"排水"占位 —— 不需要显式
+        释放计数点，因此不会反过来造成永久 429。正常 done 不占位。
+        """
+        grace = settings.job_drain_grace
+        if grace <= 0:
+            return db.execute(
+                "SELECT count(*) FROM analysis_jobs WHERE status='running'").fetchone()[0]
+        return db.execute(
+            "SELECT count(*) FROM analysis_jobs WHERE status='running' "
+            "OR (status='error' AND lease_until IS NOT NULL AND updated > ?)",
+            [current - grace]).fetchone()[0]
+
     def enqueue(self, code, models, operation, arguments, key=None):
         settings, current = Settings.load(), time.time()
         jid = uuid.uuid4().hex[:16]
         with storage.connection() as db:
             _schema(db)
-            db.execute("DELETE FROM analysis_jobs WHERE status IN ('done','error') AND updated < ?", [current - 86400])
+            self._expire(db, current, settings)
             if key:
                 found = db.execute("SELECT id FROM analysis_jobs WHERE task_key=? AND status IN ('queued','running') ORDER BY created,id LIMIT 1", [key]).fetchone()
                 if found:
@@ -96,10 +128,12 @@ class DurableJobStore:
 
     def claim(self):
         current = time.time()
+        settings = Settings.load()
         with storage.connection() as db:
             _schema(db)
+            self._expire(db, current, settings)
             self.recover(db, current)
-            if db.execute("SELECT count(*) FROM analysis_jobs WHERE status='running'").fetchone()[0] >= Settings.load().max_jobs:
+            if self._active_count(db, current, settings) >= settings.max_jobs:
                 return None
             job = _row(db.execute("SELECT * FROM analysis_jobs WHERE status='queued' ORDER BY created,id LIMIT 1"))
             if job is None:

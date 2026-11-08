@@ -264,8 +264,11 @@ def _fit_lasso(X, y, cols, equity_ratio, prm):
     coef = mdl.coef_ / sd
     sup = np.where(np.abs(coef) > 1e-12)[0]
     if sup.size == 0:
-        sup = np.array([int(np.nanargmax(np.abs(np.array(
-            [np.corrcoef(X[:, j], y)[0, 1] for j in range(X.shape[1])]))))])
+        # 与 _fit_enet 一致：全常数列会让相关系数全为 NaN，nanargmax 会抛
+        # "All-NaN slice" 拖垮整批拟合；nan_to_num 后至少能选出一个支撑。
+        corr = np.array([abs(np.corrcoef(X[:, j], y)[0, 1])
+                         for j in range(X.shape[1])])
+        sup = np.array([int(np.argmax(np.nan_to_num(corr)))])
     if sup.size > int(prm.get("max_assets", 8)):
         sup = sup[np.argsort(-np.abs(coef[sup]))[:int(prm.get("max_assets", 8))]]
 
@@ -665,7 +668,7 @@ def estimate_equity(fit_fn, X: np.ndarray, y: np.ndarray, cols: List[str],
     for _ in range(2):
         fr = fit_fn(E)
         wv = fr.weights.reindex(cols).fillna(0.0).values
-        v = float(np.var(X @ wv))
+        v = float(np.var(X @ wv, ddof=1))
         if not np.isfinite(v) or v <= 1e-18:
             break
         gamma = float(np.cov(y, X @ wv)[0, 1] / v) * E   # ★ 必须乘回 E：β = γ/E

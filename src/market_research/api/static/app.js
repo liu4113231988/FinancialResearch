@@ -486,9 +486,23 @@ async function api(path, opts) {
   if (!r.ok && r.status !== 202) {
     let msg = `HTTP ${r.status}`;
     try { msg = (await r.json()).error || msg; } catch (e) { }
-    throw new Error(msg);
+    const retryAfter = r.headers && r.headers.get ? r.headers.get('Retry-After') : null;
+    const err = new Error(apiErrorText(r.status, msg, retryAfter));
+    err.status = r.status; err.retryAfter = retryAfter;
+    throw err;
   }
   return r.json();
+}
+// 429/409/404 的含义完全不同：队列忙要等、任务取消或状态冲突要重发、
+// 结果过期要重新分析。统一显示后端 message 时用户看不出下一步该做什么。
+function apiErrorText(status, message, retryAfter) {
+  const hint = {
+    429: '任务队列忙，请稍后重试' + (retryAfter ? `（约 ${retryAfter} 秒后可再试）` : '') + '。',
+    409: '该任务已取消或状态冲突，请重新发起分析。',
+    404: '任务或结果已过期，请重新发起分析。',
+    503: '存储正忙，请稍后重试。',
+  }[status];
+  return hint ? `${hint}（${message}）` : message;
 }
 function showAlert(msg) {
   const a = $('alert');
@@ -561,12 +575,15 @@ function renderWatchlist() {
     ? (S.cat?.known_funds || [])
     : ((kind === 'stock' ? S.cat?.assets?.stocks : S.cat?.assets?.indices) || []);
   const names = Object.fromEntries(pool.map(item => [item.code, item.name]));
+  // 名录加载完成后，剔除已从研究范围移除的失效代码；名录尚未就绪时不过滤，
+  // 否则会把所有自选一次性隐藏。写回 localStorage 由切片外的 pruneWatchlist 做。
+  const visible = pool.length ? codes.filter(code => names[code] !== undefined) : codes;
   sel.innerHTML = '';
   const head = document.createElement('option');
   head.value = '';
-  head.textContent = codes.length ? `— 自选 (${codes.length}) —` : '— 自选 —';
+  head.textContent = visible.length ? `— 自选 (${visible.length}) —` : '— 自选 —';
   sel.appendChild(head);
-  codes.forEach(code => {
+  visible.forEach(code => {
     const opt = document.createElement('option');
     opt.value = code;
     opt.textContent = `${code} ${names[code] || ''}`.trim();
@@ -574,9 +591,10 @@ function renderWatchlist() {
   });
   const typed = $('codeInput').value.trim();
   const current = kind === 'fund' ? (S.result?.code || typed) : typed;
-  $('btnWatch').textContent = codes.includes(current) ? '★' : '☆';
+  $('btnWatch').textContent = visible.includes(current) ? '★' : '☆';
 }
 function toggleWatchlist() {
+  pruneWatchlist();
   const kind = currentKind();
   const label = {fund: '基金', stock: '股票', index: '指数'}[kind];
   const typed = $('codeInput').value.trim();
@@ -592,6 +610,19 @@ function toggleWatchlist() {
   else { codes.push(code); showAlert(`已把 ${code} 加入${label}自选。`); }
   setWatchlist(codes);
   renderWatchlist();
+}
+// 物理清理放在 renderWatchlist 之外：前端回归会把 renderWatchlist 单独切片到
+// vm 里求值，那个上下文没有 LS/setWatchlist，不能在切片内引用。
+function pruneWatchlist() {
+  if (!S.cat) return;
+  const kind = currentKind();
+  const pool = kind === 'fund' ? (S.cat.known_funds || [])
+    : ((kind === 'stock' ? S.cat.assets?.stocks : S.cat.assets?.indices) || []);
+  if (!pool.length) return;
+  const known = new Set(pool.map(item => item.code));
+  const codes = getWatchlist();
+  const valid = codes.filter(code => known.has(code));
+  if (valid.length !== codes.length) setWatchlist(valid);
 }
 function saveLastRun(state) { LS.set(LAST_KEY, state); }
 // 页面恢复：只回填表单（代码/区间/模型/精度），不自动触发分析 ——
@@ -653,11 +684,27 @@ function exportResult() {
 
 // ==================================================================== 初始化
 (async function init() {
+  const state = $('catalogState'), retry = $('btnRetryCatalog');
   try {
+    if (state) state.textContent = '正在读取名录…';
+    if (retry) retry.hidden = true;
     S.cat = await api('/api/catalog');
+    if (state) state.textContent = '';
   } catch (e) {
-    showAlert('无法连接后端：' + e.message); return;
+    if (state) state.textContent = '名录读取失败';
+    if (retry) { retry.hidden = false; retry.onclick = () => location.reload(); }
+    showAlert('无法连接后端：' + e.message + '；可点击「重试加载名录」重新加载。');
+    return;
   }
+  // 基金侧图表容器统一声明为图像；label 取所在面板标题，缺失时回退到 id。
+  // 市场侧图表在 HTML 里已带 role/aria-label，:not([role]) 不会重复覆盖。
+  document.querySelectorAll('.chart:not([role])').forEach(box => {
+    box.setAttribute('role', 'img');
+    if (!box.getAttribute('aria-label')) {
+      const heading = box.closest('.panel')?.querySelector('h3, h4');
+      box.setAttribute('aria-label', (heading?.textContent || box.id || '分析图表').trim());
+    }
+  });
   // P2-36：声明文案与位置由后端配置；失败时保留页面内置默认文案
   try {
     const d = await api('/api/disclosure');
@@ -718,6 +765,7 @@ function exportResult() {
   };
 
   // 自选与页面恢复（本地持久化）
+  pruneWatchlist();
   renderWatchlist();
   $('btnWatch').onclick = toggleWatchlist;
   $('watchSel').onchange = e => {
@@ -806,6 +854,9 @@ function windowStart(years, end = fundDate(new Date())) {
   return `${targetYear}-${String(month).padStart(2, '0')}-${String(Math.min(day, lastDay)).padStart(2, '0')}`;
 }
 function syncFundDates() {
+  // 未来日期没有行情；原生 max 会被 controls.js 的 observer 同步到日历增强控件。
+  const today = fundDate(new Date());
+  $('fundStart').max = today; $('fundEnd').max = today;
   if ($('windowSel').value !== 'custom') {
     $('fundEnd').value = $('fundEnd').value || fundDate(new Date());
     $('fundStart').value = windowStart(selectedWindowYears(), $('fundEnd').value);
@@ -842,6 +893,11 @@ function updateRunHint() {
     (selectedAuto() ? ' · 仓位自适应' : '') +
     ($('windowSel').value === 'custom' ? ' · 自定义区间' : ` · 分析窗口近 ${selectedWindowYears()} 年`);
 }
+
+// 标签页隐藏时暂停轮询，避免后台定时器的突发请求堆到后端。
+// 由文件末尾的 visibilitychange 监听维护；前端回归用 vm 单函数切片求值，
+// 该符号不在切片内，所以轮询里一律用 typeof 守卫。
+let pagePaused = false;
 
 let fundGeneration = 0;
 let correlationGeneration = 0;
@@ -969,6 +1025,11 @@ async function poll(jid, token = fundGeneration) {
   while (token === fundGeneration) {
     // 前 3 分钟 900ms 一查，之后放慢到 2s（长任务不必持续打满后端）
     await new Promise(r => setTimeout(r, attempts > 200 ? 2000 : 900));
+    // 后台标签页暂停轮询；等待不消耗 MAX_POLLS 额度，恢复可见后继续查。
+    while (typeof pagePaused !== 'undefined' && pagePaused) {
+      await new Promise(r => setTimeout(r, 1000));
+      if (token !== fundGeneration) return;
+    }
     if (token !== fundGeneration) return;
     if (++attempts > MAX_POLLS) {
       $('progressWrap').hidden = true;
@@ -1016,6 +1077,10 @@ async function pollCorrelation(jid, win, target, token) {
   try {
     for (let attempts = 0; attempts < MAX_POLLS; attempts++) {
       await new Promise(r => setTimeout(r, attempts > 200 ? 2000 : 900));
+      while (typeof pagePaused !== 'undefined' && pagePaused) {
+        await new Promise(r => setTimeout(r, 1000));
+        if (token !== correlationGeneration || S.result !== target) return;
+      }
       if (token !== correlationGeneration || S.result !== target) return;
       const j = await api('/api/job/' + jid);
       if (token !== correlationGeneration || S.result !== target) return;
@@ -1227,7 +1292,7 @@ function renderModelStrip() {
   $('modelStrip').innerHTML = keys.map(k => {
     const m = r.models[k]; if (!m) return '';
     const err = m.metrics.oos_r2 === null;
-    return `<div class="mcard ${k === S.sel ? 'sel' : ''}" data-k="${k}">
+    return `<div class="mcard ${k === S.sel ? 'sel' : ''}" data-k="${k}" tabindex="0" role="button" aria-pressed="${k === S.sel}">
       ${k === S.best ? '<span class="best">区间最优</span>' : ''}
       <div class="nm">${escapeHtml(m.name)}</div>
       <div class="r2" style="color:${err ? 'var(--bad)' : 'var(--fg)'}">
@@ -1238,6 +1303,9 @@ function renderModelStrip() {
   }).join('');
   [...$('modelStrip').children].forEach(c => {
     c.onclick = () => { S.sel = c.dataset.k; renderModelStrip(); renderRank(); renderSelected(); };
+    c.onkeydown = e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); c.click(); }
+    };
   });
 }
 
@@ -1274,7 +1342,7 @@ function renderRank() {
       const bLow = bt !== null && bt !== undefined && !isNaN(bt)
                    && (bt < eq * 0.7 || bt < 0);
       const r2col = noR2 ? 'var(--fg3)' : (neg ? 'var(--bad)' : 'var(--fg)');
-      return `<tr class="clickable ${k === S.sel ? 'sel' : ''}" data-k="${k}">
+      return `<tr class="clickable ${k === S.sel ? 'sel' : ''}" data-k="${k}" tabindex="0" aria-selected="${k === S.sel}">
         <td class="l">${escapeHtml(x['模型'])} ${k === S.best ? '<span class="tag">区间最优</span>' : ''}</td>
         <td class="l">${escapeHtml(x['流派'])}</td>
         <td class="l">${escapeHtml(x['可解释'])}</td>
@@ -1295,6 +1363,9 @@ function renderRank() {
   $('rankTable').innerHTML = html;
   [...$('rankTable').querySelectorAll('tr.clickable')].forEach(tr => {
     tr.onclick = () => { S.sel = tr.dataset.k; renderModelStrip(); renderRank(); renderSelected(); };
+    tr.onkeydown = e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tr.click(); }
+    };
   });
 
   // 排序解读
@@ -1465,7 +1536,7 @@ function renderTrendPanel() {
   const seg = $('trendSeg');
   if (seg) {
     seg.innerHTML = TREND_LEVELS.map(n =>
-      `<button type="button" data-n="${n}" class="${n === S.lookback ? 'on' : ''}">${n}</button>`
+      `<button type="button" data-n="${n}" class="${n === S.lookback ? 'on' : ''}" aria-pressed="${n === S.lookback}">${n}</button>`
     ).join('');
     [...seg.children].forEach(b => {
       b.onclick = () => {
@@ -1831,8 +1902,8 @@ function renderFundForecast() {
       ? (h.probability * 100).toFixed(1) + '%' : '不可用';
     const ev = h.evaluation || {};
     const evTxt = (ev.ok && ev.n)
-      ? `样本外准确率 ${((ev.accuracy ?? 0) * 100).toFixed(1)}% · 基准 ${((ev.baseline_accuracy ?? 0) * 100).toFixed(1)}% · n=${ev.n}`
-      : '样本外评估样本不足';
+      ? `历史滚动验证准确率 ${((ev.accuracy ?? 0) * 100).toFixed(1)}% · 基准 ${((ev.baseline_accuracy ?? 0) * 100).toFixed(1)}% · n=${ev.n}`
+      : '历史滚动验证样本不足';
     const cls = !h.ok ? 'bad' : (h.advantage ? 'good' : 'warn');
     return `<div class="kpi ${cls}">
       <div class="lb">未来 ${h.horizon} 日上涨概率</div>
@@ -1842,7 +1913,7 @@ function renderFundForecast() {
   }).join('');
   if (note) note.innerHTML =
     `${escapeHtml(f.disclaimer || '')} 上方趋势色带只描述<b>已经发生</b>的形态；本区块才是方向概率，` +
-    '两者都不构成买卖建议。';
+    '预测周期按有效净值日计数；两者都不构成买卖建议。';
 }
 
 function drawMonthly(monthly, years) {
@@ -2027,6 +2098,16 @@ async function runBacktest() {
   for (const input of inputs) if (!input.reportValidity()) return;
   if (start && end && start >= end) { showAlert('起始日需早于结束日'); return; }
   if ((start && start < st.start) || (end && end > st.end)) { showAlert('回测日期需在当前基金分析区间内'); return; }
+  // 拟合需要至少 60 个交易日预热；起点之前样本不足时后端必然拒绝，
+  // 先在这里给出可读提示，别白占一次任务队列名额。结果不带日期轴时不拦截。
+  const navDates = S.result.nav?.dates || [];
+  if (start && navDates.length) {
+    const warmup = navDates.filter(d => d < start).length;
+    if (warmup < 60) {
+      showAlert(`回测起点前只有 ${warmup} 个交易日，预热不足 60 个交易日；请把回测起点后移。`);
+      return;
+    }
+  }
 
   const token = ++fundGeneration;
   correlationGeneration++;
@@ -2068,6 +2149,10 @@ async function pollBacktest(jid, token = fundGeneration) {
   let attempts = 0;
   while (token === fundGeneration) {
     await new Promise(r => setTimeout(r, attempts > 200 ? 2000 : 800));
+    while (typeof pagePaused !== 'undefined' && pagePaused) {
+      await new Promise(r => setTimeout(r, 1000));
+      if (token !== fundGeneration) return;
+    }
     if (token !== fundGeneration) return;
     if (++attempts > MAX_POLLS) {
       $('progressWrap').hidden = true;
@@ -2127,6 +2212,10 @@ async function pollHoldings(jid, token = fundGeneration) {
   let attempts = 0;
   while (token === fundGeneration) {
     await new Promise(r => setTimeout(r, attempts > 200 ? 2000 : 800));
+    while (typeof pagePaused !== 'undefined' && pagePaused) {
+      await new Promise(r => setTimeout(r, 1000));
+      if (token !== fundGeneration) return;
+    }
     if (token !== fundGeneration) return;
     if (++attempts > MAX_POLLS) {
       $('progressWrap').hidden = true;
@@ -2254,20 +2343,22 @@ function renderBtCurrent(p) {
   if (!el) return;
   if (!c) { el.innerHTML = ''; if (note) note.textContent = ''; return; }
   if (!c.available) {
-    el.innerHTML = `<div class="kpi bad"><div class="lb">当前建议</div>` +
-      `<div class="vl">不可用</div><div class="sb">健康分缺失，未给出仓位建议</div></div>`;
+    el.innerHTML = `<div class="kpi bad"><div class="lb">模型状态</div>` +
+      `<div class="vl">不可用</div><div class="sb">健康分缺失，未给出门控仓位</div></div>`;
     if (note) note.textContent = (c.notes || []).join(' ') || '模型参考值，非投资建议。';
     return;
   }
   const cls = c.degraded ? 'warn' : (c.position === 1 ? 'good' : 'bad');
-  const noteTxt = [c.disclaimer].concat(c.notes || []).filter(Boolean).join(' ');
+  const noteTxt = [c.disclaimer, p.meta && p.meta.cost_assumption,
+    '健康分衡量的是拟合可信度（模型能否解释该基金），不是对市场涨跌的判断；此处仓位为二值门控状态，不是目标配置。']
+    .concat(c.notes || []).filter(Boolean).join(' ');
   el.innerHTML =
-    `<div class="kpi ${cls}"><div class="lb">当前建议</div>` +
+    `<div class="kpi ${cls}"><div class="lb">模型状态</div>` +
     `<div class="vl">${escapeHtml(c.state)}</div>` +
     `<div class="sb">${c.degraded ? '降级/仅供参考' : '健康门控正常'}</div></div>` +
-    `<div class="kpi"><div class="lb">建议仓位</div>` +
+    `<div class="kpi"><div class="lb">门控仓位 · 0/100%</div>` +
     `<div class="vl">${c.position_pct == null ? '—' : (c.position_pct * 100).toFixed(0) + '%'}</div>` +
-    `<div class="sb">${escapeHtml(c.date)} 收盘决策</div></div>` +
+    `<div class="sb">${escapeHtml(c.date)} 收盘决策 · 非目标配置</div></div>` +
     `<div class="kpi ${c.degraded ? 'warn' : ''}"><div class="lb">健康分</div>` +
     `<div class="vl">${c.health == null ? '不可用' : Number(c.health).toFixed(2)}</div>` +
     `<div class="sb">离场线 ${Number(p.meta.thresholds.exit).toFixed(2)}` +
@@ -2460,5 +2551,6 @@ window.addEventListener('resize', () => {
   }, 140);
 });
 document.addEventListener('visibilitychange', () => {
+  pagePaused = document.hidden;
   if (!document.hidden) Object.values(S.charts).forEach(c => { if (c && !c.isDisposed()) c.resize(); });
 });

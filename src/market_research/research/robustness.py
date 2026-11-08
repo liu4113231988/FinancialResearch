@@ -162,7 +162,11 @@ def _nw_mean_t(x: np.ndarray, lags: int = 5) -> float:
     for l in range(1, min(lags, n - 1) + 1):
         w = 1.0 - l / (lags + 1.0)
         lrv += 2.0 * w * float(d[l:] @ d[:-l]) / n
-    return float(x.mean() / np.sqrt(max(lrv, 1e-18) / n))
+    # 常数非零序列 LRV=0，被 max(...,1e-18) 钳位后 t≈1e9，下游 abs(t)>1.96
+    # 会误判为显著。与 paired_evidence 的零方差处理一致，直接不给统计量。
+    if not np.isfinite(lrv) or lrv <= 1e-15:
+        return float("nan")
+    return float(x.mean() / np.sqrt(lrv / n))
 
 
 # ====================================================================== 3. 块 bootstrap

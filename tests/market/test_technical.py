@@ -81,6 +81,15 @@ class TechnicalTests(unittest.TestCase):
         self.assertTrue(any('不复权' in x for x in result['notices']))
         json.dumps(_jsafe(result),allow_nan=False)
 
+    def test_notices_disclose_thresholds_and_evidence_limits(self):
+        result = analyze_technical(sample(), adjust='qfq')
+        notes = " ".join(result['notices'])
+        self.assertIn("0.5", notes)
+        self.assertIn("60%", notes)
+        self.assertIn("40%", notes)
+        self.assertIn("未建立稳定的日频方向预测优势", notes)
+        json.dumps(_jsafe(result), allow_nan=False)
+
     def test_signals_are_first_condition_and_use_past_only(self):
         frame=sample()
         ind=indicators(frame)

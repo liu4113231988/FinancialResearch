@@ -57,12 +57,14 @@ class PartialPoolTests(unittest.TestCase):
             fetch.assert_not_called()
 
     def test_read_only_mode_serves_warm_cache_without_backfilling(self):
+        before = storage.metadata("index_universe_2024-01-01")
         with patch.object(panels, "fetch_universe") as fetch:
             result = panels.load_index_universe("2024-01-01", verbose=False, allow_fetch=False)
             fetch.assert_not_called()
         pd.testing.assert_frame_equal(result, self.frame, check_freq=False)
-        # 缺列照旧留痕，只是不去补取
-        self.assertEqual(storage.metadata("index_universe_2024-01-01")["info"]["missing_assets"], ["missing"])
+        # 缺列照旧留痕（只挂在返回值 attrs），但只读请求不改共享元数据
+        self.assertEqual(result.attrs["missing_assets"], ["missing"])
+        self.assertEqual(storage.metadata("index_universe_2024-01-01"), before)
 
 
 class FixedWindowTests(unittest.TestCase):
@@ -310,3 +312,141 @@ class DataQualityTests(unittest.TestCase):
         self.assertEqual(quality["n_expected"], 3)
         self.assertNotEqual(quality["status"], "ok")
         self.assertTrue(any("000300" in w for w in out.attrs["warnings"]))
+
+
+class ReadOnlyNoWriteTests(unittest.TestCase):
+    """108：allow_fetch=False 的请求线程不得产生任何 DuckDB 写副作用。"""
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(dir=C.ROOT / "output")
+        self.path_patch = patch.object(C, "DATA_DIR", Path(self.directory.name))
+        self.path_patch.start()
+        self.frame = pd.DataFrame(
+            {"first": [1., 2., 3.]}, index=pd.date_range("2024-01-01", periods=3))
+        storage.write("index_universe_2024-01-01", self.frame,
+                      {"v": C.DATA_CACHE_VERSION,
+                       "n_candidates": len(C.NAME_OF),
+                       "start": "2024-01-01", "end": C.END_DATE})
+
+    def tearDown(self):
+        self.path_patch.stop()
+        self.directory.cleanup()
+
+    def test_universe_read_only_never_writes_metadata_or_prices(self):
+        before = storage.metadata("index_universe_2024-01-01")
+        with patch.object(panels, "fetch_universe") as fetch, \
+             patch.object(panels, "_cache_info_write") as info_write, \
+             patch.object(panels.storage, "write") as write:
+            out = panels.load_index_universe("2024-01-01", verbose=False,
+                                            allow_fetch=False)
+            fetch.assert_not_called()
+            info_write.assert_not_called()
+            write.assert_not_called()
+        self.assertEqual(storage.metadata("index_universe_2024-01-01"), before)
+        self.assertEqual(list(out.columns), ["first"])
+
+    def test_fund_nav_read_only_does_not_register_sync_asset(self):
+        import market_research.tasks.sync as sync
+        with patch.object(sync, "register") as register, \
+             patch.object(sync, "cached", return_value=None), \
+             patch.object(panels, "fetch_fund_total_return") as fetch:
+            with self.assertRaises(CacheMiss):
+                panels.load_fund_nav_cached("110022", "2024-01-01",
+                                            allow_fetch=False)
+            register.assert_not_called()
+            fetch.assert_not_called()
+
+
+class CorruptCacheTests(unittest.TestCase):
+    """110：metadata 损坏时缓存应自愈，而不是把冷缓存 202 打成 500。"""
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(dir=C.ROOT / "output")
+        self.path_patch = patch.object(C, "DATA_DIR", Path(self.directory.name))
+        self.path_patch.start()
+        self.frame = pd.DataFrame(
+            {"nav": [1., 1.1]},
+            index=pd.date_range("2024-01-01", periods=2, name="date"))
+
+    def tearDown(self):
+        self.path_patch.stop()
+        self.directory.cleanup()
+
+    @staticmethod
+    def _corrupt(name="broken"):
+        with storage.connection() as db:
+            db.execute("INSERT OR REPLACE INTO datasets VALUES (?,?,?,?)",
+                       [name, "{not-json", "{}", "deadbeef"])
+
+    def test_corrupt_metadata_rebuilt_by_builder(self):
+        from market_research.data.cache import _cached
+        self._corrupt()
+        with self.assertLogs("market_research.data.cache", level="WARNING"):
+            out = _cached("broken", lambda: self.frame, meta={"v": 1})
+        pd.testing.assert_frame_equal(out, self.frame, check_freq=False)
+        pd.testing.assert_frame_equal(storage.read("broken"), self.frame,
+                                      check_freq=False)
+
+    def test_corrupt_metadata_raises_cachemiss_in_read_only(self):
+        from market_research.data.cache import _cached
+        self._corrupt()
+        with self.assertRaises(CacheMiss):
+            _cached("broken", lambda: self.fail("只读模式不得抓取"),
+                    meta={"v": 1}, allow_fetch=False)
+
+    def test_corrupt_sidecar_meta_does_not_block_rebuild(self):
+        from market_research.data.cache import _cached
+        (C.DATA_DIR / "broken.meta.json").write_text("{bad", encoding="utf-8")
+        out = _cached("broken", lambda: self.frame, meta={"v": 1})
+        pd.testing.assert_frame_equal(out, self.frame, check_freq=False)
+
+    def test_info_write_on_corrupt_metadata_does_not_raise(self):
+        from market_research.data.cache import _cache_info_write
+        self._corrupt()
+        with self.assertLogs("market_research.data.cache", level="WARNING"):
+            _cache_info_write("broken", {"n_missing": 0})
+
+
+class FetchErrorVisibilityTests(unittest.TestCase):
+    """112：短序列/抓取失败原因必须一路透传到 panel warnings。"""
+    def test_universe_keeps_builder_fetch_errors(self):
+        frame = pd.DataFrame({"first": [1., 2.]},
+                             index=pd.date_range("2024-01-01", periods=2))
+        frame.attrs["fetch_errors"] = ["missing: 仅 2 行"]
+        with tempfile.TemporaryDirectory(dir=C.ROOT / "output") as folder:
+            with patch.object(C, "DATA_DIR", Path(folder)), \
+                 patch.object(C, "NAME_OF", {"first": "First", "missing": "Missing"}), \
+                 patch.object(panels, "fetch_universe", return_value=frame):
+                out = panels.load_index_universe("2024-01-01", verbose=False)
+                info = storage.metadata("index_universe_2024-01-01")["info"]
+            self.assertIn("仅 2 行", " ".join(out.attrs["fetch_errors"]))
+            self.assertIn("仅 2 行", " ".join(info["fetch_errors"]))
+
+    def test_short_series_reason_reaches_panel_warnings(self):
+        idx = pd.bdate_range("2024-01-01", periods=60)
+        nav = pd.Series(100.0 + np.arange(60), index=idx, name="nav")
+        nav.attrs.update(nav_basis=panels.NAV_BASIS_TOTAL, nav_degraded=False,
+                         nav_degraded_reason="")
+        px = pd.DataFrame({"801780": 100.0 + np.arange(60)}, index=idx)
+        px.attrs.update(missing_assets=["000300"], n_expected=3,
+                        fetch_errors=["000300: 仅 120 行"])
+        with patch.object(panels, "load_fund_nav_cached", return_value=nav), \
+             patch.object(panels, "load_index_universe", return_value=px):
+            out = panels.load_panel("110022", start="2024-01-01",
+                                    end=idx[-1].strftime("%Y-%m-%d"),
+                                    verbose=False)
+        self.assertTrue(any("仅 120 行" in w for w in out.attrs["warnings"]))
+
+    def test_verbose_false_still_logs_short_series(self):
+        from market_research.data.providers import indices
+
+        def fake(code, start, end):
+            n = 300 if code == "good" else 2
+            return code, pd.Series(np.arange(n, dtype=float) + 1,
+                                   index=pd.date_range("2024-01-01", periods=n),
+                                   name=code)
+
+        with patch.object(indices, "_fetch_one", side_effect=fake), \
+             self.assertLogs(indices.LOG, level="WARNING") as records:
+            out = indices.fetch_universe(["good", "short"], "2024-01-01",
+                                         verbose=False)
+        self.assertEqual(list(out.columns), ["good"])
+        self.assertIn("仅 2 行", " ".join(records.output))

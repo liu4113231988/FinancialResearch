@@ -174,6 +174,9 @@ def load_index_universe(start: Optional[str] = None,
 
     df = _cached(cache_name, build, meta=meta, refresh=refresh,
                  allow_fetch=allow_fetch)
+    # 抓取失败/样本不足的逐资产原因挂在 builder 返回值的 attrs 上，但
+    # storage 读写与 concat 都会丢 attrs —— 先留存，最终再挂回去。
+    fetch_errors = list(df.attrs.get("fetch_errors") or [])
     # P2-27：缓存回退标记（stale/source_error）在 concat 后可能丢失，先留存
     fallback_attrs = {k: df.attrs.get(k) for k in
                       ("stale", "source_error", "cached_at")
@@ -186,6 +189,7 @@ def load_index_universe(start: Optional[str] = None,
     if missing and not refresh and allow_fetch:
         try:
             add = fetch_universe(missing, start, end, verbose=verbose)
+            fetch_errors.extend(add.attrs.get("fetch_errors") or [])
             add = add.loc[:, add.columns.intersection(missing)].dropna(axis=1, how="all")
             if not add.empty:
                 df = pd.concat([df, add], axis=1).sort_index()
@@ -193,10 +197,14 @@ def load_index_universe(start: Optional[str] = None,
         except Exception:
             LOG.warning("补取候选指数失败，保留已有行情", exc_info=True)
         missing = [c for c in C.NAME_OF if c not in df.columns]
-    _cache_info_write(cache_name, {
-        "missing_assets": missing,
-        "n_missing": len(missing),
-        "n_expected": len(C.NAME_OF)})
+    # 只读请求线程（/api/corr）绝不写 DuckDB：元信息更新同样会抢 sync 的写锁，
+    # 且会把一次只读查询变成"请求改变了共享状态"。
+    if allow_fetch:
+        _cache_info_write(cache_name, {
+            "missing_assets": missing,
+            "n_missing": len(missing),
+            "n_expected": len(C.NAME_OF),
+            "fetch_errors": fetch_errors[:50]})
     if missing:
         # 用 logging 而不是 print：这条警告会在 GBK 控制台打印 ⚠（U+26A0）时
         # 抛 UnicodeEncodeError，把一次取数变成"程序崩了"。日志处理器会吞掉
@@ -207,6 +215,7 @@ def load_index_universe(start: Optional[str] = None,
     df.attrs.update(fallback_attrs)
     df.attrs["missing_assets"] = missing
     df.attrs["n_expected"] = len(C.NAME_OF)
+    df.attrs["fetch_errors"] = fetch_errors
     return df
 
 
@@ -225,7 +234,10 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
     缓存名带 basis 后缀，两种口径互不覆盖。
     """
     import market_research.tasks.sync as sync
-    sync.register("fund", fund_code, basis)
+    # register 会 migrate + INSERT（写 DuckDB），只读请求线程不能顺带把基金
+    # 加进同步资产池；真正发起分析时（allow_fetch=True）才会注册。
+    if allow_fetch:
+        sync.register("fund", fund_code, basis)
     if not refresh:
         history = sync.cached("fund", fund_code, basis, start, None)
         if history is not None:
@@ -354,6 +366,11 @@ def load_panel(fund_code: str, start: Optional[str] = None,
                              allow_fetch=allow_fetch)
     out = align_prices(px, nav)
     warnings = list(out.attrs.get("warnings") or [])
+    fetch_errors = list(px.attrs.get("fetch_errors") or [])
+    if fetch_errors:
+        # 让"为什么缺这个指数"进入 meta / 报告 / 页面，而不是只留在控制台日志。
+        warnings.append("候选指数抓取失败或样本不足：" + "；".join(fetch_errors[:6])
+                        + ("…" if len(fetch_errors) > 6 else ""))
     if nav_degraded:
         warnings.append(
             f"净值口径已降级为累计净值（{nav_reason}）；收益/回测/健康分不可按总回报解读")

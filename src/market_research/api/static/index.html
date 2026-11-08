@@ -41,6 +41,7 @@
 <div class="workspace-bar">
   <p><span class="status-dot" aria-hidden="true"></span> 个人市场研究 <span class="workspace-divider">/</span> <time id="workspaceDate"></time></p>
   <button class="data-center-toggle" id="openDataCenter" type="button" aria-haspopup="dialog"><span id="syncIndicator">读取同步状态…</span><span aria-hidden="true"> ↗</span></button>
+  <button class="data-center-toggle" id="openPredictionLedger" type="button" aria-haspopup="dialog"><span>预测回验</span><span aria-hidden="true"> ↗</span></button>
 </div>
 
 <!-- 内容区顶部：工具栏在上、声明横幅在下，两者与视图共用同一内容宽度 -->
@@ -64,11 +65,13 @@
       </select>
       <button type="button" id="btnWatch" class="btn ghost" title="把当前证券加入/移出自选">☆</button>
     </form>
+    <span class="catalog-state" id="catalogState" role="status">正在读取名录…</span>
+    <button type="button" id="btnRetryCatalog" class="btn ghost" hidden>重试加载名录</button>
   </section>
 
   <!-- P2-36：数据来源与免责声明（显著位置；文案/位置可由后端配置） -->
   <div class="disclosure-banner" id="disclosureBanner" role="note">
-    <b>数据与使用声明</b>　数据来源为公开抓取，存在延迟与不完整；结论仅用于研究参考，不构成投资建议。
+    <b>数据与使用声明</b>　数据来源为公开抓取，存在延迟与不完整；历史研究未建立稳定的日频方向预测优势，方向概率、规则条件与仓位状态均为研究诊断而非可执行交易信号；结论仅用于研究参考，不构成投资建议。
   </div>
 </div>
 
@@ -105,6 +108,23 @@
   <p class="dc-footer" id="syncUpdated">状态将自动刷新</p>
 </dialog>
 
+<dialog id="predictionLedger" aria-labelledby="predictionLedgerTitle">
+  <div class="dc-heading"><div><p class="eyebrow">PREDICTION LEDGER</p><h2 id="predictionLedgerTitle">预测回验</h2><p class="meta">方向预测与规则状态事件分账记录；结算由服务内调度触发</p></div><button type="button" id="closePredictionLedger" class="icon-button" aria-label="关闭预测回验">✕</button></div>
+  <div class="sync-overview" id="ledgerOverview"></div>
+  <div class="dc-toolbar">
+    <label class="sr-only" for="ledgerGroupBy">分桶方式</label><select id="ledgerGroupBy">
+      <option value="">总体（不分桶）</option><option value="source">按来源</option>
+      <option value="horizon">按周期</option><option value="asset_kind">按资产类型</option>
+      <option value="regime">按市场环境</option>
+    </select>
+    <button type="button" id="refreshLedger" class="btn ghost">刷新汇总</button>
+  </div>
+  <p id="ledgerFeedback" class="sync-feedback" role="status" hidden></p>
+  <div class="dc-table-scroll"><table class="dc-table"><thead><tr><th>分组</th><th>当前口径记录</th><th>已判定</th><th>方向命中率</th><th>Brier</th><th>规则事件</th><th>旧口径行</th><th>待结算</th></tr></thead><tbody id="ledgerRows"></tbody></table></div>
+  <p id="ledgerEmpty" class="dc-empty" hidden>暂无台账记录。完成一次最新收盘的分析后会自动写入。</p>
+  <p class="dc-footer" id="ledgerNote"></p>
+</dialog>
+
 <main id="marketView" class="market-view">
   <section class="market-intro">
     <div><p class="eyebrow" id="marketEyebrow">EQUITY RESEARCH</p><h2 id="marketTitle">股票分析</h2><p id="marketSubtitle">从价格、成交与风险，观察一只股票。</p></div>
@@ -130,8 +150,8 @@
     <section class="market-result-head"><div><h2 id="marketName"></h2><p class="meta" id="marketMeta"></p></div><button class="btn ghost" type="button" id="marketRefresh">↻ 刷新行情</button></section>
     <div class="kpis" id="marketKpis"></div>
     <section id="stockTechnical" class="stock-technical" aria-labelledby="technicalTitle" hidden>
-      <div class="technical-heading"><div><p class="eyebrow">TREND & DECISION SUPPORT</p><h3 id="technicalTitle">趋势与交易辅助</h3></div><span class="meta" id="technicalAsOf"></span></div>
-      <div class="technical-decision"><div class="decision-main"><span id="technicalTrend" class="trend-badge"></span><h4 id="technicalAction"></h4><p id="technicalScore"></p></div><ul id="technicalReasons"></ul></div>
+      <div class="technical-heading"><div><p class="eyebrow">TREND & RESEARCH SIGNALS</p><h3 id="technicalTitle">趋势与研究信号</h3></div><span class="meta" id="technicalAsOf"></span></div>
+      <div class="technical-decision"><div class="decision-main"><span id="technicalTrend" class="trend-badge"></span><h4 id="technicalAction"></h4><p id="technicalScore"></p><p class="note">下方为规则观察条件，不是买卖指令；不含目标价、止损与仓位。</p></div><ul id="technicalReasons"></ul></div>
       <p id="technicalConflict" class="technical-conflict" role="status" hidden></p>
       <div id="technicalMetrics" class="technical-metrics"></div>
       <div id="technicalContext" class="technical-metrics" aria-label="市场环境与量价确认"></div>
@@ -510,6 +530,7 @@
 <script src="/vendor/echarts.min.js"></script>
 <script src="/static/market.js"></script>
 <script src="/static/data-center.js"></script>
+<script src="/static/ledger.js"></script>
 <script src="/static/app.js"></script>
 <script src="/static/controls.js"></script>
 </body>

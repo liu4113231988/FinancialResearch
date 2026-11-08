@@ -273,6 +273,41 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
         _nav_html = (f'<p style="opacity:.92">净值口径：<b>{_nav_label}</b>'
                      + (f' · {_html.escape(str(_nav_reason))}' if _nav_reason else "")
                      + '</p>')
+
+    def _pred_cell(value):
+        if value is None:
+            return "—"
+        if isinstance(value, float):
+            return f"{value:.4f}"
+        return str(value)
+
+    _pred = extra_meta.get("predictions") or {}
+    _overall = _pred.get("overall") or {}
+    if not _overall:
+        _pred_reason = _pred.get("reason")
+        _pred_html = ('<p>预测台账汇总不可用'
+                      + (f'（{_html.escape(str(_pred_reason))}）' if _pred_reason else '')
+                      + '；本报告的回测结论不依赖台账。</p>')
+    else:
+        _hit = _overall.get("hit_rate")
+        _hit_text = "—" if _hit is None else f"{float(_hit)*100:.1f}%"
+        _pred_metrics = [("当前口径记录", _overall.get("current_total")),
+                         ("方向预测已判定", _overall.get("decided")),
+                         ("方向命中率", _hit_text),
+                         ("Brier", _overall.get("brier")),
+                         ("规则事件", _overall.get("rule_events")),
+                         ("规则事件触发后平均收益", _overall.get("rule_return_mean")),
+                         ("待结算", _overall.get("pending")),
+                         ("旧口径行", _overall.get("legacy_rows"))]
+        _pred_html = ('<table class="tbl"><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>'
+                      + "".join(
+                          f"<tr><td>{_html.escape(str(key))}</td>"
+                          f"<td>{_html.escape(_pred_cell(value))}</td></tr>"
+                          for key, value in _pred_metrics)
+                      + '</tbody></table>'
+                      + f'<p>{_html.escape(str(_overall.get("note") or ""))}</p>'
+                      + '<p>命中率只衡量方向，不衡量扣费后收益，也不构成有效性证明；'
+                        '台账与本报告回测使用不同样本与口径，不可互相印证。</p>')
     m = main["backtest"]["metrics"]
     ctrl = main["backtest"]["control_name"]
     tc = main["backtest"]["timing_contrib"]
@@ -959,7 +994,7 @@ r<sub>f,t</sub> = Σ w<sub>i</sub> · r<sub>i,t</sub> + ε<sub>t</sub>
   <div>{_fig(figs.get('gauge',''), '当前状态四象限定位')}</div>
   <div><h4>当前决策快照</h4>{snap_tbl}{_val_note}
   <p style="font-size:13px;color:#64748b">注：四象限由「趋势分」与「相对偏离分」共同决定。
-  左上=趋势向上且相对低估（最佳买点），右下=趋势向下且相对高估（离场）。</p></div>
+  左上=趋势向上且相对低估（描述性分区，不是买点建议），右下=趋势向下且相对高估（描述性分区，不是离场建议）。</p></div>
 </div>
 
 <h3>3.3 绩效与对照实验</h3>
@@ -1063,6 +1098,11 @@ ICIR = {_safe(main['backtest']['icir'], '.2f')}，
 <section>
 <h2><span class="n">09</span>增量、功效与选择过程证据</h2>
 {evidence_html}
+</section>
+
+<section>
+<h2><span class="n">10</span>预测台账回验</h2>
+{_pred_html}
 </section>
 
 <footer>

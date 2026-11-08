@@ -56,4 +56,4 @@ def context_payload(features, benchmark):
                    '偏弱' if gap < 0 and momentum < 0 else '分歧 / 震荡')
     return {'benchmark': benchmark, 'environment': environment,
             'latest': last.to_dict(),
-            'note': '环境为基准相对 MA60 与20日动量的规则描述；ADX衡量趋势强度、不代表方向。分位只使用最多252条日线内的有限观测，至少60个，当日缺失不输出。相对强弱为价格比率变化，未含分红。'}
+            'note': '环境为基准相对 MA60 与20日动量的规则描述；ADX衡量趋势强度、不代表方向。分位只使用最多252条日线内的有限观测，至少60个，当日缺失不输出；分位含当日自身参与排名（等值按小于等于计入），因此最低为 1/N、恒定窗口恒为 100%，不是排除当日的历史分位。相对强弱为价格比率变化，未含分红。'}

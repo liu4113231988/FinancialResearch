@@ -193,8 +193,18 @@ def stamp(*, exclude_stocks=False, fund_code=None, fetch_start=None, end=None):
                 if not row[0].startswith("index_universe_")
                 or row[0] in keep]
     # Metadata-only basis/version edits must also invalidate dependent results.
-    revisions = [(name, revision, {k: v for k, v in json.loads(meta).items() if k != "info"})
-                 for name, revision, meta in rows]
+    # 单条损坏记录不能让全库指纹计算崩掉（结果缓存键会被所有分析入口调用）。
+    revisions = []
+    for name, revision, meta in rows:
+        try:
+            parsed = json.loads(meta)
+            if not isinstance(parsed, dict):
+                raise ValueError("metadata 不是对象")
+        except (TypeError, ValueError):
+            LOG.warning("数据指纹跳过损坏的元数据 %s", name)
+            parsed = {"__corrupt__": str(meta)[:120]}
+        revisions.append((name, revision,
+                          {k: v for k, v in parsed.items() if k != "info"}))
     return hashlib.sha256(json.dumps(revisions, sort_keys=True).encode()).hexdigest()
 
 

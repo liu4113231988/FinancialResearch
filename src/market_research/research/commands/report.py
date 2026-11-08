@@ -264,6 +264,14 @@ def main(argv=None, *, prog=None):
         "nav_degraded_reason": (main_res.get("meta") or {}).get("nav_degraded_reason"),
     }
 
+    # ---- 预测台账回验：只读本地 DuckDB，锁忙或读失败都不能阻断报告发布
+    try:
+        from market_research.predictions import ledger
+        meta_extra["predictions"] = {"overall": ledger.summary()["overall"]}
+    except Exception as exc:                            # noqa: BLE001
+        meta_extra["predictions"] = {"ok": False,
+                                     "reason": f"{type(exc).__name__}: {str(exc)[:120]}"}
+
     # ---- 真实持仓拟合：与 CLI 同一链路，失败时在报告里显式说明而不是省略
     try:
         from market_research.funds.holdings import (

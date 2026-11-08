@@ -125,6 +125,13 @@ def disclosure_info():
     return {"ok": True, **disclosure.payload()}
 
 
+@router.get('/predictions/summary')
+def prediction_summary(group_by: str | None = None):
+    """预测台账回验汇总（只读）；非法分桶由 ledger 抛 ValueError 转 400。"""
+    from market_research.predictions import ledger
+    return {"ok": True, **ledger.summary(group_by=group_by)}
+
+
 @router.get('/catalog')
 def catalog():
     known = []

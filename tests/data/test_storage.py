@@ -180,5 +180,29 @@ class StorageTests(unittest.TestCase):
         self.assertGreaterEqual(storage.LOCK_STATS["timeouts"], 1)
 
 
+class CorruptMetadataTests(unittest.TestCase):
+    """110：单条损坏 metadata 不能让全库数据指纹（结果缓存键）计算失败。"""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=C.ROOT / "output")
+        self.patch = patch.object(C, "DATA_DIR", Path(self.tmp.name))
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def test_stamp_survives_corrupt_metadata(self):
+        frame = pd.DataFrame({"a": [1., 2.]},
+                             index=pd.date_range("2020-01-01", periods=2))
+        storage.write("good", frame, {"v": 1})
+        baseline = D.data_stamp()
+        with storage.connection() as db:
+            db.execute("INSERT OR REPLACE INTO datasets VALUES (?,?,?,?)",
+                       ["broken", "{not-json", "{}", "deadbeef"])
+        with self.assertLogs("market_research.data.storage", level="WARNING"):
+            changed = D.data_stamp()
+        self.assertNotEqual(baseline, changed)
+
+
 if __name__ == "__main__":
     unittest.main()

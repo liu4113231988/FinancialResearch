@@ -250,7 +250,9 @@ def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, be
                             "label": "买入条件首次满足" if row.buy_event else "减仓条件首次满足",
                             "close": bars.close.loc[date], "score": row.score})
     visible = ind.loc[display_start:]
-    from market_research.market.execution import execution_diagnostics, rule_targets, compare_probability_execution
+    from market_research.market.execution import (ENTRY_PROBABILITY, EXIT_PROBABILITY,
+                                                  compare_probability_execution,
+                                                  execution_diagnostics, rule_targets)
     execution = execution_diagnostics(bars.loc[visible.index], rule_targets(visible), calendar)
     execution['calendar_source'] = calendar_info
     forecast_calendar=calendar if calendar is not None and bars.index.isin(calendar).all() else None
@@ -258,6 +260,10 @@ def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, be
                ("预测周期按供应商日历会话计数，目标会话缺报价时不生成方向标签。" if forecast_calendar is not None else
                 "方向训练历史未完整匹配会话日历，预测周期按有效日线计数，缺日会延长实际间隔。"),
                "模型估计未来收盘相对当前收盘上涨的概率；不预测精确价格，不含交易费用，未单独校准。",
+               f"方向概率以 0.5 为涨跌分界；成交诊断另用固定阈值 ≥{ENTRY_PROBABILITY:.0%} 买入、"
+               f"≤{EXIT_PROBABILITY:.0%} 退出，中间区间不产生新订单。上涨概率不是买入建议，两者用途不同。",
+               "本项目历史研究未建立稳定的日频方向预测优势；Brier 优于频率基准"
+               "不代表统计显著性或扣费后的交易收益。",
                "历史验证采用当前数据版本；复权历史可能修订，未模拟停牌、涨跌停、滑点和实际成交。"]
     if truncated:
         notices.append("技术指标与模型最多使用最近 1500 根日线；更早价格仍可查看，技术叠加与评估不覆盖该段。")

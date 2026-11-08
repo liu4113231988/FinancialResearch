@@ -55,13 +55,20 @@ def ic_term_structure(sig: pd.DataFrame, nav: pd.Series,
             block = max(int(h), 20)
             blocks = [v.iloc[i:i + block]
                       for i in range(0, len(v) - block + 1, block)]
-            ics = [float(b["s"].corr(b["f"], method="spearman")) for b in blocks
-                   if len(b) >= 20]
-            icir = (float(np.mean(ics) / np.std(ics))
-                    if len(ics) >= 4 and np.std(ics) > 1e-9 else np.nan)
+            ics = np.array([float(b["s"].corr(b["f"], method="spearman"))
+                            for b in blocks if len(b) >= 20], dtype=float)
+            # 块内常数信号让 spearman 相关为 NaN；剔除并计数，避免单个坏块
+            # 把整段 ICIR 连坐成 NaN（"无结论"不能被读成"不显著"）。
+            ics_ok = ics[np.isfinite(ics)]
+            n_bad = int(ics.size - ics_ok.size)
+            ic_sd = float(np.std(ics_ok)) if ics_ok.size else np.nan
+            icir = (float(np.mean(ics_ok) / ic_sd)
+                    if ics_ok.size >= 4 and np.isfinite(ic_sd) and ic_sd > 1e-9
+                    else np.nan)
             t = ic * np.sqrt(len(v) / max(h, 1))     # 按非重叠块数的粗略 t 值
             rows.append({"信号": label, "前瞻期": f"{h}日", "样本": len(v),
-                         "RankIC": ic, "ICIR": icir, "t值": t})
+                         "RankIC": ic, "ICIR": icir, "t值": t,
+                         "ICIR_NaN块数": n_bad})
     return pd.DataFrame(rows)
 
 
@@ -372,7 +379,7 @@ def naive_benchmarks(panel: pd.DataFrame, fund_col: str = "__FUND__",
     # 1) 单一宽基：各指数单独回归，取样本内最优的若干个
     singles = []
     for j, a in enumerate(assets):
-        var = float(np.var(Xtr[:, j]))
+        var = float(np.var(Xtr[:, j], ddof=1))
         if var <= 1e-18:
             continue
         b = float(np.cov(ytr, Xtr[:, j])[0, 1] / var)

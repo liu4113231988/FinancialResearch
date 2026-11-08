@@ -62,7 +62,7 @@ def _pick_single(Xtr, ytr, by="mse"):
     """训练段内选一个宽基（事前），返回 (j, beta)。"""
     best, bj, bb = (np.inf, -1, 0.0) if by == "mse" else (-np.inf, -1, 0.0)
     for j in range(Xtr.shape[1]):
-        v = float(np.var(Xtr[:, j]))
+        v = float(np.var(Xtr[:, j], ddof=1))
         if v <= 1e-18:
             continue
         b = float(np.cov(ytr, Xtr[:, j])[0, 1] / v)

@@ -96,7 +96,14 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
                     raw = ak.stock_zh_a_hist_tx(symbol=code, start_date=start, end_date=end, adjust=adjust, timeout=12)
                     result = clean_bars(raw, start, end, allow_nonpositive=_fetch_only and adjust == "qfq")
                 except Exception as fallback:
-                    raise ValueError(f"股票日线暂不可用，请检查代码或稍后重试（{type(primary).__name__} / {type(fallback).__name__}）") from fallback
+                    # 只留异常类名无法区分网络超时、空数据、列名变更与代码错误；
+                    # 主源信息在备源失败后尤其容易丢，这里两源都保留截断摘要。
+                    primary_txt = str(primary)[:200].replace("\n", " ")
+                    fallback_txt = str(fallback)[:200].replace("\n", " ")
+                    raise ValueError(
+                        f"股票日线暂不可用，请检查代码或稍后重试"
+                        f"（主源 {type(primary).__name__}: {primary_txt}; "
+                        f"备源 {type(fallback).__name__}: {fallback_txt}）") from fallback
             info = meta.setdefault("info", {})
             info["source"] = "AKShare / 东方财富" if "日期" in raw.columns else "AKShare / 腾讯证券"
             info["name"] = STOCKS.get(code)

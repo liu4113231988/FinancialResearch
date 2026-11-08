@@ -1,10 +1,13 @@
 from __future__ import annotations
 from typing import Dict, Iterable, Optional
+import logging
 import pandas as pd
 import market_research.config as C
 from market_research.data import provenance
 from market_research.data.http import _retry, _clean_series
 from market_research.errors import ProviderContractError
+
+LOG = logging.getLogger(__name__)
 
 def fetch_index_sina(code: str, start: Optional[str] = None) -> pd.Series:
     """新浪指数日线收盘价。code 形如 sh000300 / sz399006。"""
@@ -93,4 +96,9 @@ def fetch_universe(codes: Iterable[str], start: str, end: Optional[str] = None,
     px = pd.DataFrame(series).sort_index()
     if errors:
         px.attrs["fetch_errors"] = errors
+        # verbose=False（Web/CLI 默认）时上面的 print 全部不可见，
+        # 至少留一条日志说明"为什么少了这些指数"。
+        LOG.warning("候选池 %d/%d 个指数抓取失败或样本不足：%s",
+                    fail, len(codes),
+                    "；".join(errors[:6]) + ("…" if len(errors) > 6 else ""))
     return px

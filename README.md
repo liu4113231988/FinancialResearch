@@ -115,6 +115,8 @@ docker stop market-research
 
 验证展示成熟预测的准确率、Brier 分数及当时训练集上涨频率基准，按预测周期间隔取样。至少 20 笔才比较 Brier 优劣；该比较不是显著性检验，模型概率未单独校准。规则和模型方向冲突会提示，不输出精确目标股价，也不发送交易订单。
 
+方向概率以 0.5 为涨跌分界，成交诊断另用固定 60% 买入 / 40% 退出阈值，中间区间不产生新订单；上涨概率不是买入建议。本项目历史研究未建立稳定的日频方向预测优势，页面提示与全站披露同步标注该结论。
+
 ### 基金研究
 
 候选池定义 47 个指数，实际使用数量由覆盖率过滤决定。所有拟合器共用滚动切分；黑箱模型使用真实样本外预测，其重要性不应解释为真实持仓。可以调参重新学习、手动选择模型、查看风格漂移及诊断回测。
@@ -172,7 +174,7 @@ uv run market-research-sync
 uv run market-research-sync --once
 ```
 
-`--once` 仅检查当前到期/待处理资产，不会强制刷新所有已成功同步的资产。手动重试通过数据中心或 `/api/v1/sync/retry` 提交。调度器通过同一同步锁互斥。
+`--once` 仅检查当前到期/待处理资产，不会强制刷新所有已成功同步的资产。手动重试通过数据中心或 `/api/v1/sync/retry` 提交。调度器通过同一同步锁互斥。`FIL_SYNC_ENABLED=0` 在常驻调度与 `--once` 两个入口都生效，直接跳过同步。
 
 Windows 每日任务安装或更新：
 
@@ -180,7 +182,7 @@ Windows 每日任务安装或更新：
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_sync_task.ps1 -Time 18:30
 ```
 
-任务名 `MarketResearch-DailySync`，优先使用项目 `.venv/Scripts/pythonw.exe` 和北京时间触发边界，支持错过时间后补跑；电脑需开机、当前用户需登录。重新安装时同步设置服务的 `FIL_SYNC_TIME`。`FIL_SYNC_ENABLED=0` 只关闭 worker 管理的同步，Windows 任务和独立 sync 进程需分别停用。
+任务名 `MarketResearch-DailySync`，优先使用项目 `.venv/Scripts/pythonw.exe` 和北京时间触发边界，支持错过时间后补跑；电脑需开机、当前用户需登录。重新安装时同步设置服务的 `FIL_SYNC_TIME`。`FIL_SYNC_ENABLED=0` 会同时拦截 worker 管理的调度、独立 `sync --once` 进程与读到该变量的 Windows 任务；计划任务运行在独立环境中，若未继承该变量仍需单独停用任务本身。
 
 ## 配置、接口和日志
 
@@ -196,12 +198,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_sync_task.ps
 | FIL_AUTO_SERVICES | 1 | API 自动启动 worker |
 | FIL_MAX_JOBS / FIL_QUEUE_LIMIT | 2 / 100 | 分析进程并发数；排队和运行任务总上限 |
 | FIL_JOB_TIMEOUT / FIL_JOB_ATTEMPTS | 900 / 3 | 单次计算超时秒数；进程中断最大尝试次数 |
-| FIL_SYNC_ENABLED / FIL_SYNC_TIME | 1 / 18:30 | worker 同步开关及北京时间 |
+| FIL_JOB_TERMINAL_TTL / FIL_JOB_QUEUED_TTL | 86400 / 3600 | 终态任务保留秒数；排队有效期秒数，超期记「排队超时」而非永久占用名额 |
+| FIL_JOB_DRAIN_GRACE | 30 | 取消/超时后旧子进程排水的名额占位秒数（0=关闭） |
+| FIL_SYNC_ENABLED / FIL_SYNC_TIME | 1 / 18:30 | 同步总开关（常驻调度与 `--once` 均生效）及北京时间 |
 | FIL_ACCESS_CONTROL | off | `off` 单用户放行；`token` 校验 Bearer / X-API-Key |
 | FIL_API_TOKENS | 空 | 逗号分隔令牌，支持 `租户:令牌`；仅 token 模式生效 |
 | FIL_HTTP_MAX_RPS | 8 | 全进程公网抓取限速（请求/秒，`<=0` 关闭） |
 | FIL_HTTP_TIMEOUT | 30 | 单次抓取超时秒数（线程级，注入 requests） |
-| FIL_DATA_STALE_DAYS | 10 | 数据末日距参考日超过该天数标记 stale |
+| FIL_DATA_STALE_DAYS | 10 | 数据末日距参考日超过该天数标记 stale；同步缓存的数据末日落后检查日超过该天数视为未就绪 |
 | FIL_NAV_DEGRADED_POLICY | reject | 总回报构造失败策略：`reject` 失败 / `allow_cum` 显式降级并标注 |
 | FIL_STORAGE_LOCK_TIMEOUT | 10 | DuckDB 文件锁最长等待秒数，超时抛 `StorageBusy` |
 | FIL_DISCLOSURE_SCOPE / TEXT / POSITION | internal / 内置文案 / top | 免责披露作用域、自定义文案与位置（`top` 或 `footer`） |
@@ -265,7 +269,7 @@ scripts/        Windows 同步任务安装、一键启动（start.ps1）、真�
 | 文档 | 用途 |
 | --- | --- |
 | [模块与入口](docs/模块与入口.md) | 当前目录、模块职责、17 个命令与旧入口映射 |
-| [预测台账与回验](docs/预测台账与回验.md) | 预测落盘字段、5/20 日结算口径、blocked/insufficient 与汇总命令 |
+| [预测台账与回验](docs/预测台账与回验.md) | 方向预测与规则事件分账落盘、时钟/净值口径、neutral/observed 结算、Web/报告回验、内置结算调度与 `predictions migrate` 旧口径迁移 |
 | [架构设计](docs/架构设计.md) | 当前数据流、进程与恢复规则、部署约束 |
 | [功能完整性检查](docs/功能完整性检查.md) | 当前已实现能力、缺口与验证边界 |
 | [研究方案](docs/研究方案.md) | 基金研究方法、带样本/窗口口径的历史实验 |

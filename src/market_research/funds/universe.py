@@ -259,6 +259,8 @@ def build_pool(target_per_layer: int = 20, seed: int = DEFAULT_SEED,
             if sum(1 for p in picked if p["层"] == layer) >= target_per_layer:
                 break
     pool = pd.DataFrame(picked).reset_index(drop=True)
+    if pool.empty and "基金代码" not in pool.columns:
+        pool = pd.DataFrame(columns=det.columns)
     # 未被选中的也要留痕（原因 = 未抽中 / 管理人超限）
     chosen = set(pool["基金代码"])
     rest = det[~det["基金代码"].isin(chosen)]
@@ -267,7 +269,11 @@ def build_pool(target_per_layer: int = 20, seed: int = DEFAULT_SEED,
             "基金代码": rest["基金代码"], "基金简称": rest["基金简称"],
             "排除原因": "通过规则但未抽中（或所属管理人已达 3 只上限）"}))
 
-    ex = pd.concat([e for e in all_excl if len(e)], ignore_index=True)
+    frames = [e for e in all_excl if len(e)]
+    # 全部候选都入选、没有任何排除记录时 pd.concat([]) 会抛 ValueError；
+    # 返回带固定列的空表，调用方无需区分"无排除"与"排除表为空"。
+    ex = (pd.concat(frames, ignore_index=True) if frames else
+          pd.DataFrame(columns=["基金代码", "基金简称", "排除原因"]))
     if verbose:
         print(f"[fundpool] 入选 {len(pool)} 只，排除合计 {len(ex)} 条")
     return pool, ex

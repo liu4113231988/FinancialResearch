@@ -276,5 +276,30 @@ class ReportIconTests(unittest.TestCase):
         self.assertTrue(base64.b64decode(png.group(1)).startswith(b"\x89PNG"))
 
 
+class PredictionLedgerSectionTests(unittest.TestCase):
+    def test_section_has_placeholder_without_payload(self):
+        html = _render(_main())
+        self.assertIn("预测台账回验", html)
+        self.assertIn("预测台账汇总不可用", html)
+
+    def test_section_renders_metrics_and_boundary(self):
+        overall = {"current_total": 12, "decided": 8, "hit_rate": 0.625,
+                   "brier": 0.2345, "rule_events": 3,
+                   "rule_return_mean": 0.012, "pending": 1,
+                   "legacy_rows": 2, "note": "方向命中率口径说明"}
+        html = _render(_main(), extra_meta={"predictions": {"overall": overall}})
+        self.assertIn("预测台账回验", html)
+        self.assertIn("62.5%", html)
+        self.assertIn("0.2345", html)
+        self.assertIn("方向命中率口径说明", html)
+        self.assertIn("不可互相印证", html)
+
+    def test_read_failure_reason_is_escaped(self):
+        html = _render(_main(), extra_meta={
+            "predictions": {"ok": False, "reason": "StorageBusy <锁忙>"}})
+        self.assertIn("StorageBusy &lt;锁忙&gt;", html)
+        self.assertNotIn("<锁忙>", html)
+
+
 if __name__ == "__main__":
     unittest.main()

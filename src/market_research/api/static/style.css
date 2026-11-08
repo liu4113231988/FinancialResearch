@@ -57,7 +57,8 @@ body{min-height:100vh}
 /* 工具栏与免责声明共用同一内容宽度（1400px + 28px 内边距），
    与 .market-view 的内容盒严格对齐，避免 max-width 与外层 padding 叠加。 */
 .research-entry{max-width:1400px;margin:0 auto;padding:16px 28px 0}
-.research-toolbar{display:flex;justify-content:flex-start;margin-bottom:12px}
+.research-toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-start;margin-bottom:12px}
+.catalog-state{font:11px var(--sans);color:var(--fg3);white-space:nowrap;align-self:center}
 .search{display:flex;flex-wrap:wrap;gap:10px;align-items:center;
   justify-content:flex-start;min-width:0;max-width:100%}
 .search input{flex:1 1 180px;min-width:90px;max-width:220px}

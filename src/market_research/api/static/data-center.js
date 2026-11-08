@@ -87,7 +87,7 @@
   $('closeDataCenter').onclick = () => dialog.close();
   dialog.addEventListener('close', () => $('openDataCenter').focus());
   dialog.addEventListener('click', event => {if(event.target === dialog) {const r=dialog.getBoundingClientRect(); if(event.clientX<r.left || event.clientX>r.right || event.clientY<r.top || event.clientY>r.bottom) dialog.close();}});
-  $('refreshSync').onclick = () => {feedback(''); refresh();};
+  $('refreshSync').onclick = () => {feedback(''); loadNames(); refresh();};
   $('assetSearch').oninput = resetPage; $('assetKind').onchange = resetPage; $('assetState').onchange = resetPage; $('assetPageSize').onchange = resetPage; $('addAssetKind').onchange = changeKind;
   $('syncFirstPage').onclick = resetPage;
   $('syncPrevPage').onclick = () => {page = Math.max(1, page - 1); renderRows();};
@@ -99,7 +99,16 @@
     catch(error) {feedback(error.message,true);} finally {button.disabled=false;}
   };
   $('workspaceDate').textContent = new Date().toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long',timeZone:'Asia/Shanghai'});
-  api('/api/catalog').then(cat => {for (const item of [...cat.known_funds,...cat.assets.stocks,...cat.assets.indices]) names.set(item.code,item.name); if(snapshot) renderRows();}).catch(()=>{});
+  function loadNames() {
+    return api('/api/catalog').then(cat => {
+      for (const item of [...cat.known_funds,...cat.assets.stocks,...cat.assets.indices]) names.set(item.code,item.name);
+      if(snapshot) renderRows();
+      $('syncUpdated').textContent = '状态将自动刷新';
+    }).catch(() => {
+      $('syncUpdated').textContent = '状态将自动刷新 · 名录读取失败，点「刷新状态」可重试';
+    });
+  }
+  loadNames();
   refresh();
   setInterval(() => {if (!document.hidden) refresh();}, 20000);
 })();

@@ -128,6 +128,36 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   assert.match(html, /id="btnWatch"/);
   assert.match(html, /id="watchSel"/);
   assert.match(html, /id="btnExport"/);
+  // 120：错误码提示必须给出可操作的下一步，而不是一律显示后端 message。
+  const errCtx = {};
+  vm.createContext(errCtx);
+  vm.runInContext(source.slice(source.indexOf('function apiErrorText('),
+                               source.indexOf('function showAlert(msg)')), errCtx);
+  assert.match(errCtx.apiErrorText(429, 'busy', '12'), /队列忙/);
+  assert.match(errCtx.apiErrorText(429, 'busy', '12'), /12 秒/);
+  assert.match(errCtx.apiErrorText(409, 'cancelled', null), /重新发起/);
+  assert.match(errCtx.apiErrorText(404, 'missing', null), /过期/);
+  assert.equal(errCtx.apiErrorText(500, 'boom', null), 'boom');
+  const css = fs.readFileSync('src/market_research/api/static/style.css', 'utf8');
+  const market = fs.readFileSync('src/market_research/api/static/market.js', 'utf8');
+  // 116：自选下拉已移入共用工具栏，窄屏换行而非 display:none 隐藏
+  assert.match(html, /research-toolbar[\s\S]*id="watchSel"/);
+  assert.match(css, /\.search\{[^}]*flex-wrap:wrap/);
+  assert.doesNotMatch(css, /#watchSel[^{]*\{[^}]*display:none/);
+  // 117 键盘可达；118 未来日期上界与回测预热；120 错误码分级提示
+  assert.match(source, /tabindex="0" role="button" aria-pressed=/);
+  assert.match(source, /aria-selected="\$\{k === S\.sel\}"/);
+  assert.match(source, /\$\('fundEnd'\)\.max = today/);
+  assert.match(source, /预热不足 60 个交易日/);
+  assert.match(source, /apiErrorText\(r\.status/);
+  // 121/123/124：暂停轮询、图表与标题语义、自选与名录容错
+  assert.match(source, /typeof pagePaused !== 'undefined'/);
+  assert.match(source, /\.chart:not\(\[role\]\)/);
+  assert.match(source, /function pruneWatchlist\(\)/);
+  assert.match(market, /document\.title = 'Market Research/);
+  assert.match(market, /clearTimeout\(rzT\)/);
+  assert.match(market, /el\('marketEnd'\)\.max = today/);
+  assert.match(html, /id="btnRetryCatalog"/);
   console.log('Cancel button wired, polling capped and backoff applied: OK');
   console.log('Correlation window, response ordering, replaced fund and stale polling: OK');
   console.log('Backtest stale error and late result fencing: OK');

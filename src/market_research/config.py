@@ -41,7 +41,9 @@ for _d in (DATA_DIR, FIG_DIR, RES_DIR):
 #      旧口径结果全部失效，由清理任务移除。
 # 11 = P1-20：total 口径构造失败不再静默退回累计净值。此前生成的结果可能基于
 #      cum 序列，必须让旧结果缓存失效（否则会继续被 submit() 直接命中）。
-CACHE_VERSION = 11
+# 12 = 修正 beta/gamma 的 ddof 混用（np.cov 用 n-1、np.var 用 n，比值被系统
+#      放大 n/(n-1)）；隐含仓位、equity_used、权重与 R²/TE 全部漂移，旧结果缓存失效。
+CACHE_VERSION = 12
 
 # 数据缓存版本：修改 align_prices / 覆盖率阈值 / 候选池等取数口径后 +1，
 # 旧版 output/data/panel_*.csv 会被自动判为过期并重新抓取；

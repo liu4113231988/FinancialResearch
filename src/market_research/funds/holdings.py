@@ -362,19 +362,20 @@ def _normalize_holdings(df: pd.DataFrame) -> pd.DataFrame:
     out["持仓市值"] = pd.to_numeric(df.get("持仓市值"), errors="coerce")
     q = df.get("季度", pd.Series(index=df.index, dtype=str)).astype(str)
     out["季度"] = q
-    out["期数"] = q.str.extract(r"(\d{4})年(\d)季度")[0] + \
-                 "Q" + q.str.extract(r"(\d{4})年(\d)季度")[1]
-    ye = pd.to_numeric(q.str.extract(r"(\d{4})年(\d)季度")[0], errors="coerce")
-    qq = pd.to_numeric(q.str.extract(r"(\d{4})年(\d)季度")[1], errors="coerce")
-    # 季末：Q2=6/30、Q4=12/31（只保留这两期，其它在下游过滤）
-    out["季末"] = [
-        pd.Timestamp(int(y), 6, 30) if k == 2 else
-        (pd.Timestamp(int(y), 12, 31) if k == 4 else pd.NaT)
-        for y, k in zip(ye, qq)
+    m = q.str.extract(r"(\d{4})年(\d)季度")
+    out["期数"] = m[0] + "Q" + m[1]
+    ye = pd.to_numeric(m[0], errors="coerce")
+    qq = pd.to_numeric(m[1], errors="coerce")
+    # 只给完全合法且属于 Q2/Q4 的行构造日期：全角数字、越界年份或未匹配
+    # 标签此前会让 int(NaN) / Timestamp 抛错，一行坏数据拖垮整批持仓。
+    ok = m.notna().all(axis=1) & ye.between(1678, 2261) & qq.isin([2, 4])
+    out["季末"] = pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns]")
+    out.loc[ok, "季末"] = [
+        pd.Timestamp(int(y), 6 if k == 2 else 12, 30 if k == 2 else 31)
+        for y, k in zip(ye[ok], qq[ok])
     ]
-    out["季末"] = pd.to_datetime(out["季末"])
     # 完整持仓：半年报(Q2)与年报(Q4)披露全部，季报(Q1/Q3)只有前十大
-    out["完整"] = qq.isin([2, 4])
+    out["完整"] = ok
     return out.dropna(subset=["季末"])
 
 
@@ -504,7 +505,10 @@ def align_vs_rbsa(weights: pd.DataFrame, exposure: pd.DataFrame,
     inds = _industry_index_codes()
     if weights is None or weights.empty or exposure is None or exposure.empty:
         return {"ok": False, "reason": "RBSA 权重或真实持仓为空"}
-    exposure = _exposure_to_codes(exposure)
+    # _rbsa_at 用 searchsorted 取"当日或之前最近一次"权重，逐期循环也按
+    # 季末先后累计；两个公开入参都必须升序，否则会静默对错期。
+    exposure = _exposure_to_codes(exposure).sort_index()
+    weights = weights.sort_index()
     if coverage is not None and not coverage.empty:
         coverage = coverage.reindex(exposure.index)
     else:

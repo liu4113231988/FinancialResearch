@@ -138,6 +138,16 @@ def _cache_save(code: str, tag: str, obj):
         pass
 
 
+def _n_rebal(reps: dict) -> int:
+    """调仓次数取任一真正拟合过的模型。
+
+    `_failed_report` 的 weights_hist 是空表；按插入顺序取第一个模型会在
+    首个模型失败时把 n_rebal 显示成 0，与页面上的权重曲线自相矛盾。
+    """
+    return next((len(r.weights_hist) for r in reps.values()
+                 if not r.weights_hist.empty), 0)
+
+
 # ====================================================================== 主流程
 def analyze(code: str, models: Optional[List[str]] = None,
             params: Optional[dict] = None, refresh: bool = False,
@@ -310,8 +320,7 @@ def analyze(code: str, models: Optional[List[str]] = None,
             "prefix_stable": bool(zoo.rebal_mode == "calendar" or
                                   not (max_rebal if max_rebal is not None
                                        else zoo.max_rebal)),
-            "n_rebal": int(len(reps[next(iter(reps))].weights_hist))
-            if reps else 0,
+            "n_rebal": _n_rebal(reps),
             "equity_ratio": C.RBSA["equity_ratio"],
             "auto_equity": bool(auto_equity),
             "best_model": (rank.iloc[0]["key"] if not rank.empty and

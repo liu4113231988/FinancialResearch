@@ -127,5 +127,58 @@ class ContractValidationTests(unittest.TestCase):
         provenance.require_columns(frame, ["date", "close"], "index_sina")
 
 
+class RetryEdgeTests(unittest.TestCase):
+    """111 复查：编程错误不重试、末次不多睡、JSON 截断仍可重试。"""
+    def setUp(self):
+        provenance.reset()
+        self.env = patch.dict(os.environ, {"FIL_HTTP_MAX_RPS": "0"}, clear=False)
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        provenance.reset()
+
+    def test_all_programming_errors_abort_on_first_call(self):
+        for error in (ValueError("v"), KeyError("k"), TypeError("t"),
+                      AttributeError("a")):
+            with self.subTest(error=type(error).__name__):
+                calls = []
+
+                def broken(error=error):
+                    calls.append(1)
+                    raise error
+
+                with self.assertRaises(type(error)):
+                    http._retry(broken, tries=4, wait=0)
+                self.assertEqual(len(calls), 1)
+
+    def test_last_attempt_does_not_sleep_again(self):
+        calls = []
+
+        def always_fail():
+            calls.append(1)
+            raise TimeoutError("timeout")
+
+        with patch.object(http.time, "sleep") as sleep, \
+             patch.object(http.random, "uniform", return_value=0):
+            with self.assertRaises(TimeoutError):
+                http._retry(always_fail, tries=3, wait=0.01)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_json_truncation_is_still_retryable(self):
+        from json import JSONDecodeError
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) < 2:
+                raise JSONDecodeError("truncated", "{", 0)
+            return "ok"
+
+        self.assertEqual(http._retry(flaky, tries=3, wait=0, source="x"), "ok")
+        self.assertEqual(len(calls), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -167,6 +167,13 @@ def submit(operation, params):
                 with path.open("rb") as file:
                     payload=pickle.load(file)
                 payload.setdefault("meta",{})["from_cache"]=True
+                # 清理按 mtime 判"长期未用"，命中只读不会更新 mtime，
+                # 热点缓存每天被读也会在 TTL 后被误删。命中即续期。
+                try:
+                    path.touch()
+                except OSError:
+                    LOG.warning("结果缓存命中时间刷新失败（不影响本次结果）",
+                                exc_info=True)
                 return {"ok":True,"result":payload,"cached":True}
             except Exception:
                 LOG.exception("结果缓存读取失败，将重新分析")

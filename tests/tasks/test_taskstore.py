@@ -159,4 +159,66 @@ class TaskTests(unittest.TestCase):
                 kernel.CloseHandle(handle)
 
 
+class QueueExpiryTests(unittest.TestCase):
+    """queued/终态 TTL 与取消后的排水占位（P3 可用性与边界）。"""
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory(dir=C.ROOT/'output')
+        self.config=patch.object(C,'DATA_DIR',Path(self.temp.name));self.config.start()
+        self.store=DurableJobStore()
+
+    def tearDown(self):
+        self.config.stop();self.temp.cleanup()
+
+    def enqueue(self,key='same'):
+        return self.store.enqueue('sh000300',['index'],'market',
+                                  {'code':'sh000300'},key=key)
+
+    @staticmethod
+    def _age(jid,seconds):
+        stale=time.time()-seconds
+        with storage.connection() as db:
+            db.execute("UPDATE analysis_jobs SET created=?,updated=? WHERE id=?",
+                       [stale,stale,jid])
+
+    def test_stale_queued_expires_and_no_longer_blocks_limit(self):
+        jid,_=self.enqueue()
+        self._age(jid,7200)
+        with patch.dict(os.environ,{'FIL_QUEUE_LIMIT':'1'}):
+            fresh,merged=self.enqueue('fresh')
+        self.assertFalse(merged)
+        self.assertNotEqual(fresh,jid)
+        job=self.store.get(jid)
+        self.assertEqual(job['status'],'error')
+        self.assertIn('排队超时',job['error'])
+
+    def test_claim_also_expires_stale_queued(self):
+        jid,_=self.enqueue()
+        self._age(jid,7200)
+        self.assertIsNone(self.store.claim())
+        self.assertEqual(self.store.get(jid)['status'],'error')
+
+    def test_terminal_ttl_is_configurable(self):
+        jid,_=self.enqueue()
+        claimed=self.store.claim()
+        self.assertIsNotNone(claimed)
+        with bind_attempt(claimed['token']):
+            self.store.finish(jid,{'ok':True})
+        self._age(jid,200)
+        with patch.dict(os.environ,{'FIL_JOB_TERMINAL_TTL':'60'}):
+            self.enqueue('another')
+        self.assertIsNone(self.store.get(jid))
+
+    def test_cancelled_job_holds_capacity_during_drain(self):
+        with patch.dict(os.environ,{'FIL_MAX_JOBS':'1'}):
+            jid,_=self.enqueue()
+            self.assertIsNotNone(self.store.claim())
+            self.assertTrue(self.store.cancel(jid))
+            fresh,_=self.enqueue('fresh')
+            self.assertIsNone(self.store.claim())       # 旧进程仍在排水期
+            with patch('market_research.tasks.store.time.time',
+                       return_value=time.time()+31):
+                claimed=self.store.claim()
+            self.assertEqual(claimed['id'],fresh)
+
+
 if __name__=='__main__':unittest.main()

@@ -23,7 +23,18 @@ HORIZONS = (5, 20)
 GRACE_SESSIONS = 2
 # 只记录最近这么多自然日内的“最新收盘”，周末与长假留出余量。
 LIVE_MAX_LAG_DAYS = 14
-LABELS = ("correct", "incorrect", "blocked", "insufficient")
+# 规则买卖事件不是方向预测：horizon=0 表示无固定方向周期，结算时按固定
+# 5 个会话只记录触发后的收益（observed），不进入方向命中率与 Brier。
+RULE_HORIZON = 0
+RULE_EVAL_SESSIONS = 5
+DIRECTION_THRESHOLD = 0.5
+# 须与 market/execution.py 的成交阈值一致，由 tests/predictions 断言防漂移。
+ENTRY_PROBABILITY = 0.6
+EXIT_PROBABILITY = 0.4
+THRESHOLDS = {"direction": DIRECTION_THRESHOLD,
+              "entry": ENTRY_PROBABILITY, "exit": EXIT_PROBABILITY}
+LABELS = ("correct", "incorrect", "neutral", "observed",
+          "blocked", "insufficient")
 GROUP_FIELDS = ("source", "horizon", "asset_kind", "regime")
 
 
@@ -65,6 +76,23 @@ def is_live(as_of, now=None) -> bool:
         return False
     today = (now or datetime.now()).date()
     return 0 <= (today - signal_date).days <= LIVE_MAX_LAG_DAYS
+
+
+def is_historical_window(params, now=None) -> bool:
+    """显式结束日早于今天即历史回看，不得写入实盘台账。
+
+    `is_live` 只校验信号日距今的天数：用户把 end 选在两周内时，5 日结果
+    其实已能从当时的行情里看到，仍会被当成"实盘最新收盘"。这里从请求
+    参数堵住入口，分析/回测窗口的任一显式结束日早于今天就不记账。
+    """
+    if not isinstance(params, dict):
+        return False
+    today = (now or datetime.now()).date()
+    for key in ("end", "window_end"):
+        parsed = _date(params.get(key))
+        if parsed is not None and parsed < today:
+            return True
+    return False
 
 
 def _model_version(provenance: dict) -> str:
@@ -200,7 +228,8 @@ def _market_rows(result: dict, now) -> List[dict]:
                       "training_rows": forecast.get("training_rows")},
             model_version=version, data_stamp=stamp,
             params={"adjust": meta.get("adjust"),
-                    "thresholds": {"direction": 0.5},
+                    "thresholds": dict(THRESHOLDS),
+                    "horizon_basis": forecast.get("horizon_basis") or "observed_bars",
                     "feature_set": "technical_v1"}))
     for signal in technical.get("signals") or []:
         if _iso(signal.get("date")) != as_of:
@@ -208,18 +237,20 @@ def _market_rows(result: dict, now) -> List[dict]:
         action = signal.get("type")
         if action not in ("buy", "sell"):
             continue
-        for horizon in HORIZONS:
-            rows.append(_make(
-                asset_kind=kind, asset_code=code, asset_name=result.get("name"),
-                as_of=as_of, source="rule",
-                direction="up" if action == "buy" else "down",
-                horizon=horizon, rule_score=_num(signal.get("score")),
-                rule_action=action, price_basis=str(meta.get("adjust") or ""),
-                regime=regime, features=snapshot, model_version=version,
-                data_stamp=stamp,
-                params={"adjust": meta.get("adjust"),
-                        "rule": "score>=60 & RSI45-70 & close<=boll_upper; "
-                                "score<=-20 or close<MA20 & MACD<0"}))
+        rows.append(_make(
+            asset_kind=kind, asset_code=code, asset_name=result.get("name"),
+            as_of=as_of, source="rule",
+            direction="up" if action == "buy" else "down",
+            horizon=RULE_HORIZON, rule_score=_num(signal.get("score")),
+            rule_action=action, price_basis=str(meta.get("adjust") or ""),
+            regime=regime, features=snapshot, model_version=version,
+            data_stamp=stamp,
+            params={"adjust": meta.get("adjust"),
+                    "horizon_semantics": "none",
+                    "evaluation_sessions": RULE_EVAL_SESSIONS,
+                    "rule": "score>=60 & RSI45-70 & close<=boll_upper; "
+                            "score<=-20 or close<MA20 & MACD<0",
+                    "note": "规则条件首次满足是状态事件，没有 5/20 日方向含义"}))
     return rows
 
 
@@ -256,7 +287,8 @@ def _fund_forecast_rows(result: dict, now) -> List[dict]:
             model_version=_model_version(provenance),
             data_stamp=provenance.get("data_stamp"),
             params={"nav_basis": meta.get("nav_basis"),
-                    "thresholds": {"direction": 0.5},
+                    "thresholds": dict(THRESHOLDS),
+                    "horizon_basis": "observed_bars",
                     "feature_set": "fund_nav_direction_v1"}))
     return rows
 
@@ -293,14 +325,17 @@ def _fund_rule_rows(result: dict, now) -> List[dict]:
         asset_kind="fund", asset_code=code, asset_name=meta.get("name"),
         as_of=as_of, source="rule",
         direction="up" if action == "buy" else "down",
-        horizon=horizon, rule_score=_num(latest.get("health")),
-        rule_action=action, price_basis="total", regime="unknown",
+        horizon=RULE_HORIZON, rule_score=_num(latest.get("health")),
+        rule_action=action,
+        price_basis=str(meta.get("nav_basis") or "total"), regime="unknown",
         features=features, model_version=_model_version(provenance),
         data_stamp=provenance.get("data_stamp"),
         params={"model": meta.get("model"),
                 "thresholds": meta.get("thresholds"),
-                "rule": "health<=exit 卖出；health>=enter 买入；连续确认"})
-        for horizon in HORIZONS]
+                "horizon_semantics": "none",
+                "evaluation_sessions": RULE_EVAL_SESSIONS,
+                "rule": "health<=exit 卖出；health>=enter 买入；连续确认",
+                "note": "健康分是拟合可信度风控，不是市场方向预测"})]
 
 
 def record_result(operation: str, params: dict, result: dict,
@@ -313,6 +348,8 @@ def record_result(operation: str, params: dict, result: dict,
     if not isinstance(result, dict):
         return 0
     now = now or datetime.now()
+    if is_historical_window(params, now):
+        return 0
     if operation == "market":
         rows = _market_rows(result, now)
     elif operation == "analyze":
@@ -355,33 +392,110 @@ def update_record(record_id: str, **fields) -> None:
                    [*values.values(), record_id])
 
 
+def migrate_legacy(apply: bool = False) -> dict:
+    """把口径修正前的规则行（5/20 各一条）合并成新口径的单条状态事件。
+
+    默认只预览；`apply=True` 才写库并删除同组重复行。幂等：迁移后不再有
+    `horizon IN (5,20)` 的规则行，重跑返回 deleted=0。建议先备份
+    `market.duckdb`：删除的是旧口径重复行，保留行沿用原 id 与已结算收益。
+    """
+    with storage.connection() as db:
+        _schema(db)
+        groups = db.execute(
+            "SELECT asset_kind, asset_code, as_of, COALESCE(rule_action,'') AS action, "
+            "COUNT(*) AS n FROM prediction_records "
+            "WHERE source='rule' AND horizon IN (5,20) GROUP BY 1,2,3,4"
+        ).fetchall()
+        legacy_rows = sum(int(group[4]) for group in groups)
+        would_delete = sum(int(group[4]) - 1 for group in groups)
+        if not apply:
+            return {"dry_run": True, "legacy_rows": legacy_rows,
+                    "groups": len(groups), "would_delete": would_delete,
+                    "kept": 0, "deleted": 0}
+        kept = deleted = 0
+        for asset_kind, code, as_of, action, _n in groups:
+            rows = db.execute(
+                "SELECT id, params, status, label FROM prediction_records "
+                "WHERE source='rule' AND horizon IN (5,20) "
+                "AND asset_kind=? AND asset_code=? AND as_of=? "
+                "AND COALESCE(rule_action,'')=? ORDER BY horizon, created_at",
+                [asset_kind, code, as_of, action]).fetchall()
+            if not rows:
+                continue
+            keep = rows[0]
+            try:
+                params = json.loads(keep[1]) if isinstance(keep[1], str) else {}
+            except (TypeError, ValueError):
+                params = {}
+            params = dict(params) if isinstance(params, dict) else {}
+            params.update({"horizon_semantics": "none",
+                           "evaluation_sessions": RULE_EVAL_SESSIONS,
+                           "migrated_from": "legacy_rule_5_20"})
+            label = "observed" if keep[2] == "settled" else keep[3]
+            db.execute(
+                "UPDATE prediction_records SET horizon=?, params=?, label=? WHERE id=?",
+                [RULE_HORIZON,
+                 json.dumps(_jsafe(params), ensure_ascii=False, allow_nan=False),
+                 label, keep[0]])
+            for row in rows[1:]:
+                db.execute("DELETE FROM prediction_records WHERE id=?", [row[0]])
+                deleted += 1
+            kept += 1
+    return {"dry_run": False, "legacy_rows": legacy_rows,
+            "groups": len(groups), "would_delete": would_delete,
+            "kept": kept, "deleted": deleted}
+
+
 def _stats(rows: List[dict]) -> dict:
     counts = {label: 0 for label in LABELS}
     for row in rows:
         label = row.get("label")
         if label in counts:
             counts[label] += 1
-    decided = counts["correct"] + counts["incorrect"]
+    # 方向命中率与 Brier 只统计有概率的方向预测；规则买卖事件是状态记录，
+    # 只单列触发后收益，不参与方向正确性判定（旧版数据也按 source 排除）。
+    direction = [row for row in rows
+                 if row.get("source") != "rule" and row.get("probability") is not None]
+    rules = [row for row in rows if row.get("source") == "rule"]
+    # 口径修正前落库的旧规则行是 5/20 各一条；单列出来，避免跨版本汇总被误读。
+    legacy = [row for row in rules if row.get("horizon") in HORIZONS]
+    decided = sum(1 for row in direction
+                  if row.get("label") in ("correct", "incorrect"))
+    correct = sum(1 for row in direction if row.get("label") == "correct")
     brier_values = [
         (float(row["probability"]) - (1.0 if float(row["realized_return"]) > 0 else 0.0)) ** 2
-        for row in rows
-        if row.get("probability") is not None
-        and row.get("realized_return") is not None
+        for row in direction
+        if row.get("realized_return") is not None
         and row.get("label") in ("correct", "incorrect")
     ]
+    rule_returns = [float(row["realized_return"]) for row in rules
+                    if row.get("realized_return") is not None]
     return {
         "total": len(rows),
         "pending": sum(1 for row in rows if row.get("status") == "pending"),
         **counts,
         "decided": decided,
-        "hit_rate": (counts["correct"] / decided) if decided else None,
+        "hit_rate": (correct / decided) if decided else None,
+        "hit_rate_basis": "direction_only",
         "brier": (sum(brier_values) / len(brier_values)) if brier_values else None,
         "probability_rows": len(brier_values),
+        "rule_events": len(rules),
+        "rule_return_mean": ((sum(rule_returns) / len(rule_returns))
+                             if rule_returns else None),
+        "rule_return_positive_rate": (
+            (sum(1 for value in rule_returns if value > 0) / len(rule_returns))
+            if rule_returns else None),
+        "legacy_rows": len(legacy),
+        "current_total": len(rows) - len(legacy),
+        "note": "hit_rate/Brier 只统计方向概率；规则事件单列触发后收益，"
+                "neutral/observed/blocked/insufficient 均不计入命中率分母。"
+                "legacy_rows 是口径修正前的旧规则行（5/20 各一条），"
+                "current_total 已将其排除。",
     }
 
 
 def summary(group_by: str | None = None) -> dict:
-    """命中率、Brier 与分桶汇总；blocked/insufficient 不计入命中率分母。"""
+    """方向命中率、Brier 与规则事件归因的分桶汇总。"""
     if group_by not in (None, *GROUP_FIELDS):
         raise ValueError(f"group_by 只支持 {GROUP_FIELDS}")
     rows = _records()

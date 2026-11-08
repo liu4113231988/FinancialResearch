@@ -94,6 +94,26 @@ class CapitalTests(unittest.TestCase):
                       {'kind':'index','code':'sh000300','adjust':'','capital':{}}):
             with self.assertRaises(ValueError):validate_plan(plan|{'assets':[asset]})
 
+    def test_flat_cycles_do_not_depress_win_rate(self):
+        frame=bars([10]*5)
+        signal=pd.Series([1,0,1,0,np.nan],index=frame.index)
+        cfg=CapitalConfig(initial_cash=100000,lot_size=100,minimum_commission=0)
+        out=simulate_capital(frame,signal,cfg,0,0)
+        self.assertEqual(out['closed_trades'],2)
+        self.assertEqual(out['flat_cycles'],2)
+        self.assertIsNone(out['win_rate'])
+
+    def test_signal_semantics_separates_pulse_from_persistent(self):
+        frame=bars([10]*4); frame['volume']=1000
+        cfg=CapitalConfig(initial_cash=10005,max_participation=.1,volume_unit='shares')
+        pulse=simulate_capital(frame,pd.Series([1,np.nan,np.nan,np.nan],index=frame.index),cfg,0,0)
+        persistent=simulate_capital(frame,pd.Series([1,1,1,np.nan],index=frame.index),cfg,0,0)
+        self.assertEqual(pulse['signal_semantics'],'pulse_events')
+        self.assertEqual(persistent['signal_semantics'],'persistent_target')
+        self.assertIn('不会跨日自动重试补仓',' '.join(pulse['assumptions']))
+        self.assertIn('每个交易日都会用剩余现金重新尝试买入',' '.join(persistent['assumptions']))
+        json.dumps(_jsafe(persistent),allow_nan=False)
+
     def test_partial_fill_retries_every_full_target_session(self):
         # 目标为满仓时，每个交易日都会用剩余现金继续补仓 —— 不是"只在新目标
         # 出现时补一次"。假设文本必须与这个行为一致（P1-10 剩余项）。

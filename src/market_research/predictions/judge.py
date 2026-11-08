@@ -1,19 +1,23 @@
-"""预测台账的到期判定：同一套口径结算方向概率与规则信号。
+"""预测台账的到期判定：方向概率与规则事件按各自口径结算。
 
 口径（已确认）：
-  - 5 日与 20 日两个周期都判定；
+  - 方向概率按 5 / 20 周期判定；周期时钟与记录时的 horizon_basis 一致；
+  - 规则买卖事件不是方向预测，按固定 5 会话只记录触发后收益（observed）；
   - 到期日之后允许 2 个交易日宽限；
-  - 纯方向：收盘涨算上涨，不设幅度阈值，不做相对基准；
-  - blocked / insufficient 不计入命中率，但保留收益用于事后归因。
+  - 收盘涨算上涨、跌算下跌，平盘记 neutral（不判对错）；不做相对基准；
+  - neutral / observed / blocked / insufficient 均不计入方向命中率。
 """
 from __future__ import annotations
 
+import json
 import time
 from datetime import date, datetime, timedelta
 
 import pandas as pd
 
 from market_research.predictions import ledger
+
+FLAT_EPSILON = 1e-9
 
 
 def _date(value) -> date | None:
@@ -58,6 +62,9 @@ def judge_record(record: dict, prices, sessions, today=None) -> dict:
     today = today or date.today()
     as_of = _date(record.get("as_of"))
     horizon = int(record.get("horizon") or 0)
+    is_rule = record.get("source") == "rule" and horizon == ledger.RULE_HORIZON
+    if is_rule:
+        horizon = ledger.RULE_EVAL_SESSIONS
     if as_of is None or horizon <= 0:
         return {"status": "settled", "label": "insufficient",
                 "reason": "记录缺少信号日或周期"}
@@ -116,13 +123,21 @@ def judge_record(record: dict, prices, sessions, today=None) -> dict:
                     "judge_date": judge_date.date().isoformat(),
                     "realized_return": realized, "reason": "zero_volume"}
 
+    verdict = {"status": "settled",
+               "target_date": target.date().isoformat(),
+               "judge_date": judge_date.date().isoformat(),
+               "realized_return": realized, "reason": reason}
+    if is_rule:
+        # 状态事件只保留触发后的区间收益，不判定方向对错。
+        return {**verdict, "label": "observed",
+                "reason": reason or "rule_event_return"}
+    if abs(realized) <= FLAT_EPSILON:
+        # 平盘对 up/down 一视同仁，避免 down 方向白拿一次命中。
+        return {**verdict, "label": "neutral",
+                "reason": reason or "unchanged_close"}
     went_up = realized > 0
     correct = went_up if record.get("direction") == "up" else (not went_up)
-    return {"status": "settled",
-            "label": "correct" if correct else "incorrect",
-            "target_date": target.date().isoformat(),
-            "judge_date": judge_date.date().isoformat(),
-            "realized_return": realized, "reason": reason}
+    return {**verdict, "label": "correct" if correct else "incorrect"}
 
 
 def _sessions(as_of: date, today: date) -> pd.DatetimeIndex:
@@ -134,6 +149,34 @@ def _sessions(as_of: date, today: date) -> pd.DatetimeIndex:
         return pd.bdate_range(as_of, today)
 
 
+def _horizon_basis(record: dict) -> str:
+    """读取写入时冻结的周期时钟；旧记录没有该字段时沿用日历会话。"""
+    params = record.get("params")
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except (TypeError, ValueError):
+            params = {}
+    if not isinstance(params, dict):
+        return "calendar_sessions"
+    basis = params.get("horizon_basis")
+    return basis if basis in ("calendar_sessions", "observed_bars") else "calendar_sessions"
+
+
+def _sessions_for(record: dict, prices, today: date) -> pd.DatetimeIndex:
+    """结算时钟必须与训练时钟一致：有效日线口径按实际报价推进。"""
+    as_of = _date(record.get("as_of"))
+    if as_of is None:
+        return pd.DatetimeIndex([])
+    if _horizon_basis(record) == "observed_bars":
+        close = _close_series(prices)
+        if close is not None and not close.empty:
+            axis = _normalize(close.index)
+            if pd.Timestamp(as_of) in axis:
+                return axis
+    return _sessions(as_of, today)
+
+
 def _load_prices(record: dict, today: date, fetch: bool):
     kind = record.get("asset_kind")
     code = record.get("asset_code")
@@ -143,8 +186,14 @@ def _load_prices(record: dict, today: date, fetch: bool):
     end = (today + timedelta(days=1)).isoformat()
     if kind == "fund":
         from market_research.data.panels import load_fund_nav_cached
+        from market_research.data.providers.funds import (NAV_BASIS_CUM,
+                                                          NAV_BASIS_TOTAL)
+        # 降级为累计净值口径做出的预测，必须用同一口径结算，不能悄悄换成 total。
+        basis = record.get("price_basis") or NAV_BASIS_TOTAL
+        if basis not in (NAV_BASIS_TOTAL, NAV_BASIS_CUM):
+            basis = NAV_BASIS_TOTAL
         return load_fund_nav_cached(code, start=start, end=end,
-                                    refresh=fetch, basis="total",
+                                    refresh=fetch, basis=basis,
                                     allow_fetch=fetch)
     if fetch:
         from market_research.market.analysis import load_bars
@@ -160,8 +209,8 @@ def settle(limit: int = 500, today=None, fetch: bool = False) -> dict:
     """扫描到期记录并写回标签；返回本次结算计数。"""
     today = today or date.today()
     records = ledger.pending_records(limit)
-    counts = {"checked": len(records), "pending": 0, "correct": 0,
-              "incorrect": 0, "blocked": 0, "insufficient": 0}
+    counts = {"checked": len(records), "pending": 0,
+              **{label: 0 for label in ledger.LABELS}}
     cache = {}
     for record in records:
         key = (record.get("asset_kind"), record.get("asset_code"),
@@ -178,7 +227,7 @@ def settle(limit: int = 500, today=None, fetch: bool = False) -> dict:
                                  reason=f"行情读取失败：{error}")
             counts["insufficient"] += 1
             continue
-        sessions = _sessions(_date(record.get("as_of")), today)
+        sessions = _sessions_for(record, prices, today)
         verdict = judge_record(record, prices, sessions, today)
         if verdict.get("status") == "pending":
             counts["pending"] += 1

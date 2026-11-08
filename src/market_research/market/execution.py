@@ -5,6 +5,9 @@ import pandas as pd
 FEE_SCENARIOS = ((0., 0.), (10., 5.), (30., 10.))
 ENTRY_PROBABILITY = .6
 EXIT_PROBABILITY = .4
+# 闭合交易 |pnl| 不超过该值视为平局：不进胜率分子，也不进分母。
+# 可分割账户与资金账户共用，避免两套阈值产生不同的胜负口径。
+FLAT_PNL_EPSILON = 1e-9
 
 
 def _flag(value, label):
@@ -90,15 +93,21 @@ def simulate_execution(bars, targets, fee_bps=10., slippage_bps=5., calendar=Non
     cash, units, entry_cost = 1., 0., None
     equity, exposure, fills, blocked, round_trips = [], [], [], [], []
     turnover, fees, slippage = 0., 0., 0.
+    last_buy_date, t1_locked = None, 0
     for i, (date, row) in enumerate(frame.iterrows()):
         target = orders.iloc[i]
         side = 'buy' if target == 1 and units == 0 else 'sell' if target == 0 and units > 0 else None
         if side:
             reason = _block_reason(row, frame, side)
+            # A 股 T+1：买入当日不可卖出。此前仅靠「一天一个方向」隐式满足。
+            if reason is None and side == 'sell' and last_buy_date == date:
+                reason = 't1_lock'
             fill_price = row.open*(1+slip if side == 'buy' else 1-slip)
             signal_date = frame.index[i-1].date().isoformat()
             if reason:
                 blocked.append({'signal_date': signal_date, 'date': date.date().isoformat(), 'side': side, 'reason': reason})
+                if reason == 't1_lock':
+                    t1_locked += 1
             else:
                 nav_at_open = cash+units*row.open
                 if side == 'buy':
@@ -108,6 +117,7 @@ def simulate_execution(bars, targets, fee_bps=10., slippage_bps=5., calendar=Non
                     paid = notional*fee
                     slip_cost = units*(fill_price-row.open)
                     cash = 0.
+                    last_buy_date = date
                 else:
                     notional = units*fill_price
                     paid = notional*fee
@@ -124,15 +134,21 @@ def simulate_execution(bars, targets, fee_bps=10., slippage_bps=5., calendar=Non
         equity.append(float(nav)); exposure.append(float(units*row.close/nav))
     curve = np.array([1.]+equity)
     returns = curve[1:]/curve[:-1]-1
-    wins = [r for r in round_trips if r > 1e-12]
-    losses = [r for r in round_trips if r < -1e-12]
+    wins = [r for r in round_trips if r > FLAT_PNL_EPSILON]
+    losses = [r for r in round_trips if r < -FLAT_PNL_EPSILON]
+    decided_trades = len(wins) + len(losses)
+    flat_trades = len(round_trips) - decided_trades
     coverage = {name: int(frame[name].notna().sum()) if name in frame else 0
                 for name in ('volume','limit_up','limit_down','buy_allowed','sell_allowed')}
+    # 线上行情只有 OHLC/量额，涨跌停与成交权限从未注入；此时"可成交"只是假设。
+    constraint_data_available = any(coverage[name] for name in
+                                    ('limit_up','limit_down','buy_allowed','sell_allowed'))
     return {'n_sessions': len(frame), 'net_return': equity[-1]-1,
             'max_drawdown': float(np.min(curve/np.maximum.accumulate(curve)-1)),
             'annual_volatility': float(np.std(returns, ddof=1)*np.sqrt(252)) if len(returns)>1 else None,
             'fills': len(fills), 'closed_trades': len(round_trips),
-            'win_rate': len(wins)/len(round_trips) if round_trips else None,
+            'win_rate': len(wins)/decided_trades if decided_trades else None,
+            'flat_trades': flat_trades,
             'payoff_ratio': float(np.mean(wins)/abs(np.mean(losses))) if wins and losses else None,
             'profit_factor': float(sum(wins)/abs(sum(losses))) if losses else None,
             'turnover': float(turnover), 'annual_turnover': float(turnover*252/len(frame)),
@@ -143,11 +159,16 @@ def simulate_execution(bars, targets, fee_bps=10., slippage_bps=5., calendar=Non
             'dates': frame.index.strftime('%Y-%m-%d').tolist(), 'equity': equity, 'exposure': exposure,
             'calendar_verified': calendar is not None, 'missing_sessions': missing_dates,
             'constraint_coverage': coverage,
+            'constraint_data_available': constraint_data_available,
+            't1_locked_count': t1_locked,
             'assumptions': ['收盘信号只在下一会话开盘尝试成交，受限订单当日失效；无卖空、杠杆或日内往返。',
+                            '买入当日不可卖出（T+1）已显式拦截；未模拟交收、税费明细与公司行动。',
                             '单位可分割，不含整手、最低佣金、税费明细及资金容量。费用为固定情景假设。',
-                            '期末持仓按收盘估值，未强制平仓；胜率和盈亏比仅统计已闭合交易。',
+                            '期末持仓按收盘估值，未强制平仓；胜率分母只含有明确盈亏的闭合交易，'
+                            '平局单列 flat_trades，不压低胜率。',
                             '滑点为开盘价的固定冲击情景，不利用当日高低价决定开盘能否成交，也不保证冲击价为真实报价。',
-                            '未提供日历时仅按有效日线推进；未知涨跌停或成交权限按可成交假设，不能认定真实可执行。',
+                            '未提供日历时仅按有效日线推进；未知涨跌停或成交权限按可成交假设。'
+                            'constraint_data_available=false 时，本结果不能作为真实可执行性证据。',
                             '复权价和指数点位仅作诊断，涨跌停价格必须与OHLC同口径；指数还需ETF验证。']}
 
 

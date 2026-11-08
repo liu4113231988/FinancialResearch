@@ -72,7 +72,14 @@ def register(kind, code, basis=""):
 def datasets():
     with storage.connection() as db:
         rows = db.execute("SELECT name,metadata,schema_json FROM datasets").fetchall()
-    return [(name, json.loads(meta), json.loads(schema)["columns"]) for name, meta, schema in rows]
+    out = []
+    for name, meta, schema in rows:
+        try:
+            out.append((name, json.loads(meta), json.loads(schema)["columns"]))
+        except (TypeError, ValueError, KeyError):
+            # 一条损坏记录不该让 discover() / 同步刷新整批失败。
+            LOG.warning("跳过损坏的数据集描述 %s（不影响其它资产）", name)
+    return out
 
 
 def discover():
@@ -133,12 +140,40 @@ def cached(kind, code, basis, start, end):
     """Canonical histories serve analysis windows after successful sync."""
     key = f"{kind}:{code}:{basis}"
     name = history_name({"asset_key": key})
-    meta = storage.metadata(name)
-    if not meta or meta.get("through", "") < (end or now().date().isoformat()):
+    try:
+        meta = storage.metadata(name)
+    except Exception as exc:                                  # noqa: BLE001
+        LOG.warning("同步缓存 %s 元数据损坏，视为未就绪：%s: %s",
+                    name, type(exc).__name__, str(exc)[:180])
         return None
+    if not meta:
+        return None
+    target = end or now().date().isoformat()
+    through = str(meta.get("through", ""))
+    if through < target:
+        return None
+    # ★ through 只记录"本次同步检查到哪天"，不代表源站真给到了那天的行情。
+    #   源站滞后时 data_end 会明显早于 through；只凭 through 判新鲜会把旧行情
+    #   当成新数据。允许跨周末/长假的正常滞后（阈值与数据 stale 判定一致），
+    #   超出则视为缓存未就绪，交回正常抓取 / 冷缓存 202 路径。
+    data_end = str((meta.get("info") or {}).get("data_end") or "")
+    if data_end:
+        try:
+            lag = (pd.Timestamp(through) - pd.Timestamp(data_end)).days
+        except (TypeError, ValueError):
+            lag = 0
+        if lag > C.DATA_STALE_DAYS:
+            LOG.info("同步缓存 %s 的数据末日 %s 落后检查日 %s 共 %d 天，视为未就绪",
+                     name, data_end, through, lag)
+            return None
     if (start or C.START_DATE) < HISTORY_START:
         return None
-    frame = storage.read(name)
+    try:
+        frame = storage.read(name)
+    except Exception as exc:                                  # noqa: BLE001
+        LOG.warning("同步缓存 %s 读取失败，视为未就绪：%s: %s",
+                    name, type(exc).__name__, str(exc)[:180])
+        return None
     if frame is None:
         return None
     frame = frame.loc[start or C.START_DATE:end].copy()
@@ -311,11 +346,16 @@ def tick(current=None):
         _accumulate_valuation(current)
 
 
+def enabled() -> bool:
+    """同步总开关；常驻调度与 `--once` 单次执行共用同一判断。"""
+    return os.environ.get("FIL_SYNC_ENABLED", "1") != "0"
+
+
 def serve():
     # 同步由 worker 以独立进程启动（`market_research.tasks.sync --once` 也走这里）。
     # FIL_SYNC_ENABLED=0 必须在这个真正干活的入口生效 —— 旧的 `start()`
     # 线程启动器无人调用，等于开关形同虚设。
-    if os.environ.get("FIL_SYNC_ENABLED", "1") == "0":
+    if not enabled():
         LOG.info("FIL_SYNC_ENABLED=0，跳过同步调度")
         return
     schedule_time()
@@ -340,6 +380,11 @@ def main():
     schedule_time()
     C.DATA_DIR.mkdir(parents=True, exist_ok=True)
     logs.configure("sync")
+    # ★ --once 才是计划任务/worker 实际调用的入口，不能绕过总开关；
+    #   只放在 serve() 里等于 FIL_SYNC_ENABLED=0 对定时同步无效。
+    if not enabled():
+        LOG.info("FIL_SYNC_ENABLED=0，跳过同步（--once 同样不执行）")
+        return
     if args.once:
         tick()
     else:

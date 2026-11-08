@@ -309,6 +309,12 @@ class ModelZoo:
             last_w, last_date = fr.weights, dates[i - 1]
 
         syn = syn.dropna()
+        # 每个滚动窗口都因 len(yw) < min_obs 被跳过时 rows/diag_rows 为空，
+        # 后面的 set_index("date") 会抛 KeyError 而不是给出可读的失败原因。
+        # 统一转成 ValueError，交给调用方的 _failed_report 记录。
+        if not rows:
+            raise ValueError(
+                "无有效拟合窗口（全部 len(yw) < min_obs），样本不足以拟合")
         y_oos = pd.Series(y_all, index=dates).reindex(syn.index)
         oos_r2, oos_te = _score(syn.values, y_oos.values)
         ic = float(syn.corr(y_oos, method="spearman"))
@@ -318,7 +324,7 @@ class ModelZoo:
         # 关键诊断 —— 若beta 远小于 equity_ratio（0.9），说明基金实际仓位远低于
         # 假设值，Σw=0.9 的合成基准就会系统性高估波动，导致 R² 被压低。
         # 典型场景：做了大量对冲/低仓位运作的"趋势型"基金。
-        var_x = float(np.var(syn.values))
+        var_x = float(np.var(syn.values, ddof=1))
         beta = (float(np.cov(y_oos.values, syn.values)[0, 1] / var_x)
                 if var_x > 1e-18 else float("nan"))
         vol_ratio = (float(syn.std() / y_oos.std())

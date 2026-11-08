@@ -230,6 +230,60 @@ class ReadOnlyRouteTests(unittest.TestCase):
         self.assertFalse(response.json()["deferred"])
 
 
+class PredictionSummaryRouteTests(unittest.TestCase):
+    """台账汇总只读接口：双前缀一致、参数透传、非法分桶 400。"""
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_both_prefixes_return_summary(self):
+        payload = {'group_by': None, 'overall': {'total': 0, 'hit_rate': None},
+                   'groups': []}
+        with patch('market_research.predictions.ledger.summary',
+                   return_value=payload) as summary:
+            legacy = self.client.get('/api/predictions/summary')
+            versioned = self.client.get('/api/v1/predictions/summary')
+        self.assertEqual(legacy.status_code, 200)
+        self.assertEqual(versioned.status_code, 200)
+        self.assertTrue(legacy.json()['ok'])
+        self.assertIn('overall', legacy.json())
+        self.assertEqual(legacy.json(), versioned.json())
+        self.assertEqual(summary.call_count, 2)
+        self.assertIsNone(summary.call_args.kwargs['group_by'])
+
+    def test_group_by_forwarded_and_invalid_value_is_400(self):
+        payload = {'group_by': 'source', 'overall': {'total': 0}, 'groups': []}
+        with patch('market_research.predictions.ledger.summary',
+                   return_value=payload) as summary:
+            ok = self.client.get('/api/predictions/summary',
+                                 params={'group_by': 'source'})
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(summary.call_args.kwargs['group_by'], 'source')
+        with patch('market_research.predictions.ledger.summary',
+                   side_effect=ValueError('group_by 不支持：nope')):
+            bad = self.client.get('/api/predictions/summary',
+                                  params={'group_by': 'nope'})
+        self.assertEqual(bad.status_code, 400)
+        self.assertFalse(bad.json()['ok'])
+
+
+class PredictionSummaryIntegrationTests(unittest.TestCase):
+    """不 mock 台账：验证路由能真正读到 DuckDB 并自动完成迁移。"""
+
+    def test_unpatched_route_reads_real_ledger(self):
+        # 用系统临时目录，避免与 output/ 下大量历史临时目录争用回收站。
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(C, 'DATA_DIR', Path(folder)):
+                client = TestClient(app)
+                response = client.get('/api/predictions/summary')
+                grouped = client.get('/api/v1/predictions/summary?group_by=source')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['ok'])
+        self.assertEqual(response.json()['overall']['total'], 0)
+        self.assertEqual(grouped.status_code, 200)
+        self.assertTrue(grouped.json()['ok'])
+
+
 class NameLookupTests(unittest.TestCase):
     def test_read_only_lookup_never_reaches_the_network(self):
         from market_research.funds.analysis import _guess_name

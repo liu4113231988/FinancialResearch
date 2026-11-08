@@ -202,7 +202,9 @@ def fund_forecast_payload(nav: pd.Series, horizons=(5, 20),
             "as_of": s.index[-1].strftime("%Y-%m-%d"),
             "dates": _dates(sampled.index) if sampled is not None else [],
             "horizons": items,
-            "disclaimer": "基于历史净值动量的模型参考值，非买卖建议，也不代表未来收益。",
+            "disclaimer": "基于历史净值动量的模型参考值：0.5 是涨跌分界而非买入阈值；"
+                          "本项目历史研究未建立稳定的日频方向预测优势，"
+                          "不构成买卖建议，也不代表未来收益。",
         }
     except Exception as exc:                              # noqa: BLE001
         return {"basis": "fund_nav", "available": False, "dates": [],
@@ -753,6 +755,9 @@ def _backtest_payload(code: str, name: str, model_key: str, auto_equity: bool,
             # 门控诊断：零交易时必须让用户看到"健康分离离场线还有多远"，
             # 否则"无触发交易"会被误读成"信号判断为一直持有"。
             "no_trades": len(bt["trades"]) == 0,
+            "cost_assumption": ("回测按单边 0.15% 固定成本计提，未包含申赎确认时滞、"
+                                "持有期惩罚性赎回费与场外 A 类约 1.5% 申购 / 0.5% 赎回费；"
+                                "真实可执行成本显著更高，不能据此推导任何份额类别可直接交易。"),
             "health_stats": _jsafe(hs),
             # P1-20/P2-27：口径与数据质量随回测结果一起展示
             **(meta_extra or {}),

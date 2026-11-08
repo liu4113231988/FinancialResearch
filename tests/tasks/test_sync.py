@@ -136,5 +136,60 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(client.get('/api/sync').json()['assets']),2)
 
 
+class DataEndFreshnessTests(unittest.TestCase):
+    """113：through 只是检查日，不能替代真实数据末日判新鲜。"""
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(dir=C.ROOT / "output")
+        self.config = patch.object(C, "DATA_DIR", Path(self.directory.name))
+        self.config.start()
+        self.name = sync.history_name({"asset_key": "index:sh000300:"})
+        self.frame = pd.DataFrame(
+            {"close": [10., 11.]},
+            index=pd.to_datetime(["2026-10-29", "2026-10-30"]))
+
+    def tearDown(self):
+        self.config.stop()
+        self.directory.cleanup()
+
+    def test_lagging_source_is_not_served_as_fresh(self):
+        storage.write(self.name, self.frame,
+                      {"through": "2026-10-30",
+                       "info": {"data_end": "2026-10-01"}})
+        self.assertIsNone(sync.cached("index", "sh000300", "",
+                                      "2026-10-01", "2026-10-30"))
+
+    def test_weekend_lag_still_serves(self):
+        storage.write(self.name, self.frame,
+                      {"through": "2026-11-08",
+                       "info": {"data_end": "2026-11-06"}})
+        out = sync.cached("index", "sh000300", "", "2026-10-01", "2026-11-08")
+        self.assertIsNotNone(out)
+        self.assertEqual(len(out), 2)
+
+    def test_legacy_meta_without_data_end_keeps_old_behavior(self):
+        storage.write(self.name, self.frame, {"through": "2026-11-08"})
+        self.assertIsNotNone(sync.cached("index", "sh000300", "",
+                                         "2026-10-01", "2026-11-08"))
+
+    def test_corrupt_sync_metadata_is_treated_as_not_ready(self):
+        with storage.connection() as db:
+            db.execute("INSERT OR REPLACE INTO datasets VALUES (?,?,?,?)",
+                       [self.name, "{not-json", "{}", "deadbeef"])
+        with self.assertLogs(sync.LOG, level="WARNING"):
+            self.assertIsNone(sync.cached("index", "sh000300", "",
+                                          "2026-10-01", "2026-10-30"))
+
+    def test_datasets_skips_corrupt_rows(self):
+        storage.write(self.name, self.frame, {"through": "2026-11-08"})
+        with storage.connection() as db:
+            db.execute("INSERT OR REPLACE INTO datasets VALUES (?,?,?,?)",
+                       ["broken", "{not-json", "{}", "deadbeef"])
+        with self.assertLogs(sync.LOG, level="WARNING"):
+            rows = sync.datasets()
+        names = [name for name, _, _ in rows]
+        self.assertIn(self.name, names)
+        self.assertNotIn("broken", names)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,7 +17,13 @@ def result(jid:str):
     if not job:
         return JSONResponse({'error':'任务不存在'},status_code=404)
     if job['status']=='error':
-        return JSONResponse({'error':job['error']},status_code=500)
+        # 用户取消 / 排队超时不是计算故障，不能一律 500。给出 reason 并把
+        # 取消单独降到 409，调用方可以区分"主动放弃"与"真实异常"。
+        text=str(job.get('error') or '')
+        reason=('cancelled' if text.startswith('任务已取消')
+                else 'queue_timeout' if '排队超时' in text else 'failed')
+        return JSONResponse({'error':job['error'],'status':'error','reason':reason},
+                            status_code=409 if reason=='cancelled' else 500)
     if job['status']!='done':
         return JSONResponse({'error':'尚未完成','status':job['status']},status_code=202)
     payload = job['result'] or {}

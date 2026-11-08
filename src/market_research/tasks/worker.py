@@ -2,6 +2,7 @@
 import argparse
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -14,6 +15,32 @@ from market_research.settings import Settings
 from market_research.tasks.store import bind_attempt
 
 LOG=logging.getLogger(__name__)
+
+
+def _stop_child(child, label, *, tree: bool = True, timeout: float = 10) -> bool:
+    """终止并等待子进程；杀不掉或等不到都只记日志，绝不冒泡到监督循环。
+
+    单个失控的僵尸子进程不该让整个 supervisor 退出（那样队列会全部停摆）。
+    返回 False 表示进程仍未回收，本轮调用方应跳过依赖"已退出"的清理动作。
+    """
+    if child.poll() is None:
+        try:
+            if tree:
+                terminate_tree(child)
+            else:
+                child.terminate()
+        except Exception:                                     # noqa: BLE001
+            LOG.warning("终止子进程 %s 失败（仍继续等待）", label, exc_info=True)
+    try:
+        child.wait(timeout=timeout)
+        return True
+    except subprocess.TimeoutExpired:
+        LOG.warning("子进程 %s 在 %.0fs 内未退出，本轮跳过回收（不阻塞队列）",
+                    label, timeout)
+        return False
+    except Exception:                                         # noqa: BLE001
+        LOG.warning("等待子进程 %s 失败，本轮跳过回收", label, exc_info=True)
+        return False
 
 
 def _prune_stale_windows():
@@ -33,6 +60,37 @@ def _prune_stale_windows():
             LOG.info("清理重复窗口的指数池缓存：%s", ", ".join(removed))
     except Exception:
         LOG.warning("重复窗口缓存清理失败（不影响计算）", exc_info=True)
+
+
+def _settle_interval_seconds():
+    """台账结算间隔（秒）；配置错误回退 60 分钟，下限 1 分钟。"""
+    try:
+        minutes = float(os.environ.get('FIL_PREDICTION_SETTLE_MINUTES', '60'))
+    except (TypeError, ValueError):
+        minutes = 60.
+    return max(1., minutes) * 60
+
+
+def _advance_settle(settle_child, next_settle, once=False):
+    """每轮循环推进一次台账结算（默认开启，可关闭）。
+
+    结算在独立子进程里只读本地缓存写标签，不占任务名额、不阻塞领取；
+    启动失败或子进程异常只记日志，不影响分析队列。`--once` 不触发。
+    """
+    if once or os.environ.get('FIL_PREDICTION_SETTLE_ENABLED', '1') == '0':
+        return settle_child, next_settle
+    interval = _settle_interval_seconds()
+    if settle_child is not None and settle_child.poll() is not None:
+        settle_child = None
+        next_settle = time.time() + interval
+    if settle_child is None and time.time() >= next_settle:
+        try:
+            return launch('market_research.cli', 'predictions', 'settle',
+                          log_name='prediction-settle.log'), next_settle
+        except Exception:
+            LOG.warning('预测台账结算进程启动失败（不影响任务队列）', exc_info=True)
+            return None, time.time() + interval
+    return settle_child, next_settle
 
 
 def execute(jid,token):
@@ -81,13 +139,16 @@ def supervise(once=False):
         children={}
         sync_child=None
         next_sync=0
+        settle_child=None
+        # 启动后先留一个间隔，避免与首次同步同时争 DuckDB 写锁。
+        next_settle=time.time()+_settle_interval_seconds()
         try:
             while not stop_path.exists():
                 for jid,(child,job) in list(children.items()):
                     state=JOBS.public(jid)
                     timed_out=time.time()-job['started']>Settings.load().job_timeout
                     if child.poll() is None and (timed_out or not state or state['status']=='error'):
-                        terminate_tree(child);child.wait(timeout=10)
+                        _stop_child(child,jid)
                         if timed_out:
                             JOBS.fail(jid,'计算超时，进程已终止',token=job['token'])
                     if child.poll() is not None:
@@ -112,16 +173,18 @@ def supervise(once=False):
                         sync_child=None;next_sync=time.time()+30
                     if sync_child is None and time.time()>=next_sync:
                         sync_child=launch('market_research.tasks.sync','--once',log_name='sync-process.log')
+                settle_child,next_settle=_advance_settle(settle_child,next_settle,once)
                 time.sleep(.5)
         finally:
             # Claimed tasks remain durable; expired leases are recovered by the
             # next supervisor. Never leave an old child writing as a new attempt.
-            for child,job in children.values():
-                if child.poll() is None:
-                    terminate_tree(child);child.wait(timeout=10)
+            for jid,(child,job) in children.items():
+                _stop_child(child,jid)
                 JOBS.retry_crashed(job['id'],job['token'],'工作进程停止，等待恢复')
-            if sync_child and sync_child.poll() is None:
-                sync_child.terminate();sync_child.wait(timeout=10)
+            if sync_child:
+                _stop_child(sync_child,'sync',tree=False)
+            if settle_child:
+                _stop_child(settle_child,'prediction-settle',tree=False)
             stop_path.unlink(missing_ok=True)
             C.DATA_DIR.joinpath('worker.pid').unlink(missing_ok=True)
 

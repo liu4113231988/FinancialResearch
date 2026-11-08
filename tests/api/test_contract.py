@@ -27,7 +27,8 @@ class ApiVersionTests(unittest.TestCase):
         paths = self.client.get('/openapi.json').json()['paths']
         for path in ('/api/analyze', '/api/v1/analyze',
                      '/api/job/{jid}', '/api/v1/job/{jid}',
-                     '/api/result/{jid}', '/api/v1/result/{jid}'):
+                     '/api/result/{jid}', '/api/v1/result/{jid}',
+                     '/api/predictions/summary', '/api/v1/predictions/summary'):
             self.assertIn(path, paths)
 
     def test_v1_submission_still_accepts_the_same_body(self):

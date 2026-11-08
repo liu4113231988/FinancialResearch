@@ -21,6 +21,7 @@ window.MarketApp = (() => {
       adjust: el('marketAdjust').value, benchmark: el('marketBenchmark').value };
     if (fund.invalidate) fund.invalidate();
     kind = next;
+    document.title = 'Market Research · ' + ({stock: '股票', fund: '基金', index: '指数'}[kind] || '研究');
     result = views[kind].result || null;
     charts.forEach(c => c.dispose()); charts.clear();
     document.querySelectorAll('[data-asset]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.asset === kind)));
@@ -49,8 +50,10 @@ window.MarketApp = (() => {
       if (fund.hasResult()) fund.show();
       return;
     }
+    const today = date(new Date());
+    el('marketStart').max = today; el('marketEnd').max = today;
     el('marketStart').value = views[kind].start || date(new Date(new Date().setFullYear(new Date().getFullYear() - 1)));
-    el('marketEnd').value = views[kind].end || date(new Date());
+    el('marketEnd').value = views[kind].end || today;
     el('marketAdjust').value = views[kind].adjust ?? 'qfq';
     el('marketBenchmark').value = views[kind].benchmark || 'sh000300';
     const stock = kind === 'stock';
@@ -83,7 +86,8 @@ window.MarketApp = (() => {
       const timer = setTimeout(() => controller.abort(), 15000);
       try { return await requestData(path, {...options, signal: controller.signal}); }
       catch (error) {
-        if (!retry || attempt >= 2) throw error;
+        // 队列忙 / 任务过期 / 状态冲突重试也无意义，只会加重后端负担。
+        if (!retry || attempt >= 2 || (error && [404, 409, 429].includes(error.status))) throw error;
       } finally { clearTimeout(timer); }
       await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
     }
@@ -122,6 +126,11 @@ window.MarketApp = (() => {
       if (task.cancelRequested) await cancel();
       for (let polls = 0; polls < 1200 && activeTask === task; polls++) {
         await new Promise(resolve => setTimeout(resolve, polls > 200 ? 2000 : 700));
+        // 后台标签页暂停轮询；等待不消耗 polls 额度（pagePaused 由 app.js 维护）。
+        while (typeof pagePaused !== 'undefined' && pagePaused) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          if (activeTask !== task) return;
+        }
         if (activeTask !== task) return;
         const job = await request('/api/job/' + task.id, {}, true);
         if (activeTask !== task) return;
@@ -216,6 +225,7 @@ window.MarketApp = (() => {
       if(rows.length){
         const r=rows[0], n=r.n_sessions, coverage=r.constraint_coverage;
         box.append(part('p',`${n} 个会话 · ${r.calendar_verified?'已提供日历':'未核对交易日历'} · 成交量覆盖 ${coverage.volume}/${n} · 涨停价覆盖 ${coverage.limit_up}/${n} · 跌停价覆盖 ${coverage.limit_down}/${n}`));
+        if(r.constraint_data_available===false)box.append(part('p','未接入涨跌停 / 停牌 / 成交权限数据：未知约束按可成交假设处理，上述净收益、胜率与回撤不能作为真实可执行性证据。'));
         for(const note of r.assumptions)box.append(part('p',note));
       }
       return box;
@@ -331,7 +341,11 @@ window.MarketApp = (() => {
     el('marketCancel').onclick = cancel;
     el('marketRefresh').onclick = () => result && submit(result.code, true);
     el('marketFilters').onchange = () => {if (result) status('区间或口径已更改，点击「应用区间」更新结果。');};
-    window.addEventListener('resize', () => charts.forEach(c => c.resize()));
+    let rzT = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(rzT);
+      rzT = setTimeout(() => charts.forEach(c => c.resize()), 140);
+    });
     switchKind('stock');
   }
   return {init, submit, get kind() {return kind;}};

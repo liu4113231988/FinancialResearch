@@ -31,9 +31,10 @@
 ## 工程与产品
 
 - **预测台账与回验已落地（2026-11-08）**：新增 `prediction_records` 表、`predictions` 命令、服务层写入钩子与 10 项单测；口径见[预测台账与回验](docs/预测台账与回验.md)。剩余：
-  - [ ] Web 页面与报告展示台账汇总（当前只有 CLI）。
-  - [ ] 结算需要外部定时触发，项目内尚未内置调度。
+  - ~~Web 页面与报告展示台账汇总~~ **已关闭（2026-11-08）**：新增只读 `/api/predictions/summary` 双前缀接口、「预测回验」面板与离线 HTML 报告 10 号章节。
+  - ~~项目内内置结算调度~~ **已关闭（2026-11-08）**：`worker.supervise` 内置可关闭的定时结算子进程；环境变量见 `docs/运行环境与配置.md`。
   - [ ] 特征分桶归因：`summary` 目前只支持 `source/horizon/asset_kind/regime`，波动率、趋势分等切片待补。
+  - ~~旧规则行物理迁移命令~~ **已关闭（2026-11-08）**：`predictions migrate`（默认 dry-run，`--apply` 幂等写库）合并 5/20 为单条 `horizon=0`；旧库需人工执行，命令本身不会自动运行。
 - 时点可得的基金分红/拆分及净值版本，股票公司行动与历史数据版本。
 - 供应商交易日历和缺口会话处理已有实现（`data/providers/calendar.py`、`market/targets.py`、`market/execution.py`）；仍需交易所公告核验、区分停牌与漏抓、真实订单及基金申赎/持有期费用模型，不能记为“完全没有交易日历”。
 - 股票财报/估值/同业比较，以及方向估计与概率校准的未来独立样本有效性。
@@ -81,46 +82,46 @@
 ### P3（健壮性 / 一致性 / 打磨，择机处理）
 
 **逻辑与口径**
-- beta 自由度 ddof 混用（`np.cov` ddof=1 / `np.var` ddof=0）：`modeling/engine.py:320-322`、`modeling/estimators.py:656-659`、`research/experiments.py:374-378`，β/γ 被系统放大 n/(n−1)。统一 ddof。
-- lasso 空支撑集兜底未 `nan_to_num`，常数列可拖垮整模型（`modeling/estimators.py:254-256`，对比 enet `214-216` 已修）。
-- 平局闭合交易（|pnl|≤阈值）进 `closed_trades` 分母但不计胜，win_rate 被低估（`market/capital.py:118-123`、`market/execution.py:127-135`）。分母改 wins+losses 或单列持平数。
-- Newey-West t 在零方差序列得 ±inf（`research/robustness.py:149-164`），LRV≤阈值时应返回 NaN（参照 `research/market_validation.py:106-107`）。
-- E1 块内常数信号使整块 ICIR  NaN，应用 `np.nanmean` 并剔除/计数 NaN 块（`research/experiments.py:57-60`）。
-- 资金账户「每日重试补仓」假设对规则脉冲信号不成立（`market/capital.py:139-143` vs `market/execution.py:154-158`）：脉冲遇涨跌停/容量不足后订单永久失效、残余现金不再投入；卖出部分成交后脉冲过期则残留持仓无法再清。至少按目标类型改写文案；更严格做法是脉冲订单挂单直到成交或反向信号。
-- 分位含当日自身（`market/context.py:8-9`：`a <= a[-1]`），最低分位为 1/N 而非 0，note 未披露。
-- 行情双源失败时只保留两个异常类名（`market/analysis.py:88-93`），网络/空数据/代码错误无法区分；截断保留 `str(primary)`。
+- ~~beta 自由度 ddof 混用~~ **已关闭（2026-11-08）**：`modeling/engine.py`、`modeling/estimators.py`、`research/experiments.py` 及 TODO 未列的 `research/commands/increment.py` 共四处统一 `np.var(..., ddof=1)`；`CACHE_VERSION 11→12` 让旧口径结果缓存失效。β/γ/权重/R²/TE 数值整体变动，历史报告与导出需重跑后再比较。
+- ~~lasso 空支撑集兜底~~ **已关闭（2026-11-08）**：`_fit_lasso` 照 `_fit_enet` 改用 `nan_to_num` + `argmax`，全常数列不再抛 `All-NaN slice` 拖垮整批拟合。
+- ~~平局闭合交易压低 win_rate~~ **已关闭（2026-11-08）**：两类账户共用 `FLAT_PNL_EPSILON=1e-9`，胜率分母改为有明确盈亏的交易/周期，单列 `flat_trades` / `flat_cycles`；`closed_trades` 仍为全量。
+- ~~Newey-West 零方差假显著~~ **已关闭（2026-11-08）**：LRV≤1e-15 或非有限时返回 NaN；此前 `max(lrv,1e-18)` 把常数非零序列的 t 放大到 ~1e9，被 `abs(t)>1.96` 误判为显著。
+- ~~E1 常数块连坐 ICIR~~ **已关闭（2026-11-08）**：剔除并计数 NaN 分块后计算均值/标准差，新增 `ICIR_NaN块数` 列；短样本仍返回 NaN。
+- ~~资金账户「每日重试补仓」文案与脉冲信号矛盾~~ **已关闭（2026-11-08，文案层）**：`simulate_capital` 输出 `signal_semantics`，持续目标与脉冲事件分别给出正确的补仓说明。**仍待处理（行为层）**：脉冲遇涨跌停/容量不足后订单永久失效、残余现金不再投入；卖出部分成交后脉冲过期则残留持仓无法再清。彻底修复需给脉冲订单挂单直到成交或反向信号，会改变资金曲线，与既有报告数值不可直接比较。
+- ~~分位口径未披露~~ **已关闭（2026-11-08，披露层）**：`context_payload.note` 明示含当日自身、最低 1/N、恒定窗口 100%。**仍待评估（口径层）**：排除末日改为严格历史分位会推翻 version-15 定义、改变训练输入与 8 处断言，须升版本并重放验证（`docs/历史分位缺失值修正_2026-11-01.md:19`）。
+- ~~双源失败只留异常类名~~ **已关闭（2026-11-08）**：主/备源均保留 `类名: 200 字符摘要`（单行化），可区分网络超时、空数据、列名变更与代码错误。
 
 **边界与防御**
-- `_normalize_holdings` 对异常季度标签直接崩溃（`funds/holdings.py:369-377`），向量化构造或先过滤匹配行。
-- `_run_one` 全部窗口被 `len(yw) < min_obs` 跳过时 `rows=[]`，`pd.DataFrame([]).set_index("date")` 抛 KeyError（`modeling/engine.py:326-329`）；空结果走 `_failed_report` 一致路径。
-- meta 的 `n_rebal` 取插入顺序第一个模型的 `weights_hist`，若首个为 failed report 显示 0（`funds/analysis.py:191-192`）；取任一非空 `weights_hist` 的长度。
-- `holding_benchmark` 隐含依赖 exposure 已按季末升序（`funds/holdings.py:649-676`）；公开入口应显式 `sort_index()`。
-- `build_pool` 全部排除记录为空时 `pd.concat` 空列表抛异常（`funds/universe.py:270`）。
+- ~~`_normalize_holdings` 异常季度标签崩溃~~ **已关闭（2026-11-08）**：一次 `extract` + 合法掩码，只对 Q2/Q4 且年份在 Timestamp ns 范围内的行构造日期；`完整` 与 `季末` 共用同一掩码，不再误标。
+- ~~`_run_one` 空 rows 抛 KeyError~~ **已关闭（2026-11-08）**：全部窗口被 `len(yw) < min_obs` 跳过时改抛 `ValueError("无有效拟合窗口…")`，由既有 `_failed_report` 统一兜底，不再出现难以定位的 `set_index("date")`。
+- ~~meta 的 `n_rebal` 取首个模型~~ **已关闭（2026-11-08）**：抽出 `_n_rebal(reps)`，取任一非空 `weights_hist` 的长度；首个模型是 failed report 时不再显示 0。
+- ~~持仓对齐隐含依赖升序输入~~ **已关闭（2026-11-08）**：复查发现 `holding_benchmark` 内部已有 `sort_index()`，真正缺的是 `align_vs_rbsa`；该公开入口现在对 exposure 与 weights 都显式排序（`_rbsa_at` 用 `searchsorted`，乱序会静默对错期）。
+- ~~`build_pool` 空排除记录崩溃~~ **已关闭（2026-11-08）**：`frames` 为空时返回带固定三列的空表；顺带给"零入选"路径的 `pool` 补列，避免下一段 `pool["基金代码"]` 抛 KeyError。
 
 **任务 / 数据层**
-- 终态任务持久店保留 24h（`tasks/store.py:51`）与内存店 30 分钟不一致；`queued` 任务永不过期，worker 久停后队列永久 429。明确口径并给 queued 加 TTL。
-- 取消/超时后名额瞬时释放，可致 `max_jobs+1` 个并发写进程（`tasks/store.py:138-145`）。
-- `/api/result` 对用户取消（status=error，文案「任务已取消」）返 500，无法与真实失败区分；建议 409/499 或带 reason。
-- `end` 无未来日期上界（`validation/window.py:62-86`），2099 会触发 47 指数全量抓取；超过今天直接 400。
-- `--once` 绕过 `FIL_SYNC_ENABLED=0`（`tasks/sync.py:347-349`），而计划任务恰好用 `--once`，与 `serve()` 注释承诺相反。
-- 结果缓存按 mtime 30 天淘汰（`services/analysis.py:103-108`），热点缓存每天读也被删；应按 atime 或命中时 utime。
-- 请求线程内 `/api/corr`（`allow_fetch=False`）仍有 DuckDB 写副作用（`data/panels.py:196-199` 的 `register`、`168-171` 的 `_cache_info_write`），只读模式应跳过，避免与 sync 大事务抢锁。
-- supervisor 对杀不掉的僵尸子进程 `wait` 超时会炸整个监督循环（`tasks/worker.py:81-114`）；超时则记录并跳过本轮，不要让单个失控进程拖垮队列。
-- 损坏缓存无自愈（`data/storage.py:54-60`、`data/cache.py:75-80`），可能把冷缓存 202 打成 500。
-- `_retry` 对 ValueError/KeyError 等编程错误也重试 4 次且末次多睡一轮（`data/http.py:42-47`）。
-- 候选池 ≤200 行被静默丢弃（`data/providers/indices.py:60-67`），真实原因不可见。
-- `meta.through` 固定写当天，即便 `data_end` 更早（源站滞后），`cached()` 凭 through 判新鲜会静默用旧数据（`tasks/sync.py:189-211`）。
+- ~~`queued` 永不过期 / 终态保留期写死~~ **已关闭（2026-11-08）**：`_expire()` 在每次 `enqueue` / `claim` 执行，终态按 `FIL_JOB_TERMINAL_TTL`（默认 24h，可配）物理删除；`queued` 超 `FIL_JOB_QUEUED_TTL`（默认 1h）转 `error` 并留「排队超时」原因，用户查得到而不是拿 404，worker 久停后不再永久 429。`recover()` 转回 queued 时刷新 `updated`，重试任务仍有完整 TTL 窗口。内存店仍是 30 分钟（`JOB_TTL_SEC`），二者用途不同（单进程回调 vs 跨进程可查），保留差异并已在配置文档写明。
+- ~~取消/超时后名额瞬时释放~~ **已关闭（2026-11-08，时间衰减方案）**：`_active_count()` 把"刚异常终态、曾被领取（`lease_until IS NOT NULL`）"的任务在 `FIL_JOB_DRAIN_GRACE`（默认 30s）内仍计入 `max_jobs`，给 supervisor `terminate_tree`/`wait` 留出排水时间；纯时间衰减无需显式释放计数点，不会反过来造成永久 429，正常 `done` 不占位。**未改**：token fencing 与 supervisor `finally` 的重试语义。
+- ~~`/api/result` 把用户取消当 500~~ **已关闭（2026-11-08）**：返回体加 `reason`（`cancelled` / `queue_timeout` / `failed`），取消改 409；前端仍按 `/api/job/{jid}` 的 `error` 分支展示，行为不变。
+- ~~`end` 无未来上界~~ **已关闭（2026-11-08）**：`parse_window` 对晚于今天的 `end` 抛 `ValueError`（Web 转 400），不再让 2099 触发全量抓取；`today` 参数可注入，便于测试。
+- ~~`--once` 绕过 `FIL_SYNC_ENABLED=0`~~ **已关闭（2026-11-08）**：抽出 `sync.enabled()`，`main()` 在 `--once` / `serve()` 分支之前统一判断；计划任务与常驻调度口径一致。
+- ~~热点结果缓存被误删~~ **已关闭（2026-11-08）**：命中并成功反序列化后 `path.touch()` 续期 mtime；`touch` 失败只告警、不阻断返回（仍旧重算路径不变）。
+- ~~只读链路仍有 DuckDB 写副作用~~ **已关闭（2026-11-08）**：`load_fund_nav_cached` 的 `sync.register` 与 `load_index_universe` 的 `_cache_info_write` 都改为仅 `allow_fetch=True` 执行；`_cached` 的旧 CSV 迁移在只读模式直接视为未命中。`allow_fetch=False` 现为零写入（缺列信息仍挂 `df.attrs`），不与 sync 大事务抢锁。
+- ~~僵尸子进程 `wait` 超时炸监督循环~~ **已关闭（2026-11-08）**：抽出 `_stop_child()`，把 `terminate_tree`/`terminate` 与 `wait(timeout=10)` 的 `TimeoutExpired` 及其它异常收敛为日志 + `False`；4 处调用（超时回收、`finally` 回收、sync/settle 子进程）都不再冒泡。`child.poll()` 仍是"已退出"的唯一依据，未回收进程不会被误标重试。
+- ~~损坏缓存无自愈~~ **已关闭（2026-11-08）**：`cache.py` 新增 `_safe_metadata()` / `_safe_read()`，损坏记录按未命中处理 —— 可抓取时由 builder 重建并覆盖坏记录，只读时抛 `CacheMiss`（上层 202）而不是 500；旧 CSV 迁移与描述信息写入也都加了异常兜底。同源加固另覆盖 `storage.stamp()`（单条坏 metadata 不再让全库结果缓存指纹崩）、`sync.cached()`（视为未就绪）、`sync.datasets()`（跳过坏行，不拖垮 discover / 同步整批）。
+- ~~`_retry` 对编程错误重试~~ **已关闭（2026-11-08，复查确认此前已实现）**：`_non_retryable()` 对 `KeyError/TypeError/AttributeError/ValueError/ProviderContractError` 立即抛出，`JSONDecodeError`（ValueError 子类）特判为可重试；`sleep` 条件是 `i < tries-1`，末次不多睡。补 3 项回归锁定该行为，避免日后回退。
+- ~~候选池 ≤200 行原因不可见~~ **已关闭（2026-11-08）**：`fetch_universe` 的 `fetch_errors` 现由 `load_index_universe` 跨 `storage`/`concat` 保留，写入 `info.fetch_errors` 与返回 `attrs`，并由 `load_panel` 汇入 `warnings` → meta / 报告 / 页面；`verbose=False` 时另发一条汇总 WARNING 日志。
+- ~~`meta.through` 谎称新鲜~~ **已关闭（2026-11-08，保守方案）**：`through` 保留为"本次同步检查日"（改成数据末日会让周末/长假每次都判缓存失效），`sync.cached()` 增加对 `info.data_end` 的滞后校验：落后 `through` 超过 `FIL_DATA_STALE_DAYS`（默认 10 天）即视为缓存未就绪，交回正常抓取/冷缓存 202；旧缓存无 `data_end` 时保持原行为。**仍待评估**：是否把滞后数据直接标 `stale` 并强制重抓（会改变请求量与 `due()` 重试频率，需实测）。
 
 **UI 打磨**
-- ≤1150px 顶栏「自选」下拉整体隐藏，手机端无自选入口（`api/static/style.css:481`）；移到基金工具栏/空状态区或允许换行。
-- 模型卡片/排名行用 div/tr + onclick，键盘不可达、无 ARIA（`app.js:1125-1127/1182-1184`）；加 `tabindex`、`role="button"`、Enter/Space 处理。
-- 日期输入无 `max=今天`；回测 60 交易日预热无前端预检（`index.html:98-99/165-166`）。
-- 结果缺字段时渲染中途抛错，留下「新头部+旧图表」混合页（`app.js:976-1006/1744-1747` 等）；渲染函数对可选集合做存在性兜底。
-- 429/409/404 提示无差别、409 不接续已有任务（`app.js:475-483`）。
-- 标签页隐藏后基金/市场/相关性轮询不停（数据中心已跳过，`data-center.js:104`）。
-- 市场页 resize 无防抖（`market.js:284`，基金侧有 140ms debounce）。
-- 图表容器缺 `role="img"`/`aria-label`、分段按钮缺 `aria-pressed`；`document.title` 不随入口变化。
-- 自选不清理失效代码；catalog 初始加载无 loading 态、失败无重试按钮。
+- ~~≤1150px 隐藏自选下拉~~ **已关闭（2026-11-08，复查确认此前已实现）**：自选早已移入共用 `.research-toolbar`，`.search{flex-wrap:wrap}` 让窄屏换行而非隐藏，1150px 媒体查询不含任何 `display:none`；旧 `style.css:481` 现为宽度规则。补静态断言防回退。
+- ~~模型卡片/排名行键盘不可达~~ **已关闭（2026-11-08）**：`.mcard` 加 `tabindex="0" role="button" aria-pressed`，排名 `<tr>` 加 `tabindex="0" aria-selected`（保留 `row` 语义，不伪装成 button）；两处都补 Enter/Space → `click()`。
+- ~~日期无 `max=今天` / 回测无预热预检~~ **已关闭（2026-11-08）**：`syncFundDates()` 与 `market.js switchKind()` 动态写 `max=今天`（`controls.js` 的 observer 会同步到日历增强控件）；`runBacktest()` 用 `nav.dates` 计算起点前的交易日数，<60 时前端直接提示，不再白占任务队列名额（结果不带日期轴时不拦截）。
+- 结果缺字段时渲染中途抛错，留下「新头部+旧图表」混合页（`app.js:1052-1084` `applyResult()` 及 `renderHead/renderRank/renderNav/renderCorr/renderBacktest` 等）；渲染函数对可选集合做存在性兜底。**本轮未处理**：改动面最大，需配合 `test_refit.js` 的 `applyResult` stub 与三个 vm 切片一并设计，单独一轮。
+- ~~429/409/404 提示无差别~~ **已关闭（2026-11-08）**：`api()` 把 `status`/`retryAfter` 挂到错误对象，新增 `apiErrorText()` 对 429（队列忙 + 重试秒数）/409（已取消或状态冲突，重发）/404（已过期，重发）/503（存储忙）给出可操作提示；`market.js request()` 对 404/409/429 不再无差别重试 3 次。「409 不接续已有任务」复查确认此前已由 `/api/corr` 的 `202 + job_id` + `pollCorrelation()` 解决。
+- ~~标签页隐藏后轮询不停~~ **已关闭（2026-11-08）**：新增模块级 `pagePaused`，由 `visibilitychange` 维护；基金/回测/持仓/相关性/市场 5 条轮询在 sleep 后用 `while (typeof pagePaused !== 'undefined' && pagePaused)` 等待，不消耗 `MAX_POLLS`/`polls` 额度。`typeof` 守卫是为了兼容前端回归的 vm 单函数切片（那些 context 没有该符号）。数据中心原本已跳过。
+- ~~市场页 resize 无防抖~~ **已关闭（2026-11-08）**：`market.js` 照基金侧补 140ms debounce（`clearTimeout(rzT)`）。
+- ~~图表/分段按钮/标题 ARIA 缺失~~ **已关闭（2026-11-08）**：`init()` 里对 `.chart:not([role])` 批量补 `role="img"` + 从面板标题取 `aria-label`（市场侧已有静态属性，不覆盖）；`trendSeg` 动态按钮补 `aria-pressed`（保留 `class="on"` 与文本，兼容 `dom_check.js`）；`market.js switchKind()` 按入口写 `document.title`。
+- ~~自选失效代码 / catalog 无 loading 与重试~~ **已关闭（2026-11-08）**：`renderWatchlist()` 在名录就绪时按名称池过滤失效代码（未就绪则不过滤，避免一次性隐藏全部）；`pruneWatchlist()` 放在 vm 切片外做 localStorage 写回，由 `init()` / `toggleWatchlist()` 调用。catalog 加载新增 `#catalogState` loading 文案与 `#btnRetryCatalog` 重试按钮；数据中心 `loadNames()` 失败在 `syncUpdated` 留下可见提示，「刷新状态」会重新拉取。
 
 ## 专项检查：走势预测 / 买卖点参考 / 持仓拟合（2026-11-06 补记）
 
@@ -191,7 +192,7 @@
 - **趋势标签严格因果**：`classify_at` 只用 `[t−2n+1, t]` 的前后段结构（`modeling/trends.py:8-60`），追加未来数据不改变历史标签；基金「走势带」贴在**样本外合成基准**上且 UI 明示（`funds/payloads.py:271-285`、`funds/analysis.py:384`、`app.js` 文案），不是基金自身 NAV 形态，也不是方向预测。
 - **方向概率无前视**：训练集按「标签已成熟」截断，REFIT 只用过去标签；样本不足时返回 `ok=false`+reason（`market/technical.py:83-145`）。`horizon` 缺报价不借用后续报价（`market/targets.py`）。
 - **买卖点执行口径一致**：t 日收盘出条件、t+1 开盘成交（`market/execution.py:62-109`），涨跌停/容量/费用有阻断原因；中间概率不生成新订单、持仓保持（`probability_targets`）；规则条件互相排斥，不存在同日买卖冲突。
-- **基金择时无前视**：decision 在 t 日、回测 `shift(1)` 生效（`modeling/backtest.py:243-246`）；健康门控在拟合不可信时只禁止卖出；零交易有 `no_trades`/`health_stats.reachable` 诊断（`signals.py:425-470`）。研究结论（日频方向信号无预测力）见 `docs/研究方案.md:912-924`、`README.md:248`，当前「只描述、不建议」的定位与证据一致。
+- **基金择时无前视**：decision 在 t 日、回测 `shift(1)` 生效（`modeling/backtest.py:243-246`）；健康门控在拟合不可信时只禁止卖出；零交易有 `no_trades`/`health_stats.reachable` 诊断（`signals.py:425-470`）。研究结论（日频方向信号无预测力）见 `docs/研究方案.md:912-924`、`README.md:302`；2026-11-08 已按拍板口径把方向概率、规则条件与仓位状态统一定位为**研究诊断**，并在页面提示、结果 `notices` 与全站披露中同步标注该结论，不再声称「只描述、不建议」。
 - **持仓拟合时点处理正确**：披露滞后 Q2=62 天 / Q4=90 天、基准按披露日切换、RBSA 对齐只比共同行业并披露 coverage 与重估日（`funds/holdings.py:61-75/485-576`）；持仓基准对比要求共同区间 ≥60 日（`holdings.py:703-710`）；未映射股票与面板缺失行业已按 0 收益处理（P2-23/P3-B 已关闭），只有明确现金/债券部分计息。
 
 ### 已拍板口径（2026-11-06 已实施，留痕不设待办）

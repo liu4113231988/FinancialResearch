@@ -32,9 +32,29 @@ def _fingerprint(meta: dict) -> dict:
     return {k: v for k, v in (meta or {}).items() if k != "info"}
 
 
+def _safe_metadata(name: str):
+    """损坏的 metadata 不能把一次冷缓存请求打成 500；按"没有元数据"处理。"""
+    try:
+        return storage.metadata(name)
+    except Exception as exc:                                  # noqa: BLE001
+        LOG.warning("缓存 %s 元数据损坏，按未命中处理：%s: %s",
+                    name, type(exc).__name__, str(exc)[:180])
+        return None
+
+
+def _safe_read(name: str):
+    """损坏的行情缓存按未命中处理，由后续 builder 重建覆盖（自愈）。"""
+    try:
+        return storage.read(name)
+    except Exception as exc:                                  # noqa: BLE001
+        LOG.warning("缓存 %s 读取失败，按未命中处理：%s: %s",
+                    name, type(exc).__name__, str(exc)[:180])
+        return None
+
+
 def _cache_meta_valid(name: str, meta: dict) -> bool:
     """优先校验数据库口径；仅为旧 CSV 迁移读取 sidecar。"""
-    saved = storage.metadata(name)
+    saved = _safe_metadata(name)
     if saved is None:
         fp = _cache_meta_path(name)
         if not fp.exists():
@@ -47,18 +67,22 @@ def _cache_meta_valid(name: str, meta: dict) -> bool:
 
 
 def _cache_meta_write(name: str, meta: dict):
-    if storage.metadata(name) is None:
+    if _safe_metadata(name) is None:
         _cache_meta_path(name).write_text(json.dumps(meta), encoding="utf-8")
     else:
         storage.write_metadata(name, meta)
 
 
 def cache_info(name: str) -> dict:
-    return (storage.metadata(name) or {}).get("info", {})
+    return (_safe_metadata(name) or {}).get("info", {}) or {}
 
 
 def _cache_info_write(name: str, info: dict):
-    storage.update_info(name, info)
+    # 描述性字段写坏了不该阻断主流程（尤其 metadata 已损坏时）。
+    try:
+        storage.update_info(name, info)
+    except Exception:                                         # noqa: BLE001
+        LOG.warning("缓存 %s 描述信息写入失败（不影响数据）", name, exc_info=True)
 
 
 def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False,
@@ -66,20 +90,30 @@ def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False,
     """DuckDB 为唯一写入目标；兼容导入旧 CSV，刷新失败保留上一份数据。
 
     allow_fetch=False 表示"只读"：缓存未命中时抛 `CacheMiss`，绝不调用
-    builder（builder 通常就是联网抓取）。仅供请求线程内的轻量接口使用。
+    builder（builder 通常就是联网抓取），也不做旧 CSV 迁移写库。
+    仅供请求线程内的轻量接口使用。
+
+    metadata / 行情损坏时按未命中处理：可抓取则由 builder 重建并覆盖坏记录
+    （自愈），只读则抛 CacheMiss 让上层返回 202，而不是把冷缓存打成 500。
     """
     if not refresh and (meta is None or _cache_meta_valid(name, meta)):
-        frame = storage.read(name)
+        frame = _safe_read(name)
         if frame is not None:
             return frame
-        legacy = C.DATA_DIR / f"{name}.csv"
-        if legacy.exists():
-            frame = pd.read_csv(legacy, index_col=0, parse_dates=True)
-            if len(frame):
-                saved = _cache_meta_path(name)
-                old_meta = json.loads(saved.read_text(encoding="utf-8")) if saved.exists() else {}
-                storage.write(name, frame, _with_info(meta or old_meta, frame))
-                return frame
+        # 旧 CSV 迁移本身要写库：只读请求线程不做这件事，直接按未命中处理。
+        legacy = C.DATA_DIR / f"{name}.csv" if allow_fetch else None
+        if legacy is not None and legacy.exists():
+            try:
+                frame = pd.read_csv(legacy, index_col=0, parse_dates=True)
+                if len(frame):
+                    saved = _cache_meta_path(name)
+                    old_meta = (json.loads(saved.read_text(encoding="utf-8"))
+                                if saved.exists() else {})
+                    storage.write(name, frame, _with_info(meta or old_meta, frame))
+                    return frame
+            except Exception as exc:                          # noqa: BLE001
+                LOG.warning("旧 CSV 缓存 %s 无法导入，将重新抓取：%s: %s",
+                            name, type(exc).__name__, str(exc)[:180])
     if not allow_fetch:
         raise CacheMiss(f"缓存 {name} 未就绪（只读模式不抓取）")
     try:
@@ -88,7 +122,7 @@ def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False,
         # P2-27：数据源故障不回退到「口径已过期」的旧缓存（如旧版 total
         # 缓存里其实是 cum 数据）；只有 meta 仍匹配时才降级使用旧数据，
         # 并把 stale/source_error 挂到返回值上，由统一 data_quality 透传。
-        previous = (storage.read(name)
+        previous = (_safe_read(name)
                     if meta is None or _cache_meta_valid(name, meta) else None)
         if previous is None or not len(previous):
             raise

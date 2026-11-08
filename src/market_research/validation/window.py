@@ -68,8 +68,13 @@ def parse_window(start=None, end=None, min_days=None, today=None):
 
     s = date_value(start, "起始日期")
     e = date_value(end, "结束日期")
-    effective_end = e if e is not None else pd.Timestamp(
+    limit = pd.Timestamp(
         today if today is not None else _dt.date.today()).normalize()
+    # 未来结束日没有任何可用行情，却会让下游按超长区间发起全量抓取
+    # （例如 2099-12-31 会遍历全部指数历史）。直接拒绝，不要靠抓取端兜底。
+    if e is not None and e > limit:
+        raise ValueError(f"结束日期 {e.date()} 不能晚于今天 {limit.date()}")
+    effective_end = e if e is not None else limit
     if s is not None:
         if s >= effective_end:
             raise ValueError(f"起始日 {s.date()} 需早于结束日 {effective_end.date()}")
