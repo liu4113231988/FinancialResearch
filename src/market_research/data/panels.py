@@ -222,7 +222,8 @@ def load_index_universe(start: Optional[str] = None,
 def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
                          refresh: bool = False,
                          basis: str = NAV_BASIS_TOTAL,
-                         allow_fetch: bool = True) -> pd.Series:
+                         allow_fetch: bool = True,
+                         fresh: bool = True) -> pd.Series:
     """
     单只基金的收益序列（独立缓存，~100 KB，避免与指数抓取耦合）。
 
@@ -239,7 +240,8 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
     if allow_fetch:
         sync.register("fund", fund_code, basis)
     if not refresh:
-        history = sync.cached("fund", fund_code, basis, start, None)
+        history = sync.cached("fund", fund_code, basis, start, None,
+                              fresh=fresh)
         if history is not None:
             result = history.iloc[:, 0].copy()
             result.name = f"fund_{fund_code}"
@@ -353,7 +355,7 @@ def load_panel(fund_code: str, start: Optional[str] = None,
     #   对齐/筛选，起始侧的预热区间（fs < start）照旧保留。
     if end is not None:
         nav = nav.loc[nav.index <= pd.Timestamp(end)]
-    if verbose:
+    if verbose and len(nav):
         if actual_basis == NAV_BASIS_TOTAL:
             tag = "总回报"
         elif nav_degraded:

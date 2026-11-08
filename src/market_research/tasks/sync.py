@@ -136,8 +136,12 @@ def history_name(asset):
     return "sync_history_" + asset["asset_key"].replace(":", "_")
 
 
-def cached(kind, code, basis, start, end):
-    """Canonical histories serve analysis windows after successful sync."""
+def cached(kind, code, basis, start, end, fresh=True):
+    """Canonical histories serve analysis windows after successful sync.
+
+    fresh=False 只要求数据存在：预测结算等回溯用途不需要“同步到今天”的
+    新鲜度门槛，否则检查日早于同步日时会被误判成没有数据。
+    """
     key = f"{kind}:{code}:{basis}"
     name = history_name({"asset_key": key})
     try:
@@ -148,24 +152,25 @@ def cached(kind, code, basis, start, end):
         return None
     if not meta:
         return None
-    target = end or now().date().isoformat()
-    through = str(meta.get("through", ""))
-    if through < target:
-        return None
-    # ★ through 只记录"本次同步检查到哪天"，不代表源站真给到了那天的行情。
-    #   源站滞后时 data_end 会明显早于 through；只凭 through 判新鲜会把旧行情
-    #   当成新数据。允许跨周末/长假的正常滞后（阈值与数据 stale 判定一致），
-    #   超出则视为缓存未就绪，交回正常抓取 / 冷缓存 202 路径。
-    data_end = str((meta.get("info") or {}).get("data_end") or "")
-    if data_end:
-        try:
-            lag = (pd.Timestamp(through) - pd.Timestamp(data_end)).days
-        except (TypeError, ValueError):
-            lag = 0
-        if lag > C.DATA_STALE_DAYS:
-            LOG.info("同步缓存 %s 的数据末日 %s 落后检查日 %s 共 %d 天，视为未就绪",
-                     name, data_end, through, lag)
+    if fresh:
+        target = end or now().date().isoformat()
+        through = str(meta.get("through", ""))
+        if through < target:
             return None
+        # ★ through 只记录"本次同步检查到哪天"，不代表源站真给到了那天的行情。
+        #   源站滞后时 data_end 会明显早于 through；只凭 through 判新鲜会把旧行情
+        #   当成新数据。允许跨周末/长假的正常滞后（阈值与数据 stale 判定一致），
+        #   超出则视为缓存未就绪，交回正常抓取 / 冷缓存 202 路径。
+        data_end = str((meta.get("info") or {}).get("data_end") or "")
+        if data_end:
+            try:
+                lag = (pd.Timestamp(through) - pd.Timestamp(data_end)).days
+            except (TypeError, ValueError):
+                lag = 0
+            if lag > C.DATA_STALE_DAYS:
+                LOG.info("同步缓存 %s 的数据末日 %s 落后检查日 %s 共 %d 天，视为未就绪",
+                         name, data_end, through, lag)
+                return None
     if (start or C.START_DATE) < HISTORY_START:
         return None
     try:

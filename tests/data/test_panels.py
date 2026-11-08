@@ -98,6 +98,31 @@ class FixedWindowTests(unittest.TestCase):
         self.assertIn("候选指数", str(ctx.exception))
 
 
+class EmptyNavTests(unittest.TestCase):
+    """空净值必须在 verbose 下也给出明确错误，而不是打印时越界。"""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(dir=C.ROOT / "output")
+        self.path_patch = patch.object(C, "DATA_DIR", Path(self.directory.name))
+        self.path_patch.start()
+
+    def tearDown(self):
+        self.path_patch.stop()
+        self.directory.cleanup()
+
+    def test_verbose_load_reports_missing_data_instead_of_index_error(self):
+        idx = pd.bdate_range("2024-01-01", periods=10)
+        empty = pd.Series(dtype=float, index=pd.DatetimeIndex([]), name="nav")
+        empty.attrs.update(nav_basis=panels.NAV_BASIS_TOTAL, nav_degraded=False,
+                           nav_degraded_reason="")
+        px = pd.DataFrame({"801780": 100.0 + np.arange(len(idx))}, index=idx)
+        with patch.object(panels, "load_fund_nav_cached", return_value=empty), \
+             patch.object(panels, "load_index_universe", return_value=px):
+            with self.assertRaisesRegex(ValueError, "没有可用数据"):
+                panels.load_panel("110022", start="2024-01-01",
+                                  end=idx[-1].strftime("%Y-%m-%d"), verbose=True)
+
+
 class NavBasisPolicyTests(unittest.TestCase):
     """P1-20：total 口径构造失败时默认失败，不得用累计净值冒充。"""
 

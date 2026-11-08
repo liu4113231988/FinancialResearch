@@ -86,6 +86,9 @@ def judge_record(record: dict, prices, sessions, today=None) -> dict:
 
     close = _close_series(prices)
     if close is None or close.empty:
+        if today <= grace_end.date():
+            return {"status": "pending",
+                    "target_date": target.date().isoformat()}
         return {"status": "settled", "label": "insufficient",
                 "target_date": target.date().isoformat(),
                 "reason": "缺少收盘价数据"}
@@ -93,6 +96,11 @@ def judge_record(record: dict, prices, sessions, today=None) -> dict:
     close.index = _normalize(close.index)
     base = close.get(pd.Timestamp(as_of))
     if base is None or pd.isna(base) or float(base) <= 0:
+        # 信号日收盘还没进本地缓存（同步滞后一天很常见）属于暂时缺数，
+        # 不能在宽限期内直接判 insufficient，否则记录会被永久定案。
+        if today <= grace_end.date():
+            return {"status": "pending",
+                    "target_date": target.date().isoformat()}
         return {"status": "settled", "label": "insufficient",
                 "target_date": target.date().isoformat(),
                 "reason": "信号日缺少有效收盘价"}
@@ -194,12 +202,14 @@ def _load_prices(record: dict, today: date, fetch: bool):
             basis = NAV_BASIS_TOTAL
         return load_fund_nav_cached(code, start=start, end=end,
                                     refresh=fetch, basis=basis,
-                                    allow_fetch=fetch)
+                                    allow_fetch=fetch, fresh=not fetch)
     if fetch:
         from market_research.market.analysis import load_bars
         return load_bars(kind, code, start, end, basis, refresh=True)
     from market_research.tasks.sync import cached
-    bars = cached(kind, code, basis, start, end)
+    # 结算只需要历史收盘，不能要求“同步到今天”：否则每次结算时本地缓存都
+    # 被判定未就绪，记录会被误标成 insufficient 且再无机会重判。
+    bars = cached(kind, code, basis, start, end, fresh=False)
     if bars is None or bars.empty:
         raise ValueError("本地行情缓存未覆盖判定区间，请先同步或使用 --fetch")
     return bars
@@ -209,7 +219,7 @@ def settle(limit: int = 500, today=None, fetch: bool = False) -> dict:
     """扫描到期记录并写回标签；返回本次结算计数。"""
     today = today or date.today()
     records = ledger.pending_records(limit)
-    counts = {"checked": len(records), "pending": 0,
+    counts = {"checked": len(records), "pending": 0, "unavailable": 0,
               **{label: 0 for label in ledger.LABELS}}
     cache = {}
     for record in records:
@@ -222,10 +232,9 @@ def settle(limit: int = 500, today=None, fetch: bool = False) -> dict:
                 cache[key] = (None, str(exc))
         prices, error = cache[key]
         if error is not None:
-            ledger.update_record(record["id"], status="settled",
-                                 label="insufficient", judged_at=time.time(),
-                                 reason=f"行情读取失败：{error}")
-            counts["insufficient"] += 1
+            # 行情读取失败是临时性的（未同步、库锁、磁盘错误），不能把记录
+            # 永久判成 insufficient；保持 pending，等下次数据可用再结。
+            counts["unavailable"] += 1
             continue
         sessions = _sessions_for(record, prices, today)
         verdict = judge_record(record, prices, sessions, today)

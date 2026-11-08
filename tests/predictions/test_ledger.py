@@ -204,6 +204,16 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual(verdict["label"], "correct")
         self.assertEqual(verdict["reason"], "grace_session")
 
+    def test_missing_signal_close_stays_pending_within_grace(self):
+        # 同步滞后导致信号日收盘还没入库时，宽限期内不能永久定案。
+        prices = self._prices().drop(pd.Timestamp(AS_OF))
+        verdict = judge.judge_record(self._record(), prices, SESSIONS,
+                                     date(2026, 11, 9))
+        self.assertEqual(verdict["status"], "pending")
+        verdict = judge.judge_record(self._record(), prices, SESSIONS,
+                                     date(2026, 11, 20))
+        self.assertEqual(verdict["label"], "insufficient")
+
     def test_missing_session_blocked_for_stock(self):
         prices = self._prices().drop(pd.to_datetime(
             ["2026-11-06", "2026-11-09", "2026-11-10"]))
@@ -304,6 +314,17 @@ class ConsistencyTests(unittest.TestCase):
             judge._load_prices(record, date(2026, 12, 10), fetch=False)
         self.assertEqual(loader.call_args.kwargs["basis"], "cum")
 
+    def test_settlement_reads_history_without_requiring_today_sync(self):
+        # 结算只需要历史收盘；若沿用“同步到今天”的新鲜度门槛，记录会被
+        # 误判为没有数据，之后再也没有机会重判。
+        record = {"asset_kind": "stock", "asset_code": "sh600519",
+                  "price_basis": "qfq", "as_of": AS_OF}
+        frame = _rising_bars()
+        with patch("market_research.tasks.sync.cached",
+                   return_value=frame) as cached:
+            judge._load_prices(record, date(2026, 12, 10), fetch=False)
+        self.assertFalse(cached.call_args.kwargs["fresh"])
+
 
 class SettleAndSummaryTests(unittest.TestCase):
     def setUp(self):
@@ -336,6 +357,16 @@ class SettleAndSummaryTests(unittest.TestCase):
         self.assertEqual(overall["rule_events"], 1)
         self.assertGreater(overall["rule_return_mean"], 0)
         self.assertIsNotNone(overall["brier"])
+
+    def test_settle_keeps_pending_when_prices_unavailable(self):
+        ledger.record_result("market", {}, _market_result(),
+                             now=datetime(2026, 11, 2))
+        with patch.object(judge, "_load_prices",
+                          side_effect=ValueError("本地行情缓存未同步")):
+            counts = judge.settle(today=date(2026, 12, 10))
+        self.assertEqual(counts["unavailable"], 3)
+        self.assertEqual(counts["insufficient"], 0)
+        self.assertEqual(ledger.summary()["overall"]["pending"], 3)
 
 
 if __name__ == "__main__":

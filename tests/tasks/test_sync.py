@@ -190,6 +190,18 @@ class DataEndFreshnessTests(unittest.TestCase):
         self.assertIn(self.name, names)
         self.assertNotIn("broken", names)
 
+    def test_settlement_can_read_history_older_than_check_date(self):
+        # 结算只需要判定窗口内的历史收盘，不能因“今天还没同步”而视为无数据。
+        storage.write(self.name, self.frame,
+                      {"through": "2026-10-30",
+                       "info": {"data_end": "2026-10-30"}})
+        self.assertIsNone(sync.cached("index", "sh000300", "",
+                                      "2026-10-01", "2026-11-09"))
+        out = sync.cached("index", "sh000300", "", "2026-10-01", "2026-11-09",
+                          fresh=False)
+        self.assertIsNotNone(out)
+        self.assertEqual(len(out), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
