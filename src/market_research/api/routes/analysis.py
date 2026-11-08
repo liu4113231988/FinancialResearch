@@ -79,6 +79,9 @@ def correlation(code:str,win:int=120,start:str|None=None,end:str|None=None):
     try:
         from market_research.funds.payloads import correlation_block
         result=correlation_block(panel,panel['__FUND__'],roll_n=max(20,min(win,750)))
-        return {'ok':True,'code':code,'correlation':result}
+        # P2-27/P2-28：轻量接口同样要带出过期/缺失/口径降级，不能只给数值。
+        return {'ok':True,'code':code,'correlation':result,
+                'data_quality':dict(getattr(panel,'attrs',{}).get('data_quality') or {}),
+                'data_warnings':list(getattr(panel,'attrs',{}).get('warnings') or [])}
     except Exception as error:
         return JSONResponse({'error':f'{type(error).__name__}: {str(error)[:200]}'},status_code=500)
