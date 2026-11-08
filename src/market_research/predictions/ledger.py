@@ -362,11 +362,12 @@ def record_result(operation: str, params: dict, result: dict,
 
 
 def pending_records(limit: int = 500) -> List[dict]:
+    limit = max(1, min(int(limit), 5000))
     with storage.connection() as db:
         _schema(db)
         cursor = db.execute(
             "SELECT * FROM prediction_records WHERE status='pending' "
-            f"ORDER BY as_of, asset_kind, asset_code LIMIT {int(limit)}")
+            f"ORDER BY as_of, asset_kind, asset_code LIMIT {limit}")
         columns = [item[0] for item in cursor.description]
         return [dict(zip(columns, values)) for values in cursor.fetchall()]
 
