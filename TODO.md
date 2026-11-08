@@ -8,6 +8,24 @@
 
 **2026-11-06 修复轮**：按回查结论补齐 P2-34（`data_stamp` 按操作取数据版本、缓存命中保留产出时版本）、P2-30（`StorageBusy` 映射 503 + 可读原因/重试秒数，路由不再吞掉）、P2-21（研究 CLI 按估值可用性剔除曲线）、P1-20（CLI/报告输出净值口径）、P3-C（持仓 payload 与报告 3.6 内容级断言）。P1-20、P2-21、P3-C 已关闭；P2-34、P2-30 仍为部分落地（剩余差距已在各条更新）。全量单测 366 项通过。
 
+## 2026-11-08 全局复审（第二轮）
+
+按九个功能面复核逻辑、边界与异常路径。以下为**本轮直接修复**（均已补回归测试）：
+
+- `predictions/judge.py` 结算读取库存行情不再要求"同步到今天"（`sync.cached(..., fresh=False)`）；旧实现按 `today+1` 请求结束日、缓存检查日最多只到 `today`，股票/指数记录会永远读不到行情而被误判 `insufficient`。
+- `predictions/judge.py` 行情读取失败、信号日收盘尚未入库时**保持 `pending`**（新增 `unavailable` 计数），不再永久定案；宽限期过后仍缺数才判 `insufficient`。
+- `data/providers/funds.py` 拆分校准在区间内没有可用锚点时必须标 `degraded`（旧实现只覆盖"锚点≥2 但系数不足"，锚点为 0 时会静默返回未校准序列）；同时支持单锚点校准；联动净值/单位净值无交集时不再对空序列取首行。
+- `data/panels.py` 空净值在 `verbose=True` 下先打印 `nav.index[0]` 会抛 `IndexError`，改为正常抛出"无可用数据"口径错误。
+- `api/routes/analysis.py` 轻量 `/api/corr` 直连路径补齐 `data_quality` / `data_warnings`，与服务层口径一致。
+- `predictions/ledger.py` `pending_records` 对负数/超大 `limit` 做钳制。
+
+以下为**待决策项**（涉及数据口径/跨模块契约，本轮不改代码）：
+
+1. **结算时钟的终判口径**（P1）：`horizon_basis=observed_bars` 且资产退市、清算或供应商停止供数时，目标会话永远不存在，记录会无限 `pending`。计划：① 先确认产品口径——"连续 N 个会话无新报价"应判 `blocked` 还是保持待定；② 在 `judge_record` 增加"行情末日早于目标日且已超宽限"的终判分支；③ 补退市/清算/断供三类测试与 summary 分桶。
+2. **宽限期判定日与名义期限漂移**（P2）：目标日缺会话时当前取宽限期内首个可用收盘，实际收益区间长于 5/20 日，且无法区分停牌与漏抓。计划：① 确认"目标日缺会话直接 `blocked`"还是"顺延"；② 若顺延，在记录中冻结实际 `judge_date` 与 `actual_sessions`；③ 让 `summary` 单独统计顺延样本，避免与标准期限混算命中率。
+3. **降级 `cum` 基金预测的离线结算**（P2）：累计净值没有 `sync_history_fund_*_cum` 正史，窗口缓存名又绑定分析起点，worker 内置结算（不带 `--fetch`）可能长期 `pending`。计划：① `submit` 按实际 `nav_basis` 注册同步（含 `cum`）；② 结算侧按 `fund_nav_{code}_*_{basis}` 前缀回退查找最宽窗口；③ 补离线结算测试。
+4. **CLI 批量分析不入台账**（P3）：`cli/analyze.py` 走 legacy `run_fund`，产物没有 `forecast/current` 契约，无法复用服务层写入钩子。计划：先确认 CLI 是否属于"实盘入口"；若属于，让 `run_fund` 输出与 `services.analyze` 对齐的字段后再挂钩子，避免维护两套映射。
+
 ## 基金分析
 
 ### P1-10：持仓基准的股息缺口
@@ -41,6 +59,67 @@
 - ~~`data/storage.py:stamp` 收窄依赖与重复窗口清理~~ **已关闭（2026-11-01）**：stamp 支持按抓取窗口收窄到本基金本窗口的实际依赖（`pe_panel` 与未知数据集仍按设计保守保留）；worker 启动时清理重复窗口的指数池缓存；当前版本结果缓存按 30 天 mtime 淘汰。`CACHE_VERSION` 已同步 +1。
 - ~~Web 重估点抽稀的前缀稳定性~~ **已关闭（2026-11-01）**：`rebal_mode` 切换为 `calendar`（锚点只由日期决定），限流改为保留最新锚点、从头部丢弃 —— 已选历史点不位移；`CACHE_VERSION` 连同 +1，回归见 `tests/modeling/test_rebal_calendar.py`。研究路径本就不抽稀，不受影响。
 - 页面恢复、自选及带数据口径的研究导出**已实现（2026-11-01）**：localStorage 持久化上次分析状态（只回填表单、不自动触发分析）与自选基金清单（顶栏 ☆），结果页支持导出 JSON（含窗口/模型/超参/重估模式等口径）。仍缺：长期模型档案，为[待评估提案](docs/模型档案与算法记录_重构方案.md)，未实现。
+
+## 全局功能审查（2026-11-08）
+
+范围：按当前工作区源码复核基金分析/调参/回测、股票与指数分析、持仓拟合、预测记录与结算、行情缓存与每日同步、API/持久任务及前端任务状态。以下 8 项均有明确代码证据；P1 影响核心计算或结算，P2 影响特定入口、数据状态或口径，P3 为交互竞争与一致性。已有数据缺口和历史开放项不重复列入。
+
+### P1（优先修复）
+
+- [ ] **G-01：基金预测结算传入不存在的 `end` 参数，所有基金记录都无法结算**
+  - 位置：`src/market_research/predictions/judge.py:180-207`；`src/market_research/data/panels.py:222-226`。
+  - 触发与影响：`_load_prices()` 的基金分支调用 `load_fund_nav_cached(..., end=end)`，真实函数签名没有 `end`。`predictions settle` 或 worker 自动结算遇到任意基金记录都会抛出 `TypeError`；当前异常分支虽会保持 `pending`，但每轮都会重试失败，基金命中率、收益和 Brier 永远没有有效结算样本。
+  - 已复现：直接读取一条基金记录得到 `TypeError: load_fund_nav_cached() got an unexpected keyword argument 'end'`。
+  - 修复与验收：移除该调用的 `end`，取得序列后按结算截止日截断；新增真实函数签名的基金端到端结算测试，mock 必须使用 `autospec=True` 或调用真实 loader，覆盖 `total/cum` 两种冻结口径。现有 `tests/predictions/test_ledger.py:299-305` 的普通 mock 会接受任意关键字参数，无法防止回退。
+
+- [ ] **G-04：不可信拟合日仍累计卖出确认天数，恢复可信的第一天可能立即误卖**
+  - 位置：`src/market_research/modeling/signals.py:615-640`。
+  - 触发与影响：`run_bad` 在检查 `fit_reliable` 之前递增；不可信日只阻止当天交易，不清零或暂停计数。默认 `health_confirm=10` 时，9 个低健康分且不可信的交易日后再来 1 个低健康分可信日，会立即卖出，实际并非“连续 10 个可信交易日”。
+  - 已复现：上述 10 日最小输入在第 10 日生成一笔卖出，决策由 `[1,…,1]` 变为末日 `0`。
+  - 修复与验收：只在 `ok_rel=True` 时递增卖出确认计数，或在不可信日清零；明确健康分 NaN 日是否也中断连续性，并保持买入门控语义不变。补“不可信 streak → 可信恢复”“可信/不可信交替”“NaN 穿插”回归，不能只验证全程不可信时不卖。
+
+### P2（特定入口 / 数据状态 / 口径）
+
+- [ ] **G-02：手动刷新不更新 canonical 历史，下一次普通分析会恢复旧行情**
+  - 位置：`src/market_research/market/analysis.py:75-86,122-128`；`src/market_research/data/panels.py:242-274`；`src/market_research/tasks/sync.py:139-186`。
+  - 触发与影响：`refresh=True` 跳过 `sync_history_*` 并只重写 `market_v1_*` 或 `fund_nav_*` 窗口缓存；下一次 `refresh=False` 又优先读取 canonical 历史。只要 canonical 的 `through/data_end` 仍通过新鲜度检查，用户刷新看到的新数据就会被旧数据覆盖，股票、指数和基金均受影响。
+  - 修复与验收：手动刷新应复用统一同步链路更新 canonical 及元信息，或比较窗口缓存与 canonical 的实际数据版本后选择更新且同口径者。增加“旧 canonical → 手动刷新 → 再次非刷新读取”的股票/指数/基金回归，断言两次都返回新数据且不产生口径混用。
+
+- [ ] **G-03：估值抓取失败或返回空表仍写 `last_success`，同步状态与就绪探针误报正常**
+  - 位置：`src/market_research/data/panels.py:72-106`；`src/market_research/tasks/sync.py:301-328`；`src/market_research/api/routes/meta.py:68-89`。
+  - 触发与影响：`_accumulate_panel()` 吞掉抓取异常并返回旧缓存或空表；`_accumulate_valuation()` 不检查本次是否成功及数据是否非空，直接写当天 `last_success`。首次无缓存且供应商失败时会形成“从未有数据但同步成功”，当天不再重试，`/api/ready` 也可能据此显示正常。
+  - 已复现：两个估值 loader 都返回空表时，隔离状态文件仍写入 `{"last_success": "2026-11-08"}`。
+  - 修复与验收：累积函数返回 `fresh_success/fallback_used/error` 等明确状态；仅确认本次抓取成功后更新 `last_success`，降级与失败分别记录 `last_attempt/error`，同日失败允许有限退避重试。补首次失败、已有缓存失败、空表、PE 成功但股息失败及 ready 探针测试。
+
+- [ ] **G-05：行业映射强制刷新失败会用空表或残缺结果覆盖完整旧缓存**
+  - 位置：`src/market_research/funds/holdings.py:124-202`。
+  - 触发与影响：`refresh=True` 重抓全部行业，但旧缓存仅在 `not refresh` 时参与合并；部分或全部请求失败后仍执行 `_atomic_csv_write()`，完整缓存可能变成残缺表或空表，新的冷却元信息还会让后续普通调用暂时直接返回空映射。
+  - 已复现：隔离缓存原有 1 条映射，唯一行业强刷失败后返回值和落盘缓存均变为 0 条。
+  - 修复与验收：强刷也对失败行业保留旧值，成功部分与旧映射按明确优先级合并；全部失败时不得覆盖旧文件。补全失败、部分失败、全新行业与股票换行业、缓存损坏及冷却期组合测试。
+
+- [ ] **G-06：CLI 的回测 `--end` 覆盖分析 `--window-end`，两个截止日无法独立控制**
+  - 位置：`src/market_research/cli/analyze.py:31-52`；`src/market_research/validation/window.py:162-186`；`src/market_research/funds/pipeline.py:53-70`。
+  - 触发与影响：`apply_window()` 已把 `--window-end` 写入 `C.END_DATE`，但 `run_fund()` 又用回测参数 `end_date=args.end` 调用 `D.load_panel(..., end=end_date)`。同时指定两个日期时，拟合面板被裁到回测截止日，而非分析截止日，研究复现口径错误；函数 docstring 对 `end_date` 的两种描述也相互矛盾。
+  - 修复与验收：给 `run_fund()` 增加独立 `window_end` 并显式传递，回测 `end_date` 只传给回测层，对齐 `funds/analysis.py` 已有的双窗口接口。补两个截止日相同/不同、仅传其中一个及非法先后关系的 CLI 测试，并断言 loader 与回测分别收到正确日期。
+
+- [ ] **G-07：跨域令牌认证被 CORS 预检阻断**
+  - 位置：`src/market_research/api/app.py:108-120`。
+  - 触发与影响：启用 `FIL_ACCESS_CONTROL=token` 与 `FIL_CORS_ORIGINS` 后，浏览器跨域请求会携带 `Authorization` 或 `X-API-Key`，但 `allow_headers` 只有 `Content-Type`，预检无法通过；同源页面不受影响。
+  - 已复现：携带 `Access-Control-Request-Headers: authorization` 的 OPTIONS 请求返回 `400 Disallowed CORS headers`，允许列表不含认证头。
+  - 修复与验收：允许 `Authorization`、`X-API-Key` 及实际使用的必要请求头，保持 origin 白名单而非放开全部来源。补 Bearer/API Key 两种预检、正式请求、非白名单 origin 和同源回归。
+
+### P3（交互竞争）
+
+- [ ] **G-08：持仓拟合按钮未纳入统一 busy/重入保护，可打断当前任务的前端轮询**
+  - 位置：`src/market_research/api/static/app.js:902-912,2241-2272`。
+  - 触发与影响：`setFundBusy()` 未禁用 `holdRun`，`runHoldings()` 也不检查 `activeJob`，并会递增 `fundGeneration`。分析或回测运行中点击持仓拟合会提交另一类任务并使原任务代次失效；后台原任务仍运行，页面却停止接收其结果，进度、取消按钮和最终展示可能不一致。
+  - 修复与验收：把 `holdRun` 纳入 busy 控件，入口复用统一重入保护，并按任务代次清理 `activeJob`。补“分析/回测/持仓两两互斥”“连续点击”“取消后发新任务”“旧轮询晚返回”的前端行为测试。
+
+### 本轮验证与未覆盖范围
+
+- 已通过：`.venv/Scripts/python.exe -u -m unittest discover -s tests -p "test_*.py" -t .`（489 项，139.488 秒）；`tests/regression/test_regressions.py`；`tests/regression/test_p0_fixes.py`；`tests/frontend/test_refit.js`、`test_ui_async.cjs`、`test_market_async.cjs`。现有测试全绿不代表上述分支已覆盖。
+- 最小复现已完成：G-01、G-03、G-04、G-05、G-07；其余项由当前调用链和条件分支静态确认。
+- 未执行：真实供应商联网取数、真实浏览器/移动端、多进程与锁竞争压力、Docker/wheel 构建安装及完整数值研究重放。本轮仅审查并更新待办，未修改业务代码。
 
 ## 本轮代码审查发现（2026-11-01 补记，尚未修复）
 
