@@ -1114,37 +1114,93 @@ async function cancelActiveJob() {
   showAlert(jid ? '已取消当前任务；后端收尾完成后结果会被丢弃。' : '没有正在运行的任务。');
 }
 
+// 结果字段兜底：后端在不同降级路径下会省略部分集合（rank / correlation /
+// nav / matrix 等）。统一补成空集合，渲染函数就不必各自猜"字段在不在"。
+function normalizeResult(res) {
+  const r = Object.assign({}, res || {});
+  const meta = Object.assign({}, r.meta);
+  const nav = Object.assign({}, r.nav);
+  const corr = Object.assign({}, r.correlation);
+  r.meta = meta;
+  r.models = r.models || {};
+  r.rank = Array.isArray(r.rank) ? r.rank : [];
+  meta.models = Array.isArray(meta.models) ? meta.models : Object.keys(r.models);
+  r.nav = nav;
+  nav.stats = Object.assign({}, nav.stats);
+  nav.dates = Array.isArray(nav.dates) ? nav.dates : [];
+  nav.nav = Array.isArray(nav.nav) ? nav.nav : [];
+  r.correlation = corr;
+  corr.top = Array.isArray(corr.top) ? corr.top : [];
+  corr.layers = Array.isArray(corr.layers) ? corr.layers : [];
+  corr.drift = Array.isArray(corr.drift) ? corr.drift : [];
+  corr.matrix = Object.assign({rows: [], cols: [], values: []}, corr.matrix);
+  corr.matrix.rows = Array.isArray(corr.matrix.rows) ? corr.matrix.rows : [];
+  corr.matrix.cols = Array.isArray(corr.matrix.cols) ? corr.matrix.cols : [];
+  corr.matrix.values = Array.isArray(corr.matrix.values) ? corr.matrix.values : [];
+  return r;
+}
+
+function clearResultCharts() {
+  // 渲染前拆掉上一次的 echarts 实例并清空画布：中途抛错时不会留下旧曲线
+  // 与新头部拼在一起的"混合页"。只动 #main（基金结果区），不碰市场页图表。
+  Object.values(S.charts || {}).forEach(c => {
+    try { if (c && !c.isDisposed()) c.dispose(); } catch (e) { /* 实例已损坏 */ }
+  });
+  S.charts = {};
+  if (typeof document === 'undefined') return;
+  document.querySelectorAll('#main .chart').forEach(box => {
+    box.replaceChildren();
+    box.removeAttribute('_echarts_instance_');
+  });
+}
+
 function applyResult(res) {
+  const previous = S.result;
   correlationGeneration++;
   S.btManual = false;
   $('btOut').hidden = true;
-  S.result = res;
-  S.params = JSON.parse(JSON.stringify(res.meta.params || {}));
-  S.rollWin = res.correlation?.roll_window || 120;
-  $('rollWin').value = String(S.rollWin);
-  // ★ best_model 可能指向本次**没有产出**的模型（重学后模型集合变化、或命中
-  //   旧结果缓存）。旧写法直接赋给 S.sel，下面所有渲染都只命中 `!m` 分支静默
-  //   退出，详情区继续显示上一次的数字，看起来像本次结果。
-  const present = Object.keys(res.models || {}).filter(k => res.models[k]);
-  S.best = (res.meta.best_model && res.models[res.meta.best_model])
-    ? res.meta.best_model : (present[0] || null);
-  S.sel = S.best;
   const visible = !window.MarketApp || MarketApp.kind === 'fund';
+  clearResultCharts();
+  // 先隐藏结果区：任何一处渲染抛错，用户看到的都是"错误提示 + 空状态"，
+  // 而不是一半新数据、一半上一次的图表。
+  $('main').hidden = true;
+  $('empty').hidden = false;
+  try {
+    const r = normalizeResult(res);
+    S.result = r;
+    S.params = JSON.parse(JSON.stringify(r.meta.params || {}));
+    S.rollWin = r.correlation.roll_window || 120;
+    $('rollWin').value = String(S.rollWin);
+    // ★ best_model 可能指向本次**没有产出**的模型（重学后模型集合变化、或命中
+    //   旧结果缓存）。旧写法直接赋给 S.sel，下面所有渲染都只命中 `!m` 分支静默
+    //   退出，详情区继续显示上一次的数字，看起来像本次结果。
+    const present = Object.keys(r.models).filter(k => r.models[k]);
+    S.best = (r.meta.best_model && r.models[r.meta.best_model])
+      ? r.meta.best_model : (present[0] || null);
+    S.sel = S.best;
+    updateFundStatus();
+    renderHead();
+    renderWatchlist();             // ☆/★ 需跟随当前基金刷新
+    renderInsights();
+    renderValNote();
+    renderDrift();
+    renderModelStrip();
+    renderRank();
+    renderSelected();
+    renderNav();
+    renderFundForecast();
+    renderCorr();
+    syncBacktestDefaults();
+  } catch (error) {
+    S.result = previous || null;
+    clearResultCharts();
+    $('main').hidden = true;
+    $('empty').hidden = false;
+    showAlert('本次结果结构不完整，已隐藏不完整的页面：' + error.message + '。请重试或重新分析。');
+    return;
+  }
   $('empty').hidden = true;
   $('main').hidden = !visible;
-  updateFundStatus();
-  renderHead();
-  renderWatchlist();               // ☆/★ 需跟随当前基金刷新
-  renderInsights();
-  renderValNote();
-  renderDrift();
-  renderModelStrip();
-  renderRank();
-  renderSelected();
-  renderNav();
-  renderFundForecast();
-  renderCorr();
-  syncBacktestDefaults();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -1368,9 +1424,12 @@ function renderRank() {
     };
   });
 
-  // 排序解读
-  const best = rows[0];
-  const worst = rows[rows.length - 1];
+  // 排序解读：无排名数据时不能对 undefined 取列，否则整个结果渲染中断。
+  const best = rows[0], worst = rows[rows.length - 1];
+  if (!best || !worst) {
+    $('rankNote').textContent = '本次结果没有可用的模型排名数据。';
+    return;
+  }
   const gap = (best['样本外R²'] ?? 0) - (worst['样本外R²'] ?? 0);
   $('rankNote').innerHTML =
     `排名按<b>样本外 R²</b> 降序——即"用上一窗口拟合好的模型去预测下一段"的表现。
@@ -2303,14 +2362,21 @@ function renderHoldings(h) {
 
 function renderBacktest(p) {
   $('btOut').hidden = false;
-  renderBtCurrent(p);
-  drawBtEquity(p);
-  renderBtVariantNotes(p);
-  renderBtQuality(p);
-  drawBtHealth(p);
-  renderBtKpis(p);
-  renderBtMetrics(p);
-  renderBtTrades(p);
+  try {
+    renderBtCurrent(p);
+    drawBtEquity(p);
+    renderBtVariantNotes(p);
+    renderBtQuality(p);
+    drawBtHealth(p);
+    renderBtKpis(p);
+    renderBtMetrics(p);
+    renderBtTrades(p);
+  } catch (error) {
+    // 同上：宁可整块隐藏并说明原因，也不留"新指标 + 旧曲线"的混合页。
+    $('btOut').hidden = true;
+    showAlert('回测结果不完整，已隐藏不完整的页面：' + error.message + '。请重新运行回测。');
+    return;
+  }
   $('btOut').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -2374,6 +2440,8 @@ function btLineStyle(k) {
 }
 
 function drawBtEquity(p) {
+  p.equity = p.equity || {dates: [], series: {}};
+  p.equity.series = p.equity.series || {};
   const keys = Object.keys(p.equity.series);
   chart('btChartEquity', {
     grid: { left: 52, right: 18, top: 32, bottom: 34 },
@@ -2397,6 +2465,9 @@ function drawBtEquity(p) {
 }
 
 function drawBtHealth(p) {
+  p.health = p.health || {dates: []};
+  p.meta = p.meta || {};
+  p.meta.thresholds = p.meta.thresholds || {};
   const h = p.health, th = p.meta.thresholds;
   chart('btChartHealth', {
     grid: { left: 52, right: 46, top: 32, bottom: 30 },

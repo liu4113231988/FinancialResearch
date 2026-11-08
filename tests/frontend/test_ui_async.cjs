@@ -128,6 +128,26 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   assert.match(html, /id="btnWatch"/);
   assert.match(html, /id="watchSel"/);
   assert.match(html, /id="btnExport"/);
+  // 119：缺字段结果先规范化；渲染失败必须隐藏结果区，不留混合页。
+  const normCtx = {};
+  vm.createContext(normCtx);
+  vm.runInContext(source.slice(source.indexOf('function normalizeResult('),
+                               source.indexOf('function clearResultCharts(')), normCtx);
+  // vm 是独立 realm，其数组原型与主 realm 不同，deepEqual 的期望值也要在同一 realm 生成
+  const empty = vm.runInContext('[]', normCtx);
+  const normalized = normCtx.normalizeResult({name: 'X', code: '110022'});
+  assert.deepEqual(normalized.rank, empty);
+  assert.deepEqual(normalized.meta.models, empty);
+  assert.deepEqual(normalized.nav.dates, empty);
+  assert.deepEqual(normalized.nav.nav, empty);
+  assert.deepEqual(normalized.correlation.top, empty);
+  assert.deepEqual(normalized.correlation.layers, empty);
+  assert.deepEqual(normalized.correlation.matrix.values, empty);
+  assert.deepEqual(normCtx.normalizeResult(null).correlation.drift, empty);
+  assert.match(source, /function clearResultCharts\(\)/);
+  assert.match(source, /本次结果结构不完整，已隐藏不完整的页面/);
+  assert.match(source, /回测结果不完整，已隐藏不完整的页面/);
+  assert.match(source, /本次结果没有可用的模型排名数据/);
   // 120：错误码提示必须给出可操作的下一步，而不是一律显示后端 message。
   const errCtx = {};
   vm.createContext(errCtx);
