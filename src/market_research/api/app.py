@@ -116,7 +116,7 @@ def create_app():
     LOG.info('访问控制：%s', mode_description())
     origins=[v.strip() for v in os.environ.get('FIL_CORS_ORIGINS','').split(',') if v.strip()]
     if origins:
-        app.add_middleware(CORSMiddleware,allow_origins=origins,allow_methods=['GET','POST'],allow_headers=['Content-Type'])
+        app.add_middleware(CORSMiddleware,allow_origins=origins,allow_methods=['GET','POST'],allow_headers=['Content-Type','Authorization','X-API-Key'])
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request:Request,error:RequestValidationError):

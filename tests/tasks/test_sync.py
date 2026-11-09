@@ -107,6 +107,37 @@ class SyncTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "降级"):
                 sync.fetch({"kind":"fund", "code":"110022", "basis":"total"}, sync.HISTORY_START, "2026-10-30")
 
+    def test_manual_refresh_overlays_canonical_without_truncating_history(self):
+        name = sync.history_name({"asset_key": "stock:sh600519:"})
+        storage.write(name, self.frame, {
+            "through": "2026-10-30", "info": {"data_end": "2026-10-30"}})
+        incoming = self.frame.iloc[1:] * .9
+        incoming.loc[pd.Timestamp("2026-10-31")] = [13.0]
+        self.assertTrue(sync.overlay_refresh(
+            "stock", "sh600519", "", incoming, "2026-10-31"))
+        actual = sync.cached("stock", "sh600519", "",
+                             "2026-10-01", "2026-10-31")
+        self.assertEqual(actual.close.tolist(), [10.0, 11.0 * .9,
+                                                12.0 * .9, 13.0])
+        meta = storage.metadata(name)
+        self.assertEqual(meta["through"], "2026-10-31")
+        self.assertEqual(meta["info"]["data_end"], "2026-10-31")
+
+    def test_adjusted_partial_refresh_cannot_mix_adjustment_bases(self):
+        name = sync.history_name({"asset_key": "stock:sh600519:qfq"})
+        storage.write(name, self.frame, {"through": "2026-10-30"})
+        with self.assertRaisesRegex(ValueError, "拒绝拼接部分历史"):
+            sync.overlay_refresh("stock", "sh600519", "qfq",
+                                 self.frame.iloc[1:] * .9, "2026-10-30")
+        pd.testing.assert_frame_equal(storage.read(name), self.frame,
+                                      check_freq=False)
+
+    def test_manual_refresh_does_not_create_partial_canonical(self):
+        self.assertFalse(sync.overlay_refresh(
+            "stock", "sh600519", "qfq", self.frame, "2026-10-30"))
+        name = sync.history_name({"asset_key": "stock:sh600519:qfq"})
+        self.assertIsNone(storage.read(name))
+
     def test_manual_retry_is_durable_without_erasing_success(self):
         key = sync.register("stock", "600519", "qfq")
         with patch.object(sync, "fetch", return_value=self.frame):

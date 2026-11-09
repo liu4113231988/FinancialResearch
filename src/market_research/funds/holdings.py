@@ -164,12 +164,17 @@ def load_industry_map(refresh: bool = False,
             return cached
 
     frames = []
+    succeeded = []
     failed = []
     if to_fetch:
         t0 = time.time()
         for code in to_fetch:
             try:
-                frames.append(_fetch_industry_constituents(code, inds[code]))
+                frame = _fetch_industry_constituents(code, inds[code])
+                if frame.empty:
+                    raise ValueError("行业成分股为空")
+                frames.append(frame)
+                succeeded.append(inds[code])
             except Exception as e:                            # noqa: BLE001
                 failed.append(code)
                 LOG.warning("行业 %s %s 成分股获取失败：%s",
@@ -178,9 +183,10 @@ def load_industry_map(refresh: bool = False,
         if verbose:
             print(f"[holdings] 行业映射补取 {len(to_fetch)} 个行业"
                   f"（{time.time() - t0:.1f}s）")
-    # 新抓取在前：同名股票以最新一次抓取的行业为准（keep=first）
-    if cached is not None and not refresh:
-        frames.append(cached.rename("industry").to_frame().reset_index()
+    # 成功行业用新成分整体替换，失败行业保留旧值；强刷失败不能清空旧缓存。
+    if cached is not None:
+        kept = cached[~cached.isin(succeeded)]
+        frames.append(kept.rename("industry").to_frame().reset_index()
                       .rename(columns={cached.index.name or "index": "code"}))
     merged = (pd.concat(frames, ignore_index=True)
               if frames else pd.DataFrame(columns=["code", "industry"]))

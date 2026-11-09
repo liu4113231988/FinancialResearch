@@ -215,9 +215,69 @@ def fetch(asset, start, end):
     return load_bars(kind, code, start, end, basis, refresh=True, _fetch_only=True)
 
 
-def synchronize(asset, current):
+def _refresh_window_caches(asset, frame):
+    """用 canonical 正史刷新既有窗口，不扩大任何同步资产池。"""
     import market_research.data.marketdata as D
-    end = current.date().isoformat()
+    for target, saved, columns in datasets():
+        if asset["kind"] == "fund" and target.startswith("fund_nav_") and saved.get("code") == asset["code"] and saved.get("basis", "cum") == asset["basis"]:
+            sliced = frame.loc[saved.get("start"):].copy()
+            sliced.columns = columns
+        elif target.startswith("market_v1_") and saved.get("kind") == asset["kind"] and saved.get("code") == asset["code"] and saved.get("adjust", "") == asset["basis"]:
+            sliced = frame.loc[saved.get("start"):saved.get("end")]
+        elif asset["kind"] == "index" and target.startswith("index_universe_") and asset["code"] in columns:
+            sliced = storage.read(target)
+            values = frame.close.loc[saved.get("start"):saved.get("end")]
+            sliced = sliced.reindex(sliced.index.union(values.index))
+            sliced[asset["code"]] = values.reindex(sliced.index)
+        else:
+            continue
+        if len(sliced):
+            storage.write(target, sliced, D._with_info({k:v for k,v in saved.items() if k != "info"}, sliced))
+
+
+def has_history(kind, code, basis):
+    """是否已有 canonical 正史；损坏元信息按未就绪处理。"""
+    name = history_name({"asset_key": f"{kind}:{code}:{basis}"})
+    try:
+        return bool(storage.metadata(name))
+    except Exception:
+        return False
+
+
+def overlay_refresh(kind, code, basis, incoming, end=None):
+    """把不复权资产的手动刷新窗口合并进已有 canonical。
+
+    没有 canonical 时不创建部分历史；此时普通读取会自然命中刚刷新的窗口缓存。
+    基金与复权行情可能重订整个历史，只允许完整覆盖，不能拼接不同基准。
+    """
+    asset = {"asset_key": f"{kind}:{code}:{basis}", "kind": kind,
+             "code": code, "basis": basis}
+    name = history_name(asset)
+    old = storage.read(name)
+    if old is None or old.empty:
+        return False
+    if incoming is None or incoming.empty:
+        raise ValueError("数据源返回空历史，保留旧数据")
+    incoming = incoming.loc[:end].sort_index()
+    if incoming.empty or not np.isfinite(incoming.to_numpy(dtype=float)[~pd.isna(incoming.to_numpy(dtype=float))]).all():
+        raise ValueError("历史数据包含非法数值")
+    if (kind == "fund" or basis) and (
+            incoming.index[0] > old.index[0] or len(old.index.difference(incoming.index))):
+        raise ValueError("基金或复权行情必须完整刷新，拒绝拼接部分历史")
+    frame = pd.concat([old.loc[~old.index.isin(incoming.index)], incoming]).sort_index()
+    previous = storage.metadata(name) or {}
+    through = max(str(previous.get("through", "")), str(end or now().date().isoformat()))
+    info = {**(previous.get("info") or {}), **incoming.attrs,
+            "fetched_at": now().isoformat(),
+            "data_end": frame.index[-1].date().isoformat()}
+    storage.write(name, frame, {"kind": kind, "code": code, "basis": basis,
+                                "through": through, "info": info})
+    _refresh_window_caches(asset, frame)
+    return True
+
+
+def synchronize(asset, current, end=None):
+    end = end or current.date().isoformat()
     name = history_name(asset)
     old = storage.read(name)
     # Full adjusted history is intentional: distributions and provider corrections
@@ -250,23 +310,7 @@ def synchronize(asset, current):
     meta = {"kind": asset["kind"], "code": asset["code"], "basis": asset["basis"], "through": end,
             "info": {**incoming.attrs, "fetched_at": current.isoformat(), "data_end": frame.index[-1].date().isoformat()}}
     storage.write(name, frame, meta)
-    # Refresh old window caches too, including fund candidate pools. Only existing
-    # columns are updated, so this never expands the synchronization universe.
-    for target, saved, columns in datasets():
-        if asset["kind"] == "fund" and target.startswith("fund_nav_") and saved.get("code") == asset["code"] and saved.get("basis", "cum") == asset["basis"]:
-            sliced = frame.loc[saved.get("start"):].copy()
-            sliced.columns = columns
-        elif target.startswith("market_v1_") and saved.get("kind") == asset["kind"] and saved.get("code") == asset["code"] and saved.get("adjust", "") == asset["basis"]:
-            sliced = frame.loc[saved.get("start"):saved.get("end")]
-        elif asset["kind"] == "index" and target.startswith("index_universe_") and asset["code"] in columns:
-            sliced = storage.read(target)
-            values = frame.close.loc[saved.get("start"):saved.get("end")]
-            sliced = sliced.reindex(sliced.index.union(values.index))
-            sliced[asset["code"]] = values.reindex(sliced.index)
-        else:
-            continue
-        if len(sliced):
-            storage.write(target, sliced, D._with_info({k:v for k,v in saved.items() if k != "info"}, sliced))
+    _refresh_window_caches(asset, frame)
     return "full" if full else "incremental", len(frame)
 
 
@@ -299,13 +343,7 @@ def leader():
 
 
 def _accumulate_valuation(current) -> None:
-    """每日累积 csindex 估值/股息面板（上海时间，每天一次）。
-
-    ★ "只取 stock_zh_index_value_csindex" 口径下，官方文件只保留最近约
-      一个月的日频数据 —— 历史长度只能靠每天把最近一段合并进本地缓存来
-      积累（见 data/panels.py:_accumulate_panel）。断跑超过一个月，缺失
-      时段无法回补（留痕在面板的日期空洞里，分位窗口按可用样本计算）。
-    """
+    """每日累积估值/股息；只有本次真实抓取成功才记录 last_success。"""
     import market_research.data.marketdata as D
     state_fp = C.DATA_DIR / "valuation_sync.json"
     today = current.date().isoformat()
@@ -316,16 +354,41 @@ def _accumulate_valuation(current) -> None:
     if state.get("last_success") == today:
         return
     try:
-        D.load_pe_panel(verbose=False)
-        D.load_dividend_panel(verbose=False)
-    except Exception:
-        LOG.exception("估值/股息面板累积失败（明天重试）")
+        elapsed = (current - datetime.fromisoformat(
+            str(state.get("last_attempt")))).total_seconds()
+        if 0 <= elapsed < 1800:
+            return
+    except (TypeError, ValueError):
+        pass
+
+    def write_state():
+        try:
+            state_fp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            LOG.warning("估值面板累积状态写入失败（不影响数据）", exc_info=True)
+
+    state["last_attempt"] = current.isoformat()
+    try:
+        pe = D.load_pe_panel(verbose=False)
+        dividend = D.load_dividend_panel(verbose=False)
+    except Exception as exc:
+        state["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        LOG.exception("估值/股息面板累积失败，30 分钟后可重试")
+        write_state()
+        return
+    failures = []
+    for name, frame in (("估值", pe), ("股息", dividend)):
+        status = (getattr(frame, "attrs", {}) or {}).get("sync_status") or {}
+        if not status.get("fresh_success"):
+            failures.append(f"{name}: {status.get('error') or '本次未取得新数据'}")
+    if failures:
+        state["error"] = "；".join(failures)
+        LOG.warning("估值/股息面板未获得新数据：%s", state["error"])
+        write_state()
         return
     state["last_success"] = today
-    try:
-        state_fp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-    except OSError:
-        LOG.warning("估值面板累积状态写入失败（不影响数据）", exc_info=True)
+    state["error"] = None
+    write_state()
 
 
 def tick(current=None):

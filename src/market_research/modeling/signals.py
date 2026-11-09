@@ -622,11 +622,13 @@ def build_decision(health: pd.DataFrame, cfg: Optional[dict] = None
     run_bad = run_good = 0
     for i, (dt, v) in enumerate(h.items()):
         if pd.isna(v):
+            # NaN 日暂停计数，按“连续有效观察日”确认；不额外改变持仓状态。
             state[i] = cur
             continue
-        run_bad = run_bad + 1 if v <= exit_s else 0
-        run_good = run_good + 1 if v >= enter_s else 0
         ok_rel = pd.notna(rel.iloc[i]) and float(rel.iloc[i]) >= 0.5
+        # 卖出确认只能累计可信观察；不可信低分日中断，而不是留到恢复日触发。
+        run_bad = run_bad + 1 if v <= exit_s and ok_rel else 0
+        run_good = run_good + 1 if v >= enter_s else 0
         if cur == 1 and run_bad >= confirm and ok_rel:
             cur = 0
             trades.append({"date": dt, "action": "卖出",

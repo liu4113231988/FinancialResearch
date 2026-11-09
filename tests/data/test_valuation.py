@@ -107,6 +107,25 @@ class AccumulationTests(unittest.TestCase):
         self.assertAlmostEqual(float(df["沪深300"].loc[idx_old[0]]),
                                float(cached["沪深300"].iloc[0]))
 
+    def test_partial_symbol_response_is_not_whole_panel_success(self):
+        from market_research.data import panels
+        idx = pd.bdate_range("2025-01-01", periods=3)
+        partial = pd.DataFrame({"沪深300": [1.0, 2.0, 3.0]}, index=idx)
+        out = panels._accumulate_panel(
+            "pe_panel", lambda s, verbose=True: partial,
+            ["沪深300", "中证500"], verbose=False)
+        self.assertFalse(out.attrs["sync_status"]["fresh_success"])
+        self.assertIn("中证500", out.attrs["sync_status"]["error"])
+
+        def fill(targets, verbose=True):
+            self.assertEqual(targets, ["中证500"])
+            return pd.DataFrame({"中证500": [4.0, 5.0, 6.0]}, index=idx)
+        recovered = panels._accumulate_panel(
+            "pe_panel", fill, ["沪深300", "中证500"], verbose=False)
+        self.assertTrue(recovered.attrs["sync_status"]["fresh_success"])
+        self.assertEqual(recovered["沪深300"].tolist(), [1.0, 2.0, 3.0])
+        self.assertEqual(recovered["中证500"].tolist(), [4.0, 5.0, 6.0])
+
     def test_fetch_failure_keeps_cached_untouched(self):
         from market_research.data import panels
         idx = pd.bdate_range("2025-01-01", periods=5)
@@ -116,6 +135,8 @@ class AccumulationTests(unittest.TestCase):
             raise RuntimeError("offline")
         df = panels._accumulate_panel("div_panel", boom, ["沪深300"], verbose=False)
         pd.testing.assert_frame_equal(df, cached, check_freq=False)
+        self.assertFalse(df.attrs["sync_status"]["fresh_success"])
+        self.assertTrue(df.attrs["sync_status"]["fallback_used"])
         # 失败不回写：storage 里的缓存保持原样
         pd.testing.assert_frame_equal(storage.read("div_panel"), cached,
                                       check_freq=False)
@@ -133,6 +154,8 @@ class AccumulationTests(unittest.TestCase):
                    return_value=pd.DataFrame()):
             pct = panels.load_pe_panel(verbose=False)
         self.assertIn("沪深300", pct.columns)
+        self.assertFalse(pct.attrs["sync_status"]["fresh_success"])
+        self.assertTrue(pct.attrs["sync_status"]["fallback_used"])
         vals = pct["沪深300"].dropna()
         self.assertGreater(len(vals), 0)
         self.assertTrue(((vals >= 0) & (vals <= 1)).all())
@@ -153,23 +176,66 @@ class AccumulationTests(unittest.TestCase):
 
 
 class ValuationSyncDailyTest(unittest.TestCase):
-    def test_accumulate_valuation_runs_once_per_day(self):
-        tmp = TemporaryDirectory(dir=C.ROOT / "output")
-        p = patch.object(C, "DATA_DIR", Path(tmp.name))
-        p.start()
-        self.addCleanup(p.stop)
-        self.addCleanup(tmp.cleanup)
+    def setUp(self):
+        self.tmp = TemporaryDirectory(dir=C.ROOT / "output")
+        self.config = patch.object(C, "DATA_DIR", Path(self.tmp.name))
+        self.config.start()
+        self.addCleanup(self.config.stop)
+        self.addCleanup(self.tmp.cleanup)
         from market_research.tasks import sync
+        self.sync = sync
+        self.day = datetime(2026, 11, 1, 18, 40, tzinfo=sync.SHANGHAI)
+
+    @staticmethod
+    def _panel(success=True, error=None):
+        frame = pd.DataFrame({"沪深300": [1.0]}) if success else pd.DataFrame()
+        frame.attrs["sync_status"] = {"fresh_success": success,
+                                      "fallback_used": False, "error": error}
+        return frame
+
+    def _state(self):
+        import json
+        return json.loads((C.DATA_DIR / "valuation_sync.json").read_text(
+            encoding="utf-8"))
+
+    def test_accumulate_valuation_runs_once_per_day(self):
         import market_research.data.marketdata as D
-        calls = []
-        with patch.object(D, "load_pe_panel",
-                          side_effect=lambda verbose=False: calls.append("pe")), \
+        with patch.object(D, "load_pe_panel", return_value=self._panel()) as pe, \
+             patch.object(D, "load_dividend_panel", return_value=self._panel()) as div:
+            self.sync._accumulate_valuation(self.day)
+            self.sync._accumulate_valuation(self.day)
+        self.assertEqual(pe.call_count, 1)
+        self.assertEqual(div.call_count, 1)
+        self.assertEqual(self._state()["last_success"], "2026-11-01")
+        self.assertIsNone(self._state()["error"])
+
+    def test_empty_panels_do_not_mark_success_and_retry_with_backoff(self):
+        import market_research.data.marketdata as D
+        empty = self._panel(False, "数据源返回空数据")
+        with patch.object(D, "load_pe_panel", return_value=empty) as pe, \
+             patch.object(D, "load_dividend_panel", return_value=empty) as div:
+            self.sync._accumulate_valuation(self.day)
+            self.sync._accumulate_valuation(self.day + self.sync.timedelta(minutes=10))
+            self.assertEqual(pe.call_count, 1)
+            self.assertEqual(div.call_count, 1)
+            self.sync._accumulate_valuation(self.day + self.sync.timedelta(minutes=31))
+            self.assertEqual(pe.call_count, 2)
+        state = self._state()
+        self.assertNotIn("last_success", state)
+        self.assertIn("数据源返回空数据", state["error"])
+        from market_research.api.routes.meta import _sync_check
+        self.assertFalse(_sync_check()["ok"])
+
+    def test_partial_failure_does_not_mark_whole_sync_successful(self):
+        import market_research.data.marketdata as D
+        with patch.object(D, "load_pe_panel", return_value=self._panel()), \
              patch.object(D, "load_dividend_panel",
-                          side_effect=lambda verbose=False: calls.append("div")):
-            day = datetime(2026, 11, 1, 18, 40, tzinfo=sync.SHANGHAI)
-            sync._accumulate_valuation(day)
-            sync._accumulate_valuation(day)
-        self.assertEqual(calls, ["pe", "div"])     # 同一天只累积一次
+                          return_value=self._panel(False, "股息源超时")):
+            self.sync._accumulate_valuation(self.day)
+        state = self._state()
+        self.assertNotIn("last_success", state)
+        self.assertIn("股息", state["error"])
+        self.assertIn("股息源超时", state["error"])
 
 
 if __name__ == "__main__":

@@ -178,6 +178,50 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   assert.match(market, /clearTimeout\(rzT\)/);
   assert.match(market, /el\('marketEnd'\)\.max = today/);
   assert.match(html, /id="btnRetryCatalog"/);
+  // G-08：持仓拟合与分析/回测共用互斥状态，活动任务期间不得递增代次或发请求。
+  assert.match(source, /'btRun', 'holdRun'/);
+  assert.match(source, /if \(token === fundGeneration\) \{\s*activeJob = null;\s*setFundBusy\(false\)/);
+  const holdCalls = [], holdAlerts = [];
+  const holdContext = {
+    S: {result: {code: '110022'}}, activeJob: 'analysis-job', fundGeneration: 0,
+    $: () => ({disabled: false}),
+    api: (...args) => {holdCalls.push(args); return Promise.resolve({});},
+    showAlert: message => holdAlerts.push(message),
+  };
+  vm.createContext(holdContext);
+  vm.runInContext(source.slice(source.indexOf('async function runHoldings('),
+                               source.indexOf('async function pollHoldings(')), holdContext);
+  await holdContext.runHoldings();
+  assert.equal(holdCalls.length, 0);
+  assert.equal(holdContext.fundGeneration, 0);
+  assert.match(holdAlerts[0], /已有基金任务/);
+  // 旧回测 A 晚于新任务 B 返回时，A 的 finally 不得清掉 B 的 activeJob。
+  let releaseOldPoll;
+  const raceNodes = new Map();
+  const raceContext = {
+    S: {result: {code: '110022', meta: {params: {}}, nav: {stats: {}, dates: []}}},
+    fundGeneration: 0, correlationGeneration: 0, activeJob: null,
+    $: id => {
+      if (!raceNodes.has(id)) raceNodes.set(id,
+        id === 'backtestSection' ? {querySelectorAll: () => []} : {});
+      return raceNodes.get(id);
+    },
+    api: async () => ({job_id: 'old-job'}),
+    pollBacktest: () => new Promise(resolve => {releaseOldPoll = resolve;}),
+    setFundBusy() {}, setProgress() {},
+    showAlert(message) {if (message) throw new Error(message);},
+  };
+  vm.createContext(raceContext);
+  vm.runInContext(source.slice(source.indexOf('async function runBacktest('),
+                               source.indexOf('async function pollBacktest(')), raceContext);
+  const oldRun = raceContext.runBacktest();
+  await new Promise(setImmediate);
+  assert.equal(typeof releaseOldPoll, 'function');
+  assert.equal(raceContext.activeJob, 'old-job');
+  raceContext.fundGeneration++;
+  raceContext.activeJob = 'new-job';
+  releaseOldPoll(); await oldRun;
+  assert.equal(raceContext.activeJob, 'new-job');
   console.log('Cancel button wired, polling capped and backoff applied: OK');
   console.log('Correlation window, response ordering, replaced fund and stale polling: OK');
   console.log('Backtest stale error and late result fencing: OK');

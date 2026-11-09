@@ -61,6 +61,32 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cli.legacy_main('unknown.py',[])
 
+    def test_analysis_and_backtest_end_dates_stay_independent(self):
+        from market_research.cli import analyze
+        from market_research.funds import pipeline
+        import market_research.config as C
+        argv = ['110022', '--window-start', '2020-01-01',
+                '--window-end', '2024-12-31', '--end', '2023-12-31']
+        with patch.object(C, 'START_DATE', C.START_DATE), \
+             patch.object(C, 'END_DATE', C.END_DATE), \
+             patch.object(C, 'DEFAULT_WINDOW_YEARS', C.DEFAULT_WINDOW_YEARS), \
+             patch.object(analyze, 'run_fund', side_effect=ValueError('stop')) as run, \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            analyze.main(argv)
+        self.assertEqual(run.call_args.kwargs['window_end'], '2024-12-31')
+        self.assertEqual(run.call_args.kwargs['end_date'], '2023-12-31')
+
+        with patch.object(pipeline.D, 'load_panel',
+                          side_effect=RuntimeError('stop')) as load:
+            with self.assertRaisesRegex(RuntimeError, 'stop'):
+                pipeline.run_fund('110022', verbose=False,
+                                  end_date='2023-12-31',
+                                  window_start='2020-01-01',
+                                  window_end='2024-12-31')
+        self.assertEqual(load.call_args.kwargs['start'], '2020-01-01')
+        self.assertEqual(load.call_args.kwargs['end'], '2024-12-31')
+
     def test_every_command_accepts_explicit_arguments(self):
         for module in COMMANDS.values():
             command=importlib.import_module('market_research.'+module).main

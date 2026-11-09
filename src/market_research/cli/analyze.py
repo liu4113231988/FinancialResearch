@@ -38,7 +38,7 @@ def main(argv=None, *, prog=None):
     args = ap.parse_args(argv)
 
     # 分析窗口：就地覆盖 C.START_DATE / C.END_DATE，下游全部跟随
-    win_start, _ = apply_window(args)
+    win_start, win_end = apply_window(args)
 
     codes = args.codes or list(C.DEMO_FUNDS.keys())
     t0 = time.time()
@@ -49,7 +49,7 @@ def main(argv=None, *, prog=None):
             res = run_fund(code, C.DEMO_FUNDS.get(code, code),
                            refresh=args.refresh, verbose=True,
                            start_date=args.start, end_date=args.end,
-                           window_start=win_start)
+                           window_start=win_start, window_end=win_end)
             outdir = save_result(res)
             results.append(res)
             m = res["backtest"]["metrics"]

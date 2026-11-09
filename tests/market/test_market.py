@@ -92,6 +92,27 @@ class MarketTests(unittest.TestCase):
             self.assertTrue(str(stale.attrs.get("source_error"))[:1])
             pd.testing.assert_frame_equal(load_bars("stock", "sh600519", "2024-01-01", "2025-01-01"), first, check_freq=False)
 
+    def test_manual_refresh_is_used_by_next_normal_read(self):
+        import akshare as ak
+        from market_research.data import storage
+        from market_research.tasks import sync
+        original = bars(30)
+        end = original.index[-1].strftime("%Y-%m-%d")
+        with tempfile.TemporaryDirectory(dir=C.ROOT / "output") as directory, \
+             patch.object(C, "DATA_DIR", Path(directory)):
+            name = sync.history_name({"asset_key": "stock:sh600519:qfq"})
+            storage.write(name, original, {"through": end,
+                                           "info": {"data_end": end}})
+            revised = original * 2
+            with patch.object(ak, "stock_zh_a_hist",
+                              return_value=revised.reset_index()) as fetch:
+                refreshed = load_bars("stock", "sh600519", "2024-01-01",
+                                      end, refresh=True)
+                again = load_bars("stock", "sh600519", "2024-01-01", end)
+            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(refreshed.close.iloc[0], revised.close.iloc[0])
+            self.assertEqual(again.close.iloc[0], revised.close.iloc[0])
+
     def test_stock_fallback_preserves_normalized_volume(self):
         import akshare as ak
         with tempfile.TemporaryDirectory(dir=C.ROOT / "output") as directory, patch.object(C, "DATA_DIR", Path(directory)):

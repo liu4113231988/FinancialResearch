@@ -182,6 +182,26 @@ class NavBasisPolicyTests(unittest.TestCase):
         second = self._load("reject", total=self._series(999.0))
         pd.testing.assert_series_equal(first, second, check_freq=False)
 
+    def test_manual_refresh_is_used_by_next_normal_read(self):
+        from datetime import datetime
+        from market_research.tasks import sync
+        end = self.idx[-1].strftime("%Y-%m-%d")
+        name = sync.history_name({"asset_key": "fund:110022:total"})
+        old = self._series(100.0).to_frame()
+        storage.write(name, old, {"through": end, "info": {"data_end": end}})
+        fresh = self._series(200.0)
+        clock = datetime(2024, 1, 5, 18, 40, tzinfo=sync.SHANGHAI)
+        with patch.object(sync, "now", return_value=clock), \
+             patch("market_research.tasks.sync.register"), \
+             patch("market_research.data.marketdata.fetch_fund_total_return",
+                   return_value=fresh) as fetch:
+            refreshed = panels.load_fund_nav_cached(
+                "110022", "2024-01-01", refresh=True)
+            again = panels.load_fund_nav_cached("110022", "2024-01-01")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(refreshed.iloc[0], 200.0)
+        self.assertEqual(again.iloc[0], 200.0)
+
     def test_load_panel_exposes_degraded_basis_and_warning(self):
         nav = self._series(90.0)
         nav.attrs.update(nav_basis=panels.NAV_BASIS_CUM, nav_degraded=True,

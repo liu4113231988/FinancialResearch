@@ -570,6 +570,35 @@ class IndustryMapCacheTest(unittest.TestCase):
             H.load_industry_map(verbose=False)
             fetch.assert_not_called()
 
+    def test_refresh_preserves_failed_industries_and_replaces_successful_ones(self):
+        import akshare as ak
+        cached = pd.Series({"600519": "食品饮料", "000001": "农林牧渔"},
+                           name="industry")
+        cached.index.name = "code"
+        cached.to_frame().to_csv(
+            C.DATA_DIR / f"industry_map_v{H.HOLDINGS_CACHE_VERSION}.csv")
+        with patch.object(ak, "index_component_sw",
+                          side_effect=RuntimeError("offline")), patch("time.sleep"):
+            with self.assertLogs(H.LOG, level="WARNING"):
+                failed = H.load_industry_map(refresh=True, verbose=False)
+        self.assertEqual(failed.to_dict(), cached.to_dict())
+
+        def partial(symbol):
+            if symbol == "801010":
+                return pd.DataFrame({"证券代码": ["000333"]})
+            raise RuntimeError("offline")
+        with patch.object(ak, "index_component_sw", side_effect=partial), patch("time.sleep"):
+            with self.assertLogs(H.LOG, level="WARNING"):
+                merged = H.load_industry_map(refresh=True, verbose=False)
+        self.assertNotIn("000001", merged.index)       # 成功行业整体替换旧成分
+        self.assertEqual(merged["000333"], "农林牧渔")
+        self.assertEqual(merged["600519"], "食品饮料")  # 失败行业完整保留
+        persisted = pd.read_csv(
+            C.DATA_DIR / f"industry_map_v{H.HOLDINGS_CACHE_VERSION}.csv",
+            index_col=0, dtype=str).iloc[:, 0]
+        self.assertEqual(persisted.to_dict(), merged.to_dict())
+        self.assertEqual(self._meta()["missing_industries"], ["801120"])
+
     def test_failed_rebuild_is_throttled(self):
         import akshare as ak
         with patch.object(ak, "index_component_sw",

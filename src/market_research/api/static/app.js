@@ -905,7 +905,7 @@ let activeJob = null;          // 当前正在轮询的任务，供"取消"按�
 // 轮询上限写在各自函数内部（前端回归用 vm 单函数求值，不共享模块常量）：
 // 前 200 次快查，之后退避到 2s，总量约 35 分钟。
 function setFundBusy(busy) {
-  for (const id of ['runBtn', 'fundApply', 'btnRefresh', 'btnReLearn', 'btnApplyParams', 'btRun']) $(id).disabled = busy;
+  for (const id of ['runBtn', 'fundApply', 'btnRefresh', 'btnReLearn', 'btnApplyParams', 'btRun', 'holdRun']) $(id).disabled = busy;
   $('runBtn').setAttribute('aria-busy', String(busy));
   const cancel = $('btnCancelJob');
   if (cancel) cancel.hidden = !busy;
@@ -1006,8 +1006,10 @@ async function run(code, opts = {}) {
     showAlert('分析失败：' + e.message);
     $('progressWrap').hidden = true;
   } finally {
-    activeJob = null;
-    if (token === fundGeneration) setFundBusy(false);
+    if (token === fundGeneration) {
+      activeJob = null;
+      setFundBusy(false);
+    }
   }
 }
 
@@ -2197,8 +2199,10 @@ async function runBacktest() {
     $('progressWrap').hidden = true;
     showAlert('回测失败：' + e.message);
   } finally {
-    activeJob = null;
-    if (token === fundGeneration) setFundBusy(false);
+    if (token === fundGeneration) {
+      activeJob = null;
+      setFundBusy(false);
+    }
   }
 }
 
@@ -2240,6 +2244,7 @@ async function pollBacktest(jid, token = fundGeneration) {
 
 async function runHoldings() {
   if (!S.result) { showAlert('请先分析一只基金'); return; }
+  if (activeJob || $('holdRun').disabled) { showAlert('已有基金任务正在运行，请完成或取消后再试'); return; }
   const token = ++fundGeneration;
   correlationGeneration++;
   setFundBusy(true);
@@ -2260,8 +2265,10 @@ async function runHoldings() {
     $('progressWrap').hidden = true;
     showAlert('持仓拟合失败：' + e.message);
   } finally {
-    activeJob = null;
-    if (token === fundGeneration) setFundBusy(false);
+    if (token === fundGeneration) {
+      activeJob = null;
+      setFundBusy(false);
+    }
   }
 }
 

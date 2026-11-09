@@ -62,7 +62,17 @@
 
 ## 全局功能审查（2026-11-08）
 
-范围：按当前工作区源码复核基金分析/调参/回测、股票与指数分析、持仓拟合、预测记录与结算、行情缓存与每日同步、API/持久任务及前端任务状态。以下 8 项均有明确代码证据；P1 影响核心计算或结算，P2 影响特定入口、数据状态或口径，P3 为交互竞争与一致性。已有数据缺口和历史开放项不重复列入。
+范围：按当前工作区源码复核基金分析/调参/回测、股票与指数分析、持仓拟合、预测记录与结算、行情缓存与每日同步、API/持久任务及前端任务状态。以下为 2026-11-08 的原始审查证据；P1 影响核心计算或结算，P2 影响特定入口、数据状态或口径，P3 为交互竞争与一致性。已有数据缺口和历史开放项不重复列入。
+
+**2026-11-09 处理结果：8 项全部关闭。** G-01 由用户先行修复；本轮按当前源码复核并完成其余 7 项，另处理二次审查发现的复权部分历史拼接、估值面板部分标的成功、旧分析/回测任务误清新状态三个边界：
+
+- **G-02**：不复权行情用窗口叠加已有 canonical；基金及复权行情改为完整历史同步，禁止混用复权基准；失败返回带 `stale/source_error` 的旧数据。回归见 `tests/tasks/test_sync.py`、`tests/market/test_market.py`、`tests/data/test_panels.py`。
+- **G-03**：累积面板新增 `sync_status`，区分新抓取、缓存降级、空表和单面板部分标的成功；仅全部新抓取成功才写 `last_success`，失败记录 `last_attempt/error` 并 30 分钟退避；`/api/ready` 不再误报。回归见 `tests/data/test_valuation.py`。
+- **G-04**：卖出确认只累计可信观察，不可信日中断，NaN 日暂停；新增恢复可信、NaN 穿插回归，见 `tests/modeling/test_signals_valuation.py`。
+- **G-05**：行业强刷按成功行业整体替换、失败行业保留旧映射，空响应不落盘覆盖；新增全失败及部分失败回归，见 `tests/funds/test_payloads.py`。
+- **G-06**：`run_fund()` 新增独立 `window_end`，CLI 分别传递分析/回测截止日并修正 docstring；新增 loader 与 CLI 参数回归，见 `tests/architecture/test_cli.py`。
+- **G-07**：CORS 白名单允许 `Authorization`、`X-API-Key`；新增两种认证预检、正式请求及非白名单来源回归，见 `tests/api/test_access_control.py`。
+- **G-08**：`holdRun` 纳入 busy，持仓入口增加活动任务/提交中保护；分析、回测与持仓均按代次清理 `activeJob`；新增旧任务晚返回的真实竞态回归，见 `tests/frontend/test_ui_async.cjs`。
 
 ### P1（优先修复）
 
@@ -72,7 +82,7 @@
   - 已复现：直接读取一条基金记录得到 `TypeError: load_fund_nav_cached() got an unexpected keyword argument 'end'`。
   - 已修复：移除该调用的 `end`，取回序列后按判定日截断；回归 `tests/predictions/test_ledger.py:test_fund_settlement_runs_through_real_loader`（走真实 loader，断言基金记录实际判对且不使用未来净值），`total` 口径的冻结 basis 仍由 `test_fund_settlement_uses_recorded_nav_basis` 覆盖。
 
-- [ ] **G-04：不可信拟合日仍累计卖出确认天数，恢复可信的第一天可能立即误卖**
+- [x] **G-04：不可信拟合日仍累计卖出确认天数，恢复可信的第一天可能立即误卖**
   - 位置：`src/market_research/modeling/signals.py:615-640`。
   - 触发与影响：`run_bad` 在检查 `fit_reliable` 之前递增；不可信日只阻止当天交易，不清零或暂停计数。默认 `health_confirm=10` 时，9 个低健康分且不可信的交易日后再来 1 个低健康分可信日，会立即卖出，实际并非“连续 10 个可信交易日”。
   - 已复现：上述 10 日最小输入在第 10 日生成一笔卖出，决策由 `[1,…,1]` 变为末日 `0`。
@@ -80,29 +90,29 @@
 
 ### P2（特定入口 / 数据状态 / 口径）
 
-- [ ] **G-02：手动刷新不更新 canonical 历史，下一次普通分析会恢复旧行情**
+- [x] **G-02：手动刷新不更新 canonical 历史，下一次普通分析会恢复旧行情**
   - 位置：`src/market_research/market/analysis.py:75-86,122-128`；`src/market_research/data/panels.py:242-274`；`src/market_research/tasks/sync.py:139-186`。
   - 触发与影响：`refresh=True` 跳过 `sync_history_*` 并只重写 `market_v1_*` 或 `fund_nav_*` 窗口缓存；下一次 `refresh=False` 又优先读取 canonical 历史。只要 canonical 的 `through/data_end` 仍通过新鲜度检查，用户刷新看到的新数据就会被旧数据覆盖，股票、指数和基金均受影响。
   - 修复与验收：手动刷新应复用统一同步链路更新 canonical 及元信息，或比较窗口缓存与 canonical 的实际数据版本后选择更新且同口径者。增加“旧 canonical → 手动刷新 → 再次非刷新读取”的股票/指数/基金回归，断言两次都返回新数据且不产生口径混用。
 
-- [ ] **G-03：估值抓取失败或返回空表仍写 `last_success`，同步状态与就绪探针误报正常**
+- [x] **G-03：估值抓取失败或返回空表仍写 `last_success`，同步状态与就绪探针误报正常**
   - 位置：`src/market_research/data/panels.py:72-106`；`src/market_research/tasks/sync.py:301-328`；`src/market_research/api/routes/meta.py:68-89`。
   - 触发与影响：`_accumulate_panel()` 吞掉抓取异常并返回旧缓存或空表；`_accumulate_valuation()` 不检查本次是否成功及数据是否非空，直接写当天 `last_success`。首次无缓存且供应商失败时会形成“从未有数据但同步成功”，当天不再重试，`/api/ready` 也可能据此显示正常。
   - 已复现：两个估值 loader 都返回空表时，隔离状态文件仍写入 `{"last_success": "2026-11-08"}`。
   - 修复与验收：累积函数返回 `fresh_success/fallback_used/error` 等明确状态；仅确认本次抓取成功后更新 `last_success`，降级与失败分别记录 `last_attempt/error`，同日失败允许有限退避重试。补首次失败、已有缓存失败、空表、PE 成功但股息失败及 ready 探针测试。
 
-- [ ] **G-05：行业映射强制刷新失败会用空表或残缺结果覆盖完整旧缓存**
+- [x] **G-05：行业映射强制刷新失败会用空表或残缺结果覆盖完整旧缓存**
   - 位置：`src/market_research/funds/holdings.py:124-202`。
   - 触发与影响：`refresh=True` 重抓全部行业，但旧缓存仅在 `not refresh` 时参与合并；部分或全部请求失败后仍执行 `_atomic_csv_write()`，完整缓存可能变成残缺表或空表，新的冷却元信息还会让后续普通调用暂时直接返回空映射。
   - 已复现：隔离缓存原有 1 条映射，唯一行业强刷失败后返回值和落盘缓存均变为 0 条。
   - 修复与验收：强刷也对失败行业保留旧值，成功部分与旧映射按明确优先级合并；全部失败时不得覆盖旧文件。补全失败、部分失败、全新行业与股票换行业、缓存损坏及冷却期组合测试。
 
-- [ ] **G-06：CLI 的回测 `--end` 覆盖分析 `--window-end`，两个截止日无法独立控制**
+- [x] **G-06：CLI 的回测 `--end` 覆盖分析 `--window-end`，两个截止日无法独立控制**
   - 位置：`src/market_research/cli/analyze.py:31-52`；`src/market_research/validation/window.py:162-186`；`src/market_research/funds/pipeline.py:53-70`。
   - 触发与影响：`apply_window()` 已把 `--window-end` 写入 `C.END_DATE`，但 `run_fund()` 又用回测参数 `end_date=args.end` 调用 `D.load_panel(..., end=end_date)`。同时指定两个日期时，拟合面板被裁到回测截止日，而非分析截止日，研究复现口径错误；函数 docstring 对 `end_date` 的两种描述也相互矛盾。
   - 修复与验收：给 `run_fund()` 增加独立 `window_end` 并显式传递，回测 `end_date` 只传给回测层，对齐 `funds/analysis.py` 已有的双窗口接口。补两个截止日相同/不同、仅传其中一个及非法先后关系的 CLI 测试，并断言 loader 与回测分别收到正确日期。
 
-- [ ] **G-07：跨域令牌认证被 CORS 预检阻断**
+- [x] **G-07：跨域令牌认证被 CORS 预检阻断**
   - 位置：`src/market_research/api/app.py:108-120`。
   - 触发与影响：启用 `FIL_ACCESS_CONTROL=token` 与 `FIL_CORS_ORIGINS` 后，浏览器跨域请求会携带 `Authorization` 或 `X-API-Key`，但 `allow_headers` 只有 `Content-Type`，预检无法通过；同源页面不受影响。
   - 已复现：携带 `Access-Control-Request-Headers: authorization` 的 OPTIONS 请求返回 `400 Disallowed CORS headers`，允许列表不含认证头。
@@ -110,16 +120,16 @@
 
 ### P3（交互竞争）
 
-- [ ] **G-08：持仓拟合按钮未纳入统一 busy/重入保护，可打断当前任务的前端轮询**
+- [x] **G-08：持仓拟合按钮未纳入统一 busy/重入保护，可打断当前任务的前端轮询**
   - 位置：`src/market_research/api/static/app.js:902-912,2241-2272`。
   - 触发与影响：`setFundBusy()` 未禁用 `holdRun`，`runHoldings()` 也不检查 `activeJob`，并会递增 `fundGeneration`。分析或回测运行中点击持仓拟合会提交另一类任务并使原任务代次失效；后台原任务仍运行，页面却停止接收其结果，进度、取消按钮和最终展示可能不一致。
   - 修复与验收：把 `holdRun` 纳入 busy 控件，入口复用统一重入保护，并按任务代次清理 `activeJob`。补“分析/回测/持仓两两互斥”“连续点击”“取消后发新任务”“旧轮询晚返回”的前端行为测试。
 
 ### 本轮验证与未覆盖范围
 
-- 已通过：`.venv/Scripts/python.exe -u -m unittest discover -s tests -p "test_*.py" -t .`（489 项，139.488 秒）；`tests/regression/test_regressions.py`；`tests/regression/test_p0_fixes.py`；`tests/frontend/test_refit.js`、`test_ui_async.cjs`、`test_market_async.cjs`。现有测试全绿不代表上述分支已覆盖。
-- 最小复现已完成：G-01、G-03、G-04、G-05、G-07；其余项由当前调用链和条件分支静态确认。
-- 未执行：真实供应商联网取数、真实浏览器/移动端、多进程与锁竞争压力、Docker/wheel 构建安装及完整数值研究重放。本轮仅审查并更新待办，未修改业务代码。
+- 最终验证（2026-11-09）：`.venv/Scripts/python.exe -u -m unittest discover -s tests -p "test_*.py" -t .`（510 项，149.630 秒，OK）；`tests/regression/test_regressions.py` 与 `tests/regression/test_p0_fixes.py`（全部通过）；`node --check src/market_research/api/static/app.js` 及 3 组前端回归（全部通过）；`git diff --check` 与 IDE lint（无错误）。
+- 回归快照：隔离临时目录覆盖 canonical 历史合并、复权部分历史拒绝、基金/股票刷新后普通读取、估值 `valuation_sync.json` 成功/失败/退避、行业映射全失败与部分失败、CORS 预检状态及前端旧任务晚返回的 `activeJob` 竞态。
+- 未执行：真实供应商联网取数、真实浏览器/移动端、多进程与锁竞争压力、Docker/wheel 构建安装及完整数值研究重放。本轮已修改 9 个业务文件、9 个测试文件及 `TODO.md`，未提交。
 
 ## 本轮代码审查发现（2026-11-01 补记，尚未修复）
 

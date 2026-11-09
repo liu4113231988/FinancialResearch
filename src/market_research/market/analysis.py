@@ -82,6 +82,24 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
             history = sync.cached(kind, code, adjust, start, end)
             if history is not None:
                 return history
+        if refresh and adjust and sync.has_history(kind, code, adjust):
+            # 复权因子可能重订窗口之前的全部价格，必须用完整历史替换 canonical。
+            asset = {"asset_key": f"{kind}:{code}:{adjust}", "kind": kind,
+                     "code": code, "basis": adjust}
+            try:
+                sync.synchronize(asset, sync.now(), end=end)
+            except Exception as exc:
+                history = sync.cached(kind, code, adjust, start, end, fresh=False)
+                if history is None:
+                    raise
+                history.attrs.update(stale=True,
+                    source_error=f"{type(exc).__name__}: {str(exc)[:200]}",
+                    cached_at=history.attrs.get("fetched_at"))
+                return history
+            history = sync.cached(kind, code, adjust, start, end, fresh=False)
+            if history is None:
+                raise RuntimeError("完整行情刷新后未能读取同步历史")
+            return history
     name = f"market_v1_{kind}_{code}_{adjust or 'raw'}_{start}"
     meta = {"v": 1, "kind": kind, "code": code, "start": start, "end": end, "adjust": adjust, "volume_unit": "shares" if kind == "stock" else "source"}
 
@@ -124,6 +142,8 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
         frame.attrs.update(meta.get("info", {}))
         return frame
     frame = D._cached(name, build, meta=meta, refresh=refresh)
+    if refresh and not frame.attrs.get("stale"):
+        sync.overlay_refresh(kind, code, adjust, frame, end)
     frame.attrs.update(D.cache_info(name))
     return frame
 

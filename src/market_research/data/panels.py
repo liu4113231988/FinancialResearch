@@ -79,10 +79,21 @@ def _accumulate_panel(name: str, fetch, syms, verbose: bool = True) -> pd.DataFr
       * 新数据在重叠日期上覆盖旧值（官方会修正当期数值），缺失列沿用旧列；
       * 只有真的合并进新内容才回写 storage（否则空转也会改 stamp）。
     旧乐咕时代的月度历史（若有）与新日频数据同列名合并，一并保留。
+    返回值 attrs["sync_status"] 明确区分新抓取成功与缓存降级。
     """
     cached = storage.read(name)
     if cached is not None and not isinstance(cached.index, pd.DatetimeIndex):
         cached.index = pd.to_datetime(cached.index)
+
+    def fallback(error):
+        out = cached if cached is not None else pd.DataFrame()
+        out.attrs["sync_status"] = {
+            "fresh_success": False,
+            "fallback_used": cached is not None and not cached.empty,
+            "error": str(error),
+        }
+        return out
+
     # 首次抓全量；已有缓存时优先补缺列（首次失败过的标的），否则抓全量以覆盖修订
     targets = ([s for s in syms if cached is None or s not in cached.columns]
                if cached is not None else list(syms)) or list(syms)
@@ -91,9 +102,11 @@ def _accumulate_panel(name: str, fetch, syms, verbose: bool = True) -> pd.DataFr
     except Exception as e:                                    # noqa: BLE001
         if verbose:
             print(f"  [{name}] 抓取失败，沿用本地累积缓存：{type(e).__name__}")
-        return cached if cached is not None else pd.DataFrame()
+        return fallback(f"{type(e).__name__}: {str(e)[:200]}")
     if fresh is None or fresh.empty:
-        return cached if cached is not None else pd.DataFrame()
+        return fallback("数据源返回空数据")
+    missing = [s for s in targets if s not in fresh.columns
+               or not fresh[s].notna().any()]
     if cached is None or cached.empty:
         df = fresh.sort_index()
     else:
@@ -103,6 +116,11 @@ def _accumulate_panel(name: str, fetch, syms, verbose: bool = True) -> pd.DataFr
         print(f"  [{name}] 累积 {df.shape}：{df.index[0].date()} ~ "
               f"{df.index[-1].date()}（本次新增 {len(fresh)} 期）")
     storage.write(name, df, _with_info({}, df))
+    df.attrs["sync_status"] = {
+        "fresh_success": not missing,
+        "fallback_used": bool(missing and cached is not None and not cached.empty),
+        "error": "缺少标的: " + ", ".join(missing) if missing else None,
+    }
     return df
 
 
@@ -124,7 +142,9 @@ def load_pe_panel(verbose: bool = True) -> pd.DataFrame:
     if raw.empty:
         return raw
     # 分位窗口 8 年（约 2000 交易日），min_periods 取 1/3 即约 1 年
-    return raw.apply(lambda c: _percentile(c, 8.0))
+    result = raw.apply(lambda c: _percentile(c, 8.0))
+    result.attrs["sync_status"] = dict(raw.attrs["sync_status"])
+    return result
 
 
 def load_dividend_panel(verbose: bool = True) -> pd.DataFrame:
@@ -246,6 +266,27 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
             result = history.iloc[:, 0].copy()
             result.name = f"fund_{fund_code}"
             return _nav_basis_attrs(result, basis)
+    if refresh and sync.has_history("fund", fund_code, basis):
+        # 分红、拆分与数据修订会影响完整净值历史，不能用部分窗口拼接正史。
+        asset = {"asset_key": f"fund:{fund_code}:{basis}", "kind": "fund",
+                 "code": fund_code, "basis": basis}
+        error = None
+        try:
+            sync.synchronize(asset, sync.now())
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {str(exc)[:200]}"
+        history = sync.cached("fund", fund_code, basis, start, None, fresh=False)
+        if history is None:
+            if error is not None:
+                raise RuntimeError(error)
+            raise RuntimeError("完整净值刷新后未能读取同步历史")
+        result = history.iloc[:, 0].copy()
+        result.name = f"fund_{fund_code}"
+        result = _nav_basis_attrs(result, basis)
+        if error is not None:
+            result.attrs.update(stale=True, source_error=error,
+                                cached_at=history.attrs.get("fetched_at"))
+        return result
     suffix = "" if basis == NAV_BASIS_CUM else f"_{basis}"
     # None → 当前配置的起点（见 load_index_universe 的说明）
     start = start or C.START_DATE
@@ -272,6 +313,8 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
     try:
         df = _cached(cache_name, build, meta=meta, refresh=refresh,
                      allow_fetch=allow_fetch)
+        if refresh and not df.attrs.get("stale"):
+            sync.overlay_refresh("fund", fund_code, basis, df)
     except _DegradedNav as e:
         reason = str(e)
         if C.NAV_DEGRADED_POLICY == "allow_cum":

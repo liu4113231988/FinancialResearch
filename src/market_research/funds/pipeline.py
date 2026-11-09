@@ -53,9 +53,10 @@ def _completeness(res: dict) -> dict:
 def run_fund(code: str, name: str = "", refresh: bool = False,
              verbose: bool = True, start_date: Optional[str] = None,
              end_date: Optional[str] = None,
-             window_start: Optional[str] = None) -> dict:
+             window_start: Optional[str] = None,
+             window_end: Optional[str] = None) -> dict:
     """
-    window_start / end_date 是**分析窗口**（默认近 5 年，见 C.DEFAULT_WINDOW_YEARS）。
+    window_start / window_end 是**分析窗口**（默认近 5 年，见 C.DEFAULT_WINDOW_YEARS）。
     start_date / end_date 是**回测**窗口 —— 两者不同：回测区间之前的数据要留给
     模型做拟合与预热，所以面板不能按 start_date 裁剪。
 
@@ -67,7 +68,8 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
         print(f"\n{'='*78}\n>>> {code} {name}\n{'='*78}")
 
     panel = D.load_panel(code, start=(window_start or C.START_DATE),
-                         end=end_date, refresh=refresh, verbose=False)
+                         end=(window_end if window_end is not None else C.END_DATE),
+                         refresh=refresh, verbose=False)
     nav = panel["__FUND__"]
     quality = dict(getattr(panel, "attrs", {}).get("data_quality") or {})
     # P1-20：净值口径（总回报 / 累计净值降级）必须随结果一起输出

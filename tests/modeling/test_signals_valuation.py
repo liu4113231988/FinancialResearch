@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from market_research.modeling.signals import SignalEngine
+from market_research.modeling.signals import SignalEngine, build_decision
 
 
 def _inputs(n=500, seed=1):
@@ -58,6 +58,30 @@ class ValuationUnavailableTest(unittest.TestCase):
         v = SignalEngine().valuation_channel(weights, pe, syn.index)
         self.assertFalse(v.attrs["valuation"]["available"])
         self.assertFalse(v["val_score"].notna().any())
+
+
+class DecisionReliabilityTest(unittest.TestCase):
+    def test_unreliable_days_do_not_count_toward_exit_confirmation(self):
+        idx = pd.bdate_range("2024-01-01", periods=11)
+        health = pd.DataFrame({
+            "health_score": [-1.0] * len(idx),
+            "fit_reliable": [0.0] * 9 + [1.0, 1.0],
+        }, index=idx)
+        decision, trades = build_decision(health, {
+            "health_exit": -0.5, "health_enter": -0.2, "health_confirm": 2})
+        self.assertEqual([t["date"] for t in trades], [idx[-1]])
+        self.assertEqual(decision.iloc[-2], 1)
+        self.assertEqual(decision.iloc[-1], 0)
+
+    def test_nan_health_pauses_but_does_not_reset_confirmation(self):
+        idx = pd.bdate_range("2024-01-01", periods=4)
+        health = pd.DataFrame({
+            "health_score": [-1.0, -1.0, np.nan, -1.0],
+            "fit_reliable": [1.0] * 4,
+        }, index=idx)
+        _decision, trades = build_decision(health, {
+            "health_exit": -0.5, "health_enter": -0.2, "health_confirm": 2})
+        self.assertEqual([t["date"] for t in trades], [idx[1]])
 
 
 if __name__ == "__main__":
