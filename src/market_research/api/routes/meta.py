@@ -11,6 +11,7 @@ from market_research.api.schemas import HealthResponse, ReadyResponse
 from market_research.api.version import API_VERSION, SERVICE_VERSION
 from market_research.resources import limits_snapshot
 from market_research.security import access_mode, mode_description
+from market_research.settings import Settings
 from market_research.modeling.catalog import MODEL_ORDER, model_catalog
 from market_research.market.analysis import STOCKS, INDICES
 from market_research.tasks.jobs import JOBS
@@ -123,6 +124,26 @@ def ready(response: Response):
 def disclosure_info():
     """P2-36：Web 页与报告共用的数据/免责声明（文案与位置可配置）。"""
     return {"ok": True, **disclosure.payload()}
+
+
+@router.get('/config')
+def config_info():
+    """P2-34：只读、脱敏的运行配置视图；不返回令牌、目录或认证材料。"""
+    settings = Settings.load()
+    return {"ok": True, "environment": C.ENV,
+            "version": SERVICE_VERSION, "api_version": API_VERSION,
+            "access_control": access_mode(),
+            "disclosure_scope": disclosure.scope(),
+            "limits": {"max_jobs": settings.max_jobs,
+                       "queue_limit": settings.queue_limit,
+                       "job_timeout": settings.job_timeout,
+                       "max_attempts": settings.max_attempts,
+                       "job_workers": settings.job_workers,
+                       "job_workers_max": settings.job_workers_max,
+                       "job_memory_mb": settings.job_memory_mb,
+                       "data_stale_days": getattr(C, "DATA_STALE_DAYS", None),
+                       "storage_lock_timeout": getattr(C, "STORAGE_LOCK_TIMEOUT", None)},
+            "auto_services": settings.auto_services}
 
 
 @router.get('/predictions/summary')

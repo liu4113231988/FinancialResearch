@@ -126,6 +126,24 @@ class LedgerRecordTests(unittest.TestCase):
                              {"direction": 0.5, "entry": 0.6, "exit": 0.4})
             self.assertIn("horizon_basis", recorded)
 
+    def test_feature_buckets_are_available_for_summary(self):
+        result = _market_result(signals=[])
+        result["technical"]["latest"].update(
+            {"atr": 1.0, "ma20": 100.0, "boll_upper": 115.0,
+             "boll_lower": 90.0})
+        result["technical"]["context"] = {
+            "environment": "偏强", "latest": {"atr_percentile": 0.9}}
+        self.assertEqual(ledger.record_result(
+            "market", {}, result, now=datetime(2026, 11, 2)), 2)
+        rows = ledger._records()
+        self.assertEqual({row["vol_bucket"] for row in rows}, {"high"})
+        self.assertEqual({row["trend_bucket"] for row in rows}, {"up"})
+        vol = ledger.summary(group_by="vol_bucket")
+        self.assertEqual([group["key"] for group in vol["groups"]], ["high"])
+        trend = ledger.summary(group_by="trend_bucket")
+        self.assertEqual([group["key"] for group in trend["groups"]], ["up"])
+        self.assertEqual(vol["overall"]["decided"], 0)
+
     def test_historical_window_not_recorded(self):
         result = _market_result(as_of="2026-09-01", signals=[])
         self.assertEqual(ledger.record_result("market", {}, result,
@@ -203,6 +221,25 @@ class JudgeTests(unittest.TestCase):
                                      date(2026, 11, 20))
         self.assertEqual(verdict["label"], "correct")
         self.assertEqual(verdict["reason"], "grace_session")
+        self.assertEqual(verdict["actual_sessions"], 6)
+
+    def test_observed_bars_no_feed_terminal_after_grace(self):
+        axis = pd.bdate_range("2026-10-01", "2026-11-05")
+        prices = pd.Series([100.0 + i for i in range(len(axis))], index=axis)
+        record = self._record()
+        record["params"] = json.dumps({"horizon_basis": "observed_bars"})
+        verdict = judge.judge_record(record, prices, axis, date(2026, 11, 20))
+        self.assertEqual(verdict["status"], "settled")
+        self.assertEqual(verdict["label"], "blocked")
+        self.assertEqual(verdict["reason"], "no_feed")
+
+    def test_observed_bars_no_feed_stays_pending_within_grace(self):
+        axis = pd.bdate_range("2026-10-01", "2026-11-05")
+        prices = pd.Series([100.0 + i for i in range(len(axis))], index=axis)
+        record = self._record()
+        record["params"] = json.dumps({"horizon_basis": "observed_bars"})
+        verdict = judge.judge_record(record, prices, axis, date(2026, 11, 9))
+        self.assertEqual(verdict["status"], "pending")
 
     def test_missing_signal_close_stays_pending_within_grace(self):
         # 同步滞后导致信号日收盘还没入库时，宽限期内不能永久定案。
@@ -296,6 +333,29 @@ class ConsistencyTests(unittest.TestCase):
         self.assertEqual(stats["current_total"], 1)
         self.assertEqual(stats["hit_rate"], 1.0)
 
+    def test_grace_and_no_feed_are_diagnostic_counts(self):
+        rows = [
+            {"source": "direction", "probability": 0.7, "label": "correct",
+             "realized_return": 0.02, "reason": "grace_session",
+             "actual_sessions": 6},
+            {"source": "direction", "probability": 0.6, "label": "blocked",
+             "reason": "no_feed"},
+        ]
+        stats = ledger._stats(rows)
+        self.assertEqual(stats["grace_settled"], 1)
+        self.assertEqual(stats["no_feed"], 1)
+        self.assertEqual(stats["blocked"], 1)
+        self.assertEqual(stats["decided"], 1)       # 默认命中率分母不变
+        self.assertIn("actual_sessions", stats["note"])
+
+    def test_result_nav_basis_registers_matching_sync_asset(self):
+        from market_research.services import analysis as service
+        with patch.object(service.sync, "register") as register:
+            service._register_result_nav_basis(
+                {"code": "110022"},
+                {"meta": {"nav_basis": "cum"}})
+        register.assert_called_once_with("fund", "110022", "cum")
+
     def test_observed_bars_settlement_uses_price_axis(self):
         axis = pd.bdate_range("2026-10-01", "2026-12-31").delete([10, 11, 12])
         prices = pd.Series(100.0, index=axis)
@@ -385,6 +445,16 @@ class SettleAndSummaryTests(unittest.TestCase):
         self.assertGreater(overall["rule_return_mean"], 0)
         self.assertIsNotNone(overall["brier"])
 
+    def test_actual_sessions_column_persists_on_old_databases(self):
+        ledger.record_result("market", {}, _market_result(),
+                             now=datetime(2026, 11, 2))
+        row = ledger._records()[0]
+        ledger.update_record(row["id"], status="settled", label="correct",
+                             actual_sessions=6)
+        stored = [item for item in ledger._records()
+                  if item["id"] == row["id"]][0]
+        self.assertEqual(stored["actual_sessions"], 6)
+
     def test_settle_keeps_pending_when_prices_unavailable(self):
         ledger.record_result("market", {}, _market_result(),
                              now=datetime(2026, 11, 2))
@@ -393,7 +463,52 @@ class SettleAndSummaryTests(unittest.TestCase):
             counts = judge.settle(today=date(2026, 12, 10))
         self.assertEqual(counts["unavailable"], 3)
         self.assertEqual(counts["insufficient"], 0)
+        self.assertIn("ValueError", counts["unavailable_reasons"][0])
         self.assertEqual(ledger.summary()["overall"]["pending"], 3)
+
+
+class CumOfflineSettlementTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=C.ROOT / "output")
+        self.patch = patch.object(C, "DATA_DIR", Path(self.tmp.name))
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def test_cum_fund_settles_offline_without_fetch_or_total_mix(self):
+        from market_research.data import storage
+        dates = pd.bdate_range("2026-09-01", "2026-11-13")
+        frame = pd.DataFrame(
+            {"cum": [1.0 + 0.01 * n for n in range(len(dates))]},
+            index=dates)
+        meta = {"v": C.DATA_CACHE_VERSION, "code": "110022",
+                "start": "2020-01-01", "basis": "cum"}
+        storage.write("fund_nav_110022_2026-10-01", frame.iloc[-10:],
+                      {**meta, "start": "2026-10-01"})
+        storage.write("fund_nav_110022_2020-01-01", frame, meta)
+        storage.write("fund_nav_110022_2020-01-01_total", frame * 2,
+                      {**meta, "basis": "total"})
+        record = {"id": "cum-1", "asset_kind": "fund", "asset_code": "110022",
+                  "price_basis": "cum", "source": "direction",
+                  "direction": "up", "horizon": 5,
+                  "as_of": "2026-10-20",
+                  "params": json.dumps({"horizon_basis": "observed_bars"})}
+        with patch("market_research.data.providers.funds.fetch_fund_nav",
+                   side_effect=AssertionError("离线结算不得联网")), \
+             patch("market_research.tasks.sync.register",
+                   side_effect=AssertionError("只读结算不得登记同步资产")):
+            prices = judge._load_prices(record, date(2026, 11, 8), fetch=False)
+            self.assertEqual(prices.attrs["nav_basis"], "cum")
+            self.assertEqual(prices.loc[pd.Timestamp("2026-10-20")],
+                             frame.loc[pd.Timestamp("2026-10-20"), "cum"])
+            with patch.object(ledger, "pending_records", return_value=[record]), \
+                    patch.object(ledger, "update_record") as update:
+                counts = judge.settle(today=date(2026, 11, 8))
+        self.assertEqual(counts["unavailable"], 0)
+        self.assertEqual(counts["correct"], 1)
+        self.assertGreater(update.call_args.kwargs["realized_return"], 0)
 
 
 if __name__ == "__main__":

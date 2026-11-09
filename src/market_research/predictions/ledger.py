@@ -35,12 +35,25 @@ THRESHOLDS = {"direction": DIRECTION_THRESHOLD,
               "entry": ENTRY_PROBABILITY, "exit": EXIT_PROBABILITY}
 LABELS = ("correct", "incorrect", "neutral", "observed",
           "blocked", "insufficient")
-GROUP_FIELDS = ("source", "horizon", "asset_kind", "regime")
+# 仅从落库 features 派生的诊断分桶，不参与写入与分析结果。
+FEATURE_GROUPS = ("vol_bucket", "trend_bucket")
+GROUP_FIELDS = ("source", "horizon", "asset_kind", "regime",
+                *FEATURE_GROUPS)
 
 
 def _schema(db) -> None:
     db.execute((files("market_research.data") / "migrations/004_predictions.sql")
                .read_text(encoding="utf-8"))
+    # 宽限顺延样本要冻结实际结算会话数；迁移 SQL 不改，幂等补列兼容旧库。
+    try:
+        columns = {row[1] for row in db.execute(
+            "PRAGMA table_info('prediction_records')").fetchall()}
+        if "actual_sessions" not in columns:
+            db.execute("ALTER TABLE prediction_records "
+                       "ADD COLUMN actual_sessions INTEGER")
+    except Exception:                                      # noqa: BLE001
+        # 并发补列时后到者可能看到“列已存在”；读路径不依赖它，忽略即可。
+        pass
 
 
 def _date(value) -> date | None:
@@ -372,17 +385,88 @@ def pending_records(limit: int = 500) -> List[dict]:
         return [dict(zip(columns, values)) for values in cursor.fetchall()]
 
 
+def _row_features(row: dict) -> dict:
+    """features 在库里是 JSON 字符串；损坏或缺失按空字典处理。"""
+    features = row.get("features")
+    if isinstance(features, str):
+        try:
+            features = json.loads(features)
+        except (TypeError, ValueError):
+            features = None
+    return features if isinstance(features, dict) else {}
+
+
+def _level(value, low, high, labels=("low", "mid", "high")) -> str:
+    number = _num(value)
+    if number is None:
+        return "unknown"
+    if number < low:
+        return labels[0]
+    if number < high:
+        return labels[1]
+    return labels[2]
+
+
+def _vol_bucket(features: dict) -> str:
+    """把已冻结的波动率连续值离散化，优先 0~1 分位，其次同量纲比值。"""
+    latest = features.get("latest")
+    latest = latest if isinstance(latest, dict) else {}
+    context = features.get("context")
+    context_latest = context.get("latest") if isinstance(context, dict) else None
+    context_latest = (context_latest if isinstance(context_latest, dict)
+                      else {})
+    for key in ("atr_percentile", "bandwidth_percentile"):
+        if _num(context_latest.get(key)) is not None:
+            return _level(context_latest[key], 0.33, 0.66)
+    upper, lower, ma20 = (_num(latest.get("boll_upper")),
+                          _num(latest.get("boll_lower")),
+                          _num(latest.get("ma20")))
+    if None not in (upper, lower, ma20) and ma20 > 0:
+        return _level((upper - lower) / ma20, 0.04, 0.10)
+    atr, ma20 = _num(latest.get("atr")), _num(latest.get("ma20"))
+    if atr is not None and ma20 is not None and ma20 > 0:
+        return _level(atr / ma20, 0.015, 0.04)
+    return "unknown"
+
+
+def _trend_bucket(features: dict) -> str:
+    """趋势分（−100~100）为主；缺失时退回最新 MACD 柱的符号。"""
+    score = _num(features.get("score"))
+    if score is not None:
+        if score < -20:
+            return "down"
+        if score > 20:
+            return "up"
+        return "flat"
+    latest = features.get("latest")
+    latest = latest if isinstance(latest, dict) else {}
+    macd = _num(latest.get("macd"))
+    if macd is not None:
+        return "up" if macd > 0 else ("down" if macd < 0 else "flat")
+    return "unknown"
+
+
+def _with_feature_buckets(rows: List[dict]) -> List[dict]:
+    """只追加诊断分桶键，不改动落库字段，也不改变默认汇总口径。"""
+    for row in rows:
+        features = _row_features(row)
+        row["vol_bucket"] = _vol_bucket(features)
+        row["trend_bucket"] = _trend_bucket(features)
+    return rows
+
+
 def _records() -> List[dict]:
     with storage.connection() as db:
         _schema(db)
         cursor = db.execute("SELECT * FROM prediction_records")
         columns = [item[0] for item in cursor.description]
-        return [dict(zip(columns, values)) for values in cursor.fetchall()]
+        rows = [dict(zip(columns, values)) for values in cursor.fetchall()]
+    return _with_feature_buckets(rows)
 
 
 def update_record(record_id: str, **fields) -> None:
     allowed = {"status", "target_date", "judge_date", "label",
-               "realized_return", "judged_at", "reason"}
+               "realized_return", "judged_at", "reason", "actual_sessions"}
     values = {key: value for key, value in fields.items() if key in allowed}
     if not values:
         return
@@ -471,10 +555,15 @@ def _stats(rows: List[dict]) -> dict:
     ]
     rule_returns = [float(row["realized_return"]) for row in rules
                     if row.get("realized_return") is not None]
+    grace_settled = sum(1 for row in rows
+                        if row.get("reason") == "grace_session")
+    no_feed = sum(1 for row in rows if row.get("reason") == "no_feed")
     return {
         "total": len(rows),
         "pending": sum(1 for row in rows if row.get("status") == "pending"),
         **counts,
+        "grace_settled": grace_settled,
+        "no_feed": no_feed,
         "decided": decided,
         "hit_rate": (correct / decided) if decided else None,
         "hit_rate_basis": "direction_only",
@@ -491,7 +580,11 @@ def _stats(rows: List[dict]) -> dict:
         "note": "hit_rate/Brier 只统计方向概率；规则事件单列触发后收益，"
                 "neutral/observed/blocked/insufficient 均不计入命中率分母。"
                 "legacy_rows 是口径修正前的旧规则行（5/20 各一条），"
-                "current_total 已将其排除。",
+                "current_total 已将其排除。"
+                "grace_settled 是宽限期顺延结算样本，实际会话数冻结在 "
+                "actual_sessions，仅作诊断单列，不改变默认命中率分母。"
+                "blocked 按 label 计数；no_feed 按 reason 计数，代表行情末日"
+                "早于目标日、超宽限期仍确认无后续报价的终判样本。",
     }
 
 

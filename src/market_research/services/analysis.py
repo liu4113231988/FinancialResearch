@@ -160,7 +160,10 @@ def _cleanup_stale_results() -> None:
 def submit(operation, params):
     _cleanup_stale_results()
     if operation == "analyze":
-        sync.register("fund", params["code"], D.NAV_BASIS_TOTAL)
+        basis = params.get("nav_basis")
+        if basis not in (D.NAV_BASIS_TOTAL, D.NAV_BASIS_CUM):
+            basis = D.NAV_BASIS_TOTAL
+        sync.register("fund", params["code"], basis)
         path = fund_cache_path(params)
         if not params.get("refresh") and path.exists():
             try:
@@ -271,6 +274,21 @@ def _record_predictions(operation, params, result):
         LOG.warning("预测台账写入失败，不影响分析结果", exc_info=True)
 
 
+def _register_result_nav_basis(params, result):
+    """按分析实际使用的净值口径登记同步资产；register 幂等。"""
+    code = (params or {}).get("code")
+    if not code:
+        return
+    basis = str(((result or {}).get("meta") or {}).get("nav_basis")
+                or (params or {}).get("nav_basis") or D.NAV_BASIS_TOTAL)
+    if basis not in (D.NAV_BASIS_TOTAL, D.NAV_BASIS_CUM):
+        basis = D.NAV_BASIS_TOTAL
+    try:
+        sync.register("fund", code, basis)
+    except Exception:                                      # noqa: BLE001
+        LOG.warning("同步资产登记失败，不影响分析结果", exc_info=True)
+
+
 def _dispatch_stage(operation, params, jid, checkpoint, stamp_before):
     if operation == "analyze":
         initial_path = fund_cache_path(params, stamp_before)
@@ -283,6 +301,7 @@ def _dispatch_stage(operation, params, jid, checkpoint, stamp_before):
         except Exception:
             LOG.exception("分析完成，但缓存写入失败")
         _record_predictions("analyze", params, result)
+        _register_result_nav_basis(params, result)
         return result
     if operation == "market":
         result = _stamp(analyze_market(**params,job_id=jid), stamp_before)

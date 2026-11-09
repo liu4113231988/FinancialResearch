@@ -75,6 +75,28 @@ def judge_record(record: dict, prices, sessions, today=None) -> dict:
                 "target_date": None, "reason": "信号日不在交易日历"}
     target_position = position + horizon
     if target_position >= len(sessions):
+        # observed_bars 的会话轴就是报价轴；退市/清算/断供会令目标会话
+        # 永远不出现。仅在信号日仍有报价、行情末日早于名义目标日、当前
+        # 日期已超宽限期且目标后确认无报价时，保守终判 blocked/no_feed。
+        if _horizon_basis(record) == "observed_bars":
+            nominal = pd.bdate_range(
+                as_of, periods=horizon + ledger.GRACE_SESSIONS + 1)
+            nominal_target = nominal[horizon]
+            nominal_grace_end = nominal[horizon + ledger.GRACE_SESSIONS]
+            close = _close_series(prices)
+            if close is not None and not close.empty:
+                axis = _normalize(close.index)
+                later = axis[(axis >= nominal_target)
+                             & (axis <= nominal_grace_end)]
+                today_date = _date(today)
+                if (pd.Timestamp(as_of) in axis
+                        and axis.max() < nominal_target
+                        and today_date is not None
+                        and today_date > nominal_grace_end.date()
+                        and len(later) == 0):
+                    return {"status": "settled", "label": "blocked",
+                            "target_date": nominal_target.date().isoformat(),
+                            "reason": "no_feed"}
         return {"status": "pending"}
     target = sessions[target_position]
     if today < target.date():
@@ -118,23 +140,32 @@ def judge_record(record: dict, prices, sessions, today=None) -> dict:
     value = float(close.loc[judge_date])
     realized = value / float(base) - 1.0
     reason = "grace_session" if judge_date > target else None
+    extra = {}
+    if reason == "grace_session":
+        # 顺延样本的实际结算会话数可能与名义 horizon 不同；冻结后不再重算。
+        judge_position = int(sessions.get_indexer([judge_date])[0])
+        if judge_position < 0:
+            judge_position = int(sessions.searchsorted(judge_date))
+        extra["actual_sessions"] = judge_position - position
     if record.get("asset_kind") == "stock" and isinstance(prices, pd.DataFrame):
         row = prices.loc[judge_date]
         if _one_price_bar(row):
             return {"status": "settled", "label": "blocked",
                     "target_date": target.date().isoformat(),
                     "judge_date": judge_date.date().isoformat(),
-                    "realized_return": realized, "reason": "limit_one_price"}
+                    "realized_return": realized, "reason": "limit_one_price",
+                    **extra}
         if "volume" in prices and pd.notna(row.get("volume")) and float(row["volume"]) <= 0:
             return {"status": "settled", "label": "blocked",
                     "target_date": target.date().isoformat(),
                     "judge_date": judge_date.date().isoformat(),
-                    "realized_return": realized, "reason": "zero_volume"}
+                    "realized_return": realized, "reason": "zero_volume",
+                    **extra}
 
     verdict = {"status": "settled",
                "target_date": target.date().isoformat(),
                "judge_date": judge_date.date().isoformat(),
-               "realized_return": realized, "reason": reason}
+               "realized_return": realized, "reason": reason, **extra}
     if is_rule:
         # 状态事件只保留触发后的区间收益，不判定方向对错。
         return {**verdict, "label": "observed",
@@ -225,7 +256,8 @@ def settle(limit: int = 500, today=None, fetch: bool = False) -> dict:
     today = today or date.today()
     records = ledger.pending_records(limit)
     counts = {"checked": len(records), "pending": 0, "unavailable": 0,
-              **{label: 0 for label in ledger.LABELS}}
+              **{label: 0 for label in ledger.LABELS},
+              "unavailable_reasons": []}
     cache = {}
     for record in records:
         key = (record.get("asset_kind"), record.get("asset_code"),
@@ -234,12 +266,16 @@ def settle(limit: int = 500, today=None, fetch: bool = False) -> dict:
             try:
                 cache[key] = (_load_prices(record, today, fetch), None)
             except Exception as exc:                       # noqa: BLE001
-                cache[key] = (None, str(exc))
+                cache[key] = (None, f"{type(exc).__name__}: {exc}")
         prices, error = cache[key]
         if error is not None:
             # 行情读取失败是临时性的（未同步、库锁、磁盘错误），不能把记录
             # 永久判成 insufficient；保持 pending，等下次数据可用再结。
             counts["unavailable"] += 1
+            reason = (f"{record.get('asset_kind')}:{record.get('asset_code')}"
+                      f":{record.get('price_basis')} -> {error}")
+            if reason not in counts["unavailable_reasons"]:
+                counts["unavailable_reasons"].append(reason)
             continue
         sessions = _sessions_for(record, prices, today)
         verdict = judge_record(record, prices, sessions, today)

@@ -10,10 +10,12 @@ P1-03 · 选择过程感知的显著性检验。
 旧 bootstrap 只检验"已选策略的均值是否不为 0"，把选择过程留在零假设之外；
 本脚本把选择过程放进零假设里。
 """
+import logging
 import sys
 import warnings
 from pathlib import Path
 
+LOG = logging.getLogger(__name__)
 warnings.filterwarnings("ignore")
 from market_research.config import ROOT
 try:
@@ -77,7 +79,7 @@ def main(argv=None, *, prog=None):
         print(f"  跳过：{sa.get('reason', '无可用数据')}")
     # 被跳过的折必须可见：静默跳过会让"只算了 2/3 折"看起来像"算了全部"
     for msg in sa.get("skipped") or []:
-        print(f"  ⚠ {msg}")
+        LOG.warning("跳过折：%s", msg)
 
     # ---- 拆解过拟合代价
     dec = decompose_overfit_cost(cand)

@@ -8,6 +8,26 @@
 
 **2026-11-06 修复轮**：按回查结论补齐 P2-34（`data_stamp` 按操作取数据版本、缓存命中保留产出时版本）、P2-30（`StorageBusy` 映射 503 + 可读原因/重试秒数，路由不再吞掉）、P2-21（研究 CLI 按估值可用性剔除曲线）、P1-20（CLI/报告输出净值口径）、P3-C（持仓 payload 与报告 3.6 内容级断言）。P1-20、P2-21、P3-C 已关闭；P2-34、P2-30 仍为部分落地（剩余差距已在各条更新）。全量单测 366 项通过。
 
+## 2026-11-09 TODO 续办复核
+
+按当前源码逐项核对历史 `- [ ]`、“尚未修复 / 部分落地”描述，区分真正缺口与状态过期项；本轮只处理可离线落地、可回归验证且不依赖真实联网数据的条目。
+
+**本轮已关闭**
+
+- 2026-11-08 第二轮待决策 1～3：行情断供超宽限期后保守终判 `blocked/no_feed`；宽限顺延冻结 `actual_sessions` 并在 summary 单列 `grace_settled`；`cum` 降级基金按实际口径登记同步并从同口径最宽窗口离线结算。CLI 批量分析按当前定位明确为研究入口，不进入实盘预测台账；若未来成为实盘入口，再统一服务层结果契约后单列立项。
+- 预测分桶归因：`summary` 支持 `vol_bucket/trend_bucket`，默认命中率口径不变；回归见 `tests/predictions/test_commands.py`、`tests/predictions/test_ledger.py`。
+- 前端健壮性：提交中取消补发 cancel；相关性任务独立槽位、窗口 `[30,500]` 钳制与有限轮询重试；基金 busy 下拉禁用；分析与回测旧轮询按代次清理；自选污染与 localStorage 形状归一化复核通过；外部字段进入 `innerHTML`/ECharts HTML tooltip 前统一转义。受控富文本模板与 ECharts 默认 tooltip 按设计保留，不列为开放代码缺陷。
+- 历史状态过期项：P1-A、P1-B、E1 短周期 ICIR、walk-forward 诊断、lasso/ridge/krr 折内标准化、失效窗口健康度整段还原、未校准总回报 `degraded`、GBK 警告日志、市场页 AbortController/取消/轮询上限，经当前源码和测试复核已实现；本轮补齐仍缺的前端与 XSS 部分并在上方统一记录。
+- P2-34：`/api/config` 只读脱敏视图、`Settings.validate()` 启动期 schema 校验；P3-H：旧 `/api/*` 增加 `Deprecation`、后继版本 `Link` 与可选 `FIL_API_SUNSET`。回归见 `tests/api/test_contract.py`。参数级配置指纹仍开放。
+- 验证：全量离线单测 **523 项通过**；`tests/regression/test_regressions.py`、`tests/regression/test_p0_fixes.py` 全部通过；3 组前端回归、前端语法检查、`git diff --check`、IDE lint 均通过。本轮修改尚未提交。
+
+**仍开放（需要真实数据 / 产品口径 / 法务运维决策，或会改变默认研究结论）**
+
+- 股票与指数的 6 项外部数据/未来样本验证；P1-10 真实行业股息、P1-11 历史时点行业成分。
+- P2-35 真实数据 CI、录制 fixture 库、每日 live smoke 告警；P2-36 所有 API 响应统一 `meta.disclaimer/data_as_of/data_latency/model_limits` 信封及数据源再分发授权评估；P2-37 单资产同步 watchdog/超时隔离；P2-34 参数级 `C.RBSA`/窗口指纹。
+- P3-H 旧路径自动迁移脚本与兼容路径移除日期；其他生产化条目中需要产品、法务、容量、监控、备份或外部采购决策的部分按原状态保留。
+- 失效模型剔除、严格历史分位、脉冲订单等会改变默认研究数值的候选，仍需独立的研究口径评估，不在本轮离线修复中擅自启用。
+
 ## 2026-11-08 全局复审（第二轮）
 
 按九个功能面复核逻辑、边界与异常路径。以下为**本轮直接修复**（均已补回归测试）：
@@ -19,7 +39,7 @@
 - `api/routes/analysis.py` 轻量 `/api/corr` 直连路径补齐 `data_quality` / `data_warnings`，与服务层口径一致。
 - `predictions/ledger.py` `pending_records` 对负数/超大 `limit` 做钳制。
 
-以下为**待决策项**（涉及数据口径/跨模块契约，本轮不改代码）：
+以下为**历史待决策项**（涉及数据口径/跨模块契约，2026-11-09 已处理；状态见“TODO 续办复核”，原文保留为决策记录）：
 
 1. **结算时钟的终判口径**（P1）：`horizon_basis=observed_bars` 且资产退市、清算或供应商停止供数时，目标会话永远不存在，记录会无限 `pending`。计划：① 先确认产品口径——"连续 N 个会话无新报价"应判 `blocked` 还是保持待定；② 在 `judge_record` 增加"行情末日早于目标日且已超宽限"的终判分支；③ 补退市/清算/断供三类测试与 summary 分桶。
 2. **宽限期判定日与名义期限漂移**（P2）：目标日缺会话时当前取宽限期内首个可用收盘，实际收益区间长于 5/20 日，且无法区分停牌与漏抓。计划：① 确认"目标日缺会话直接 `blocked`"还是"顺延"；② 若顺延，在记录中冻结实际 `judge_date` 与 `actual_sessions`；③ 让 `summary` 单独统计顺延样本，避免与标准期限混算命中率。
@@ -51,7 +71,7 @@
 - **预测台账与回验已落地（2026-11-08）**：新增 `prediction_records` 表、`predictions` 命令、服务层写入钩子与 10 项单测；口径见[预测台账与回验](docs/预测台账与回验.md)。剩余：
   - ~~Web 页面与报告展示台账汇总~~ **已关闭（2026-11-08）**：新增只读 `/api/predictions/summary` 双前缀接口、「预测回验」面板与离线 HTML 报告 10 号章节。
   - ~~项目内内置结算调度~~ **已关闭（2026-11-08）**：`worker.supervise` 内置可关闭的定时结算子进程；环境变量见 `docs/运行环境与配置.md`。
-  - [ ] 特征分桶归因：`summary` 目前只支持 `source/horizon/asset_kind/regime`，波动率、趋势分等切片待补。
+  - [x] ~~特征分桶归因~~ **已关闭（2026-11-09）**：`summary` 支持 `vol_bucket/trend_bucket`，覆盖冻结特征的波动率/趋势切片；默认命中率口径不变。
   - ~~旧规则行物理迁移命令~~ **已关闭（2026-11-08）**：`predictions migrate`（默认 dry-run，`--apply` 幂等写库）合并 5/20 为单条 `horizon=0`；旧库需人工执行，命令本身不会自动运行。
 - 时点可得的基金分红/拆分及净值版本，股票公司行动与历史数据版本。
 - 供应商交易日历和缺口会话处理已有实现（`data/providers/calendar.py`、`market/targets.py`、`market/execution.py`）；仍需交易所公告核验、区分停牌与漏抓、真实订单及基金申赎/持有期费用模型，不能记为“完全没有交易日历”。
@@ -131,9 +151,9 @@
 - 回归快照：隔离临时目录覆盖 canonical 历史合并、复权部分历史拒绝、基金/股票刷新后普通读取、估值 `valuation_sync.json` 成功/失败/退避、行业映射全失败与部分失败、CORS 预检状态及前端旧任务晚返回的 `activeJob` 竞态。
 - 未执行：真实供应商联网取数、真实浏览器/移动端、多进程与锁竞争压力、Docker/wheel 构建安装及完整数值研究重放。本轮已修改 9 个业务文件、9 个测试文件及 `TODO.md`，未提交。
 
-## 本轮代码审查发现（2026-11-01 补记，尚未修复）
+## 历史代码审查证据（2026-11-01 补记；状态以 2026-11-09 续办复核为准）
 
-由一次覆盖基金/建模、市场/研究、API/任务/数据层、前端的全链路只读审查发现。每条含 位置、触发条件、后果、修复方向。P1 影响默认路径计算结果，P2 特定条件下错误或口径被持久化，P3 健壮性/一致性/打磨。已知数据缺口（P1-10/P1-11 及「股票与指数」六项）不重复列在此处。
+由一次覆盖基金/建模、市场/研究、API/任务/数据层、前端的全链路只读审查发现。以下保留原始位置、触发条件、后果和修复方向；其中列明的程序缺陷已于历史提交或 2026-11-09 续办批次关闭，不再按本节标题判断开放状态。P1 影响默认路径计算结果，P2 特定条件下错误或口径被持久化，P3 健壮性/一致性/打磨。已知数据缺口（P1-10/P1-11 及「股票与指数」六项）不重复列在此处。
 
 ### P1（默认主路径，影响每只基金分析结果）
 
@@ -442,13 +462,13 @@
   - 语义变化：仅新增运维命令与文档，不影响 CLI/Web 业务路径。
 
 - **P2-34（缺失功能）：多环境配置与结果溯源** **部分落地（2026-11-06 回查）**
-  - **回查差距**：`FIL_ENV` 与可分离目录、`meta.provenance`、`/api/health.environment` 已落地；此前 `_stamp()` 未传数据版本导致 `data_stamp` 恒 `null`，现已修复：基金类操作（analyze/backtest/refit/corr）使用本基金本窗口的数据指纹（与结果缓存键同口径），market/holdings 使用全局指纹；缓存命中读旧 pickle 时保留产出时的版本；analyze 在计算前后各取一次，期间数据变化则跳过写缓存。回归见 `tests/api/test_provenance.py:test_data_stamp_changes_when_data_version_changes`。未落地：`/api/config` 脱敏视图、启动期 schema 校验、参数级指纹（`C.RBSA`/窗口参数未进入每个结果）。
+  - **回查差距**：`FIL_ENV` 与可分离目录、`meta.provenance`、`/api/health.environment` 已落地；此前 `_stamp()` 未传数据版本导致 `data_stamp` 恒 `null`，现已修复：基金类操作（analyze/backtest/refit/corr）使用本基金本窗口的数据指纹（与结果缓存键同口径），market/holdings 使用全局指纹；缓存命中读旧 pickle 时保留产出时的版本；analyze 在计算前后各取一次，期间数据变化则跳过写缓存。回归见 `tests/api/test_provenance.py:test_data_stamp_changes_when_data_version_changes`。`/api/config` 脱敏视图与启动期 schema 校验已于 2026-11-09 补齐；仅参数级指纹（`C.RBSA`/窗口参数未进入每个结果）仍开放。
   - 现状：`settings.py:14-25` 全部依赖 `FIL_*` 环境变量，启动时只做 `int` 转换，无 schema 校验/环境分层；`config.py` 中大量研究参数是代码常量；`api/routes/meta.py:8-10` 的版本硬编码；结果缓存与分析 payload 现在共用同一 `data_stamp` 口径（`services/analysis.py`），但配置指纹仍只有版本级。
   - 为什么生产不成立：dev/staging/prod 无隔离；升级后无法判断某个结果是哪版代码、哪版数据、哪套窗口/参数产生；「同输入同输出」无法自证。
   - 影响面：发布管理、问题回溯、合规审计、跨环境对比。
   - 建议：启动时用 `pydantic-settings` 校验并打印生效配置；把 `data_stamp`、git commit、关键 `C.RBSA`/窗口参数、`cache_version`、同步状态写入 `meta.provenance`（API/报告/导出统一）；提供脱敏的 `/api/config`。
   - **实际修法**：`config.py` 新增 `ENV`（`FIL_ENV=dev|local|prod`，未知回退 `local`）与可分离目录：`FIL_DATA_DIR` / `FIL_FIG_DIR` / `FIL_RES_DIR`；`local` 默认路径保持 `output/data|figures|results`，`dev` 默认落 `output/dev/*`，行为不变。`research/runinfo.py:result_provenance()` 输出 `environment/code_version/config_version/git_commit/git_dirty/data_stamp/generated_at`（git 查询进程内缓存）；`services.analysis._stamp()` 在 `_dispatch` 对所有操作结果写 `meta.provenance`，缓存文件保留产出时的版本；报告 `runinfo.data_summary()` 增加 `environment/data_dir`；`/api/health` 返回 `environment`。配置说明见 [运行环境与配置](docs/运行环境与配置.md)。
-  - **未做**：`/api/config` 脱敏配置视图、启动期 pydantic schema 校验、把完整 `C.RBSA` 参数写入每个结果（当前指纹是版本级，非参数级）。
+  - **仍开放**：把完整 `C.RBSA`/窗口参数写入每个结果（当前指纹是版本级，非参数级）。`/api/config` 脱敏视图和启动期配置 schema 校验已关闭，见 `tests/api/test_contract.py`；采用项目现有 `Settings.validate()`，未新增 pydantic-settings 依赖。
   - 回归：`tests/api/test_provenance.py`（指纹字段、`_stamp` 挂载与缺 meta 兜底、数据变化后 `data_stamp` 变化/基金窗口只跟踪自身依赖、`FIL_ENV=dev` 切换数据目录、未知环境回退）；`tests/api/test_routes.py` 仅调整一处断言以容纳新增 `meta.provenance`，缓存语义不变。
   - 语义变化：结果 payload 新增 `meta.provenance`；默认 `FIL_ENV=local` 时路径与数值完全不变。
 
@@ -519,9 +539,9 @@
 - **P3-H（缺失功能）：API 版本与响应契约** — **已修复（2026-11-07）**
   - 现状（修复前）：路由为未版本化的 `/api/*`；`api/schemas.py` 只定义请求模型，响应多以裸 dict 返回；版本在 `api/app.py` 与 `api/routes/meta.py` 两处硬编码。
   - 已落地：新增 `api/version.py` 作为版本单一来源（`SERVICE_VERSION=0.3.0`、`API_VERSION=1`）。同一批路由同时挂在 `/api`（兼容）与 `/api/v1`（正式契约），两者都在 `/openapi.json` 中可见；所有 HTTP 响应带 `X-API-Version: 1` 头；`/api/health` 与 `/api/ready` 增加 `api_version` 字段。关键响应定义 Pydantic 契约：任务状态 `JobResponse`、结果信封 `ResultResponse`、存活/就绪 `HealthResponse`/`ReadyResponse`，由 FastAPI 在返回时校验并过滤未声明字段。认证模式下 v1 的 health/ready/disclosure 与旧路径一样公开。
-  - 前端：`api/static/*` 继续调用兼容路径（两个路径由同一实现提供），本轮未改动，避免打断；旧路径未标记删除，文档注明 v1 为推荐路径。
-  - 回归：`tests/api/test_contract.py`（6 项：新旧路径同体、版本头、OpenAPI 同时列出、v1 校验/提交、任务状态字段集合、结果信封字段集合、就绪版本）。`tests/api/test_routes.py` 18 项保持通过。
-  - 剩余：旧 `/api/*` 未设置 `Deprecation`/`Sunset` 头，也没有自动迁移脚本；兼容路径何时移除待后续拍板。
+  - 前端：`api/static/*` 继续调用兼容路径（两个路径由同一实现提供），本轮未改动，避免打断；文档注明 v1 为推荐路径。
+  - 回归：`tests/api/test_contract.py`（原始 6 项，加 2026-11-09 的弃用头、脱敏配置、配置校验 3 项：新旧路径同体、版本头、OpenAPI 同时列出、v1 校验/提交、任务状态字段集合、结果信封字段集合、就绪版本）。`tests/api/test_routes.py` 18 项保持通过。
+  - **已关闭（2026-11-09）**：旧 `/api/*` 返回 `Deprecation: true`、后继版本 `Link`，以及可选的 `FIL_API_SUNSET` 日期；`v1` 路径不标弃用。仍开放：自动迁移脚本、兼容路径移除日期及 `Sunset` 具体日期的产品决定。
 
 - **P3-I（缺失功能）：资源上限与容器配额** — **已修复（2026-11-07）**
   - 现状（修复前）：`modeling/engine.py` 每个任务默认开 `cpu_count()-1` 个子进程；`FIL_MAX_JOBS=2` 时理论上同时占用约 `2×(CPU-1)` 个进程；不读取 cgroup，也没有单任务内存上限。

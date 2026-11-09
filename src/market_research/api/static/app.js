@@ -454,7 +454,7 @@ function mh(key, text) {
     // ★ 小标题必须用独立的类（.t-k），不能用 <b>：
     //   CSS 里若写成 `.t-row > b{display:block}`，会把正文里所有作强调用的
     //   <b> 一并变成块级元素，句子会被拆成一行一个词。
-    tip.innerHTML = `<div class="t-hd">${m.title || el.textContent.trim()}</div>`
+    tip.innerHTML = `<div class="t-hd">${escapeHtml(m.title || el.textContent.trim())}</div>`
       + `<div class="t-row"><span class="t-k">是什么</span>${m.what}</div>`
       + (m.how ? `<div class="t-row"><span class="t-k">怎么算</span>${m.how}</div>` : '')
       + (m.read ? `<div class="t-row"><span class="t-k">怎么看</span>${m.read}</div>` : '');
@@ -815,7 +815,7 @@ function renderModelPicker() {
     const lab = document.createElement('label');
     lab.className = 'mp-item';
     lab.title = m.desc;
-    lab.innerHTML = `<input type="checkbox" data-k="${m.key}"> ${m.name}`;
+    lab.innerHTML = `<input type="checkbox" data-k="${escapeHtml(m.key)}"> ${escapeHtml(m.name)}`;
     list.appendChild(lab);
   });
   $('mpQuick').onclick = () => applyPreset(S.cat.quick_models);
@@ -902,10 +902,13 @@ let pagePaused = false;
 let fundGeneration = 0;
 let correlationGeneration = 0;
 let activeJob = null;          // 当前正在轮询的任务，供"取消"按钮使用
+let correlationJob = null;    // 相关性任务独立槽位，不能覆写 activeJob
+let submitInFlight = false;   // 分析 POST 已发出、job_id 尚未落地的窗口
+let pendingCancel = false;    // 该窗口内点击取消，拿到 job_id 后补发 cancel
 // 轮询上限写在各自函数内部（前端回归用 vm 单函数求值，不共享模块常量）：
 // 前 200 次快查，之后退避到 2s，总量约 35 分钟。
 function setFundBusy(busy) {
-  for (const id of ['runBtn', 'fundApply', 'btnRefresh', 'btnReLearn', 'btnApplyParams', 'btRun', 'holdRun']) $(id).disabled = busy;
+  for (const id of ['runBtn', 'fundApply', 'btnRefresh', 'btnReLearn', 'btnApplyParams', 'btRun', 'holdRun', 'presetSel', 'watchSel']) $(id).disabled = busy;
   $('runBtn').setAttribute('aria-busy', String(busy));
   const cancel = $('btnCancelJob');
   if (cancel) cancel.hidden = !busy;
@@ -923,6 +926,9 @@ function showFundResult() {
 async function updateCorrelation(win) {
   const target = S.result;
   if (!target) return;
+  // 窗口来自前端输入，必须在服务端契约范围内；非法/空值回退到默认 120。
+  win = Math.min(500, Math.max(30, Number(win) || 120));
+  $('rollWin').value = String(win);
   const token = ++correlationGeneration;
   const m = target.meta;
   const query = new URLSearchParams({code: target.code, win,
@@ -967,6 +973,7 @@ async function run(code, opts = {}) {
   catch (error) { showAlert(error.message); return; }
   const token = ++fundGeneration;
   correlationGeneration++;
+  pendingCancel = false;
   checkName(code, token);
   const params = JSON.parse(JSON.stringify(S.params));
   saveLastRun({code, start: requestedWindow.start, end: requestedWindow.end,
@@ -974,6 +981,7 @@ async function run(code, opts = {}) {
   setFundBusy(true);
   $('progressWrap').hidden = false;
   setProgress('提交任务…', 0.01, '');
+  submitInFlight = true;
 
   try {
     const body = {
@@ -993,6 +1001,18 @@ async function run(code, opts = {}) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
+    submitInFlight = false;
+    if (pendingCancel) {
+      // POST 返回前点过取消：任务此时才刚创建，必须补发 cancel，且不能应用结果。
+      pendingCancel = false;
+      if (r && r.job_id) {
+        try { await api('/api/job/' + r.job_id + '/cancel', {method: 'POST'}); }
+        catch (e) { /* 任务可能已结束，忽略 */ }
+      }
+      $('progressWrap').hidden = true;
+      showAlert('已取消本次分析；任务创建后已自动取消。');
+      return;
+    }
     if (token !== fundGeneration) return;
     if (r.cached && r.result) {
       applyResult(r.result);
@@ -1002,10 +1022,12 @@ async function run(code, opts = {}) {
     activeJob = r.job_id;
     await poll(r.job_id, token);
   } catch (e) {
+    if (pendingCancel) pendingCancel = false;
     if (token !== fundGeneration) return;
     showAlert('分析失败：' + e.message);
     $('progressWrap').hidden = true;
   } finally {
+    submitInFlight = false;
     if (token === fundGeneration) {
       activeJob = null;
       setFundBusy(false);
@@ -1074,7 +1096,7 @@ async function poll(jid, token = fundGeneration) {
 // 新结果失效），不能复用 fundGeneration —— 两条轮询的生命周期不同。
 async function pollCorrelation(jid, win, target, token) {
   const MAX_POLLS = 1200;   // 900ms × 200 + 2s × 1000 ≈ 35 分钟
-  activeJob = jid;
+  if (typeof correlationJob !== 'undefined') correlationJob = jid;
   showAlert('数据尚未预热，已提交后台重算任务；完成后本页会自动更新。');
   try {
     for (let attempts = 0; attempts < MAX_POLLS; attempts++) {
@@ -1084,7 +1106,13 @@ async function pollCorrelation(jid, win, target, token) {
         if (token !== correlationGeneration || S.result !== target) return;
       }
       if (token !== correlationGeneration || S.result !== target) return;
-      const j = await api('/api/job/' + jid);
+      // 与基金分析轮询一致：单次网络抖动有限退避，不直接作废长任务。
+      let j = null, qerr = null;
+      for (let t = 0; t < 3; t++) {
+        try { j = await api('/api/job/' + jid); qerr = null; break; }
+        catch (e) { qerr = e; await new Promise(r => setTimeout(r, 1500)); }
+      }
+      if (qerr) throw Error('任务查询失败：' + qerr.message);
       if (token !== correlationGeneration || S.result !== target) return;
       if (j.status === 'done') {
         const r = await api('/api/result/' + jid);
@@ -1099,21 +1127,28 @@ async function pollCorrelation(jid, win, target, token) {
     }
     throw Error('等待超时（约 35 分钟）。任务可能仍在后台运行，稍后调整窗口会立即命中已预热的数据。');
   } finally {
-    if (activeJob === jid) activeJob = null;
+    if (typeof correlationJob !== 'undefined' && correlationJob === jid)
+      correlationJob = null;
   }
 }
 
 async function cancelActiveJob() {
-  const jid = activeJob;
+  const corr = typeof correlationJob !== 'undefined' ? correlationJob : null;
+  const jids = [...new Set([activeJob, corr].filter(Boolean))];
+  const submitting = typeof submitInFlight !== 'undefined' && submitInFlight;
   activeJob = null;
-  if (jid) {
+  if (typeof correlationJob !== 'undefined') correlationJob = null;
+  if (!jids.length && submitting && typeof pendingCancel !== 'undefined')
+    pendingCancel = true;
+  for (const jid of jids) {
     try { await api('/api/job/' + jid + '/cancel', { method: 'POST' }); }
     catch (e) { /* 任务可能刚好结束，忽略 */ }
   }
   // 递增代次让所有在途轮询立即退出，并隐藏进度条
   invalidateFund();
   $('progressWrap').hidden = true;
-  showAlert(jid ? '已取消当前任务；后端收尾完成后结果会被丢弃。' : '没有正在运行的任务。');
+  showAlert(jids.length ? '已取消当前任务；后端收尾完成后结果会被丢弃。'
+    : submitting ? '提交中，任务创建后将自动取消。' : '没有正在运行的任务。');
 }
 
 // 结果字段兜底：后端在不同降级路径下会省略部分集合（rank / correlation /
@@ -1249,7 +1284,7 @@ function renderHead() {
       sb: `${mh('ann_vol', '年化波动')} ${fmtPct(st.ann_vol, 1)}` },
     { lb: mh('max_dd', '最大回撤'), vl: fmtPct(st.max_drawdown, 1),
       sb: `${mh('vol60', '当前 60日波动')} ${fmtPct(st.current_vol60, 1)}`, cls: 'bad' },
-    { lb: '拟合模型', vl: bm ? bm.name.slice(0, 8) : '—',
+    { lb: '拟合模型', vl: bm ? escapeHtml(bm.name.slice(0, 8)) : '—',
       sb: bm ? `${mh('oos_r2', '样本外R²')} ${fmtNum(bm.metrics.oos_r2, 3)}` : '', cls: 'good' },
     { lb: mh('oos_te', '跟踪误差'), vl: bm ? fmtPct(bm.metrics.oos_te, 1) : '—',
       sb: bm ? `${mh('win', '方向一致')} ${fmtPct(bm.metrics.win, 1)}` : '' },
@@ -1319,27 +1354,28 @@ function renderDrift() {
   const cls = d.stable ? 'info' : 'warn';
   const hd = d.stable ? '✓ 风格稳定（拟合权重层面）'
                       : '⚠ 风格漂移（拟合权重层面）';
+  const esc = escapeHtml;
   const cps = (d.change_points || []).slice(0, 3).map(c =>
-    `<li>${c['日期']}：${c['主要变动']}（L1 ${(+c['变化幅度']).toFixed(2)}，z=${c['z值']}）</li>`
+    `<li>${esc(c['日期'])}：${esc(c['主要变动'])}（L1 ${(+c['变化幅度']).toFixed(2)}，z=${esc(c['z值'])}）</li>`
   ).join('');
   const yrs = Object.keys(d.yearly_top || {}).map(y =>
-    `<li>${y}：` + (d.yearly_top[y] || []).map(t =>
-      `${t['名称']} ${(t['权重'] * 100).toFixed(1)}%`).join('、') + `</li>`
+    `<li>${esc(y)}：` + (d.yearly_top[y] || []).map(t =>
+      `${esc(t['名称'])} ${(t['权重'] * 100).toFixed(1)}%`).join('、') + `</li>`
   ).join('');
   const ht = d.half_top || {};
   const half = (ht['前半'] && ht['后半']) ? `
-    <div>前半（${ht['前半']['区间']}）：${(ht['前半']['主要持仓'] || [])
-      .map(t => `${t['名称']} ${(t['权重'] * 100).toFixed(1)}%`).join('、')}
-    <br/>后半（${ht['后半']['区间']}）：${(ht['后半']['主要持仓'] || [])
-      .map(t => `${t['名称']} ${(t['权重'] * 100).toFixed(1)}%`).join('、')}</div>` : '';
+    <div>前半（${esc(ht['前半']['区间'])}）：${(ht['前半']['主要持仓'] || [])
+      .map(t => `${esc(t['名称'])} ${(t['权重'] * 100).toFixed(1)}%`).join('、')}
+    <br/>后半（${esc(ht['后半']['区间'])}）：${(ht['后半']['主要持仓'] || [])
+      .map(t => `${esc(t['名称'])} ${(t['权重'] * 100).toFixed(1)}%`).join('、')}</div>` : '';
 
   el.innerHTML = `<div class="card ${cls}">
-    <div class="hd">${hd} · ${d.model_name || d.model || ''} · ${d.span || ''}</div>
-    <div class="bd">${d.verdict || ''}
+    <div class="hd">${hd} · ${esc(d.model_name || d.model || '')} · ${esc(d.span || '')}</div>
+    <div class="bd">${esc(d.verdict || '')}
       ${cps ? `<div style="margin-top:6px"><b>结构突变：</b><ul>${cps}</ul></div>` : ''}
       ${half}
       ${yrs ? `<details style="margin-top:6px"><summary>分年度主要持仓</summary><ul>${yrs}</ul></details>` : ''}
-      ${d.corr_note ? `<div style="margin-top:6px">${d.corr_note}</div>` : ''}
+      ${d.corr_note ? `<div style="margin-top:6px">${esc(d.corr_note)}</div>` : ''}
     </div></div>`;
 }
 
@@ -1350,7 +1386,7 @@ function renderModelStrip() {
   $('modelStrip').innerHTML = keys.map(k => {
     const m = r.models[k]; if (!m) return '';
     const err = m.metrics.oos_r2 === null;
-    return `<div class="mcard ${k === S.sel ? 'sel' : ''}" data-k="${k}" tabindex="0" role="button" aria-pressed="${k === S.sel}">
+    return `<div class="mcard ${k === S.sel ? 'sel' : ''}" data-k="${escapeHtml(k)}" tabindex="0" role="button" aria-pressed="${k === S.sel}">
       ${k === S.best ? '<span class="best">区间最优</span>' : ''}
       <div class="nm">${escapeHtml(m.name)}</div>
       <div class="r2" style="color:${err ? 'var(--bad)' : 'var(--fg)'}">
@@ -1400,7 +1436,7 @@ function renderRank() {
       const bLow = bt !== null && bt !== undefined && !isNaN(bt)
                    && (bt < eq * 0.7 || bt < 0);
       const r2col = noR2 ? 'var(--fg3)' : (neg ? 'var(--bad)' : 'var(--fg)');
-      return `<tr class="clickable ${k === S.sel ? 'sel' : ''}" data-k="${k}" tabindex="0" aria-selected="${k === S.sel}">
+      return `<tr class="clickable ${k === S.sel ? 'sel' : ''}" data-k="${escapeHtml(k)}" tabindex="0" aria-selected="${k === S.sel}">
         <td class="l">${escapeHtml(x['模型'])} ${k === S.best ? '<span class="tag">区间最优</span>' : ''}</td>
         <td class="l">${escapeHtml(x['流派'])}</td>
         <td class="l">${escapeHtml(x['可解释'])}</td>
@@ -1435,8 +1471,8 @@ function renderRank() {
   const gap = (best['样本外R²'] ?? 0) - (worst['样本外R²'] ?? 0);
   $('rankNote').innerHTML =
     `排名按<b>样本外 R²</b> 降序——即"用上一窗口拟合好的模型去预测下一段"的表现。
-     最佳：<b style="color:var(--fg)">${best['模型']}（${fmtNum(best['样本外R²'], 3)}）</b>，
-     最弱：${worst['模型']}（${fmtNum(worst['样本外R²'], 3)}），跨度 ${fmtNum(gap, 3)}。
+     最佳：<b style="color:var(--fg)">${escapeHtml(best['模型'])}（${fmtNum(best['样本外R²'], 3)}）</b>，
+     最弱：${escapeHtml(worst['模型'])}（${fmtNum(worst['样本外R²'], 3)}），跨度 ${fmtNum(gap, 3)}。
      注意"窗口内 R²"高只代表训练集拟合得好，
      <b>任何模型若训练/样本外差 &gt; 0.08，都说明它只是在背历史，不能用来外推</b>。`;
 }
@@ -1493,7 +1529,7 @@ function renderSelected() {
       cls: betaNeg || betaLow ? 'warn' : '' },
     { lb: mh('win', '方向一致率'), vl: fmtPct(m.metrics.win, 1), sb: '涨跌方向命中' },
     { lb: mh('n_weights', '有效权重数'), vl: m.metrics.n_weights,
-      sb: `更新于 ${m.weights_last_date || '—'}` },
+      sb: `更新于 ${escapeHtml(m.weights_last_date || '—')}` },
   ];
   $('selKpis').innerHTML = kpi.map(x => `
     <div class="kpi ${x.cls || ''}"><div class="lb">${x.lb}</div>
@@ -1630,7 +1666,7 @@ function renderTrendPanel() {
       <span class="tc-state" style="color:${st.color}">
         <i style="background:${st.color}"></i>${st.label}</span>
       <span class="tc-sub">合成基准 · 回看 ${N} 个交易日 ·
-        本组 ${at.win_start} ~ ${at.win_end}，前一组 ${at.prior_start} ~ ${at.prior_end}</span>
+        本组 ${escapeHtml(at.win_start)} ~ ${escapeHtml(at.win_end)}，前一组 ${escapeHtml(at.prior_start)} ~ ${escapeHtml(at.prior_end)}</span>
     </div>
     <div class="tc-grid">
       <div><i>本组高点</i><b>${at.hr.toFixed(4)}</b>
@@ -1837,19 +1873,20 @@ function renderTuner() {
   };
   $('tunerBody').innerHTML = Object.entries(spec.params).map(([pk, dflt]) => {
     const v = cur[pk];
+    const key = escapeHtml(pk);
     let inp;
     if (pk === 'hidden') {
-      inp = `<input type="text" data-pk="${pk}" value="${(v || []).join(',')}">`;
+      inp = `<input type="text" data-pk="${key}" value="${escapeHtml((v || []).join(','))}">`;
     } else if (typeof dflt === 'boolean') {
-      inp = `<input type="checkbox" data-pk="${pk}" ${v ? 'checked' : ''}>`;
+      inp = `<input type="checkbox" data-pk="${key}" ${v ? 'checked' : ''}>`;
     } else if (typeof dflt === 'number') {
       const step = dflt < 0.01 ? 0.01 : dflt < 1 ? 0.01 : 1;
-      inp = `<input type="number" data-pk="${pk}" value="${v}" step="${step}">`;
+      inp = `<input type="number" data-pk="${key}" value="${escapeHtml(v)}" step="${step}">`;
     } else {
-      inp = `<input type="text" data-pk="${pk}" value="${v}">`;
+      inp = `<input type="text" data-pk="${key}" value="${escapeHtml(v)}">`;
     }
-    return `<div class="pfield"><label>${pk}</label>${inp}
-      <span class="hint">默认 ${JSON.stringify(dflt)} · ${HINTS[pk] || ''}</span></div>`;
+    return `<div class="pfield"><label>${key}</label>${inp}
+      <span class="hint">默认 ${escapeHtml(JSON.stringify(dflt))} · ${escapeHtml(HINTS[pk] || '')}</span></div>`;
   }).join('');
 }
 
@@ -1998,7 +2035,7 @@ function drawMonthly(monthly, years) {
       textStyle: { color: '#e6edf6', fontSize: 12 },
       formatter: p => {
         const m = String(p.value[0] + 1).padStart(2, '0');
-        const head = `${yearsR[p.value[1]]}-${m}`;
+        const head = `${escapeHtml(yearsR[p.value[1]])}-${m}`;
         return p.value[2] === '-' ? `${head}<br/><b>无数据</b>`
           : `${head}<br/><b style="color:${colOf(p.value[2])}">${p.value[2]}%</b>`;
       } },
@@ -2028,7 +2065,7 @@ function renderCorr() {
       backgroundColor: '#1b2431', borderColor: '#2f3b4d', textStyle: { color: '#e6edf6', fontSize: 12 },
       formatter: p => {
         const r = top[p[0].dataIndex];
-        return `<b>${r.name}</b><br/>${r.layer}<br/>相关系数 ${fmtSign(r.corr, 4)}`;
+        return `<b>${escapeHtml(r.name)}</b><br/>${escapeHtml(r.layer)}<br/>相关系数 ${fmtSign(r.corr, 4)}`;
       } },
     xAxis: { type: 'value', min: -1, max: 1, ...AX },
     yAxis: { type: 'category', data: top.map(x => x.name), ...AX,
@@ -2047,7 +2084,7 @@ function renderCorr() {
     tooltip: { trigger: 'axis', backgroundColor: '#1b2431', borderColor: '#2f3b4d',
       textStyle: { color: '#e6edf6', fontSize: 12 },
       formatter: p => { const r = L[p[0].dataIndex];
-        return `<b>${r.layer}</b><br/>包含 ${r.n} 个指数<br/>平均相关 ${fmtSign(r.avg_corr, 3)}`; } },
+        return `<b>${escapeHtml(r.layer)}</b><br/>包含 ${r.n} 个指数<br/>平均相关 ${fmtSign(r.avg_corr, 3)}`; } },
     xAxis: { type: 'value', min: -1, max: 1, ...AX },
     yAxis: { type: 'category', data: L.map(x => x.layer), ...AX,
       axisLabel: { ...AX.axisLabel, fontSize: 10.5 } },
@@ -2065,7 +2102,7 @@ function renderCorr() {
   $('driftNote').innerHTML = (c.drift || []).map(d => {
     const big = Math.abs(d.delta || 0) > 0.10;
     return `<div class="card ${big ? 'warn' : 'info'}" style="margin-bottom:10px">
-      <div class="hd">${d.name} · 相关性 ${fmtSign(d.delta, 3)}</div>
+      <div class="hd">${escapeHtml(d.name)} · 相关性 ${fmtSign(d.delta, 3)}</div>
       <div class="bd">前段 ${fmtSign(d.early, 3)} → 后段 ${fmtSign(d.late, 3)}。
       ${big ? '<b>变化超过 0.10，风格发生实质漂移。</b>' : '变化在 0.10 以内，暴露相对稳定。'}
       </div></div>`;
@@ -2082,7 +2119,7 @@ function drawMatrix(mx) {
     grid: { left: 118, right: 18, top: 8, bottom: 92 },
     tooltip: { position: 'top', backgroundColor: '#1b2431', borderColor: '#2f3b4d',
       textStyle: { color: '#e6edf6', fontSize: 12 },
-      formatter: p => `${mx.rows[p.value[1]]} × ${mx.cols[p.value[0]]}<br/><b>${fmtSign(p.value[2], 3)}</b>` },
+      formatter: p => `${escapeHtml(mx.rows[p.value[1]])} × ${escapeHtml(mx.cols[p.value[0]])}<br/><b>${fmtSign(p.value[2], 3)}</b>` },
     xAxis: { type: 'category', data: mx.cols, ...AX,
       axisLabel: { ...AX.axisLabel, rotate: 52, fontSize: 9.5, interval: 0 } },
     yAxis: { type: 'category', data: mx.rows, ...AX,
@@ -2340,15 +2377,16 @@ function renderHoldings(h) {
   out.hidden = false;
   msg.textContent = '';
   const s = h.summary || {};
+  const cell = (...args) => escapeHtml(_cell(...args));
   $('holdSummary').innerHTML =
-    `<div class="kpi"><div class="lb">可用期数</div><div class="vl">${s.n_periods ?? 0}</div>` +
+    `<div class="kpi"><div class="lb">可用期数</div><div class="vl">${escapeHtml(s.n_periods ?? 0)}</div>` +
     `<div class="sb">半年报/年报</div></div>` +
-    `<div class="kpi"><div class="lb">平均绝对偏差</div><div class="vl">${_cell(s.mad_mean, true, 1)}</div>` +
+    `<div class="kpi"><div class="lb">平均绝对偏差</div><div class="vl">${cell(s.mad_mean, true, 1)}</div>` +
     `<div class="sb">RBSA − 真实行业权重</div></div>` +
-    `<div class="kpi"><div class="lb">权重相关</div><div class="vl">${_cell(s.corr_mean, false, 2)}</div>` +
-    `<div class="sb">${_cell(s.corr_first, false, 2)} → ${_cell(s.corr_last, false, 2)}</div></div>` +
-    `<div class="kpi"><div class="lb">行业覆盖率</div><div class="vl">${_cell(s.coverage_mean, true, 0)}</div>` +
-    `<div class="sb">未映射 ${_cell(s.unmapped_mean, true, 0)}（不是现金）</div></div>`;
+    `<div class="kpi"><div class="lb">权重相关</div><div class="vl">${cell(s.corr_mean, false, 2)}</div>` +
+    `<div class="sb">${cell(s.corr_first, false, 2)} → ${cell(s.corr_last, false, 2)}</div></div>` +
+    `<div class="kpi"><div class="lb">行业覆盖率</div><div class="vl">${cell(s.coverage_mean, true, 0)}</div>` +
+    `<div class="sb">未映射 ${cell(s.unmapped_mean, true, 0)}（不是现金）</div></div>`;
   const n = h.notes || {};
   const b = h.benchmark || {};
   const miss = b.missing_industries || [];
@@ -2541,7 +2579,7 @@ function renderBtKpis(p) {
     { lb: mh('calmar', 'Calmar'), vl: fmtNum(main['Calmar'], 2),
       sb: `${mh('timing_contrib', '择时贡献')} ${fmtSign(tc['Calmar'], 2)}` },
     { lb: mh('avg_pos', '平均仓位'), vl: fmtPct(avgPos, 0),
-      sb: `${mh('control', '对照')} ${ctrlName}` },
+      sb: `${mh('control', '对照')} ${escapeHtml(ctrlName)}` },
     { lb: mh('turnover', '年化换手'), vl: fmtNum(p.summary.turnover, 2),
       sb: '单边换手倍数' },
     { lb: mh('rank_ic', 'RankIC'), vl: fmtNum(p.summary.ic, 3),
@@ -2567,7 +2605,7 @@ function renderBtMetrics(p) {
     p.metrics.map(x => {
       const main = x['方案'] && x['方案'].includes('健康');
       return `<tr ${main ? 'class="sel"' : ''}>
-        <td class="l">${x['方案']}</td>
+        <td class="l">${escapeHtml(x['方案'])}</td>
         <td style="color:${colOf(x['年化收益'])}">${fmtPctSign(x['年化收益'], 1)}</td>
         <td>${fmtPct(x['年化波动'], 1)}</td>
         <td>${fmtNum(x['夏普'], 2)}</td>
@@ -2606,11 +2644,11 @@ function renderBtTrades(p) {
     body = p.trades.map(t => {
       const buy = t.action === '买入';
       return `<tr>
-        <td class="l">${t.date}</td>
-        <td class="l">${t.exec_date}</td>
+        <td class="l">${escapeHtml(t.date)}</td>
+        <td class="l">${escapeHtml(t.exec_date)}</td>
         <td style="color:${buy ? UP : DOWN};font-weight:600">${buy ? '买入 ▲' : '卖出 ▼'}</td>
         <td>${fmtNum(t.health, 2)}</td>
-        <td class="l" style="color:var(--fg2)">${t.reason || '—'}</td>
+        <td class="l" style="color:var(--fg2)">${escapeHtml(t.reason || '—')}</td>
       </tr>`;
     }).join('');
   }

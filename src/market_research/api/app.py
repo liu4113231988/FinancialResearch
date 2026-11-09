@@ -55,17 +55,27 @@ class BodyLimit:
 
 
 class VersionHeader:
-    """给所有 HTTP 响应标记协议版本，便于调用方判断契约（P3-H）。"""
+    """标记协议版本；兼容 /api 路径显式提示弃用与 v1 后继地址（P3-H）。"""
     def __init__(self,app):
         self.app=app
 
     async def __call__(self,scope,receive,send):
         if scope['type']!='http':
             return await self.app(scope,receive,send)
+        path=scope.get('path','')
+        legacy=(path.startswith(API_PREFIX + '/')
+                and not path.startswith(VERSIONED_PREFIX + '/'))
+        successor=VERSIONED_PREFIX + path[len(API_PREFIX):]
         async def wrapped(message):
             if message['type']=='http.response.start':
                 headers=list(message.get('headers') or [])
                 headers.append((b'x-api-version',API_VERSION.encode('ascii')))
+                if legacy:
+                    headers.append((b'deprecation',b'true'))
+                    headers.append((b'link',f'<{successor}>; rel="successor-version"'.encode('ascii')))
+                    sunset=os.environ.get('FIL_API_SUNSET','').strip()
+                    if sunset:
+                        headers.append((b'sunset',sunset.encode('ascii','ignore')))
                 message={**message,'headers':headers}
             await send(message)
         await self.app(scope,receive,wrapped)
@@ -97,8 +107,9 @@ class IconCache:
 
 @asynccontextmanager
 async def lifespan(app):
+    settings=Settings.load().validate()
     JOBS.migrate()
-    if Settings.load().auto_services:
+    if settings.auto_services:
         # The independent singleton supervisor survives API restart. Every
         # analysis has its own process; duplicate supervisors exit on file lock.
         launch('market_research.tasks.worker',log_name='worker-process.log')

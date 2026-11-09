@@ -3,7 +3,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -82,6 +82,24 @@ class MigrateCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(result['group_by'], 'source')
         self.assertIn('overall', result)
+
+    def test_feature_bucket_groups_are_accepted_by_cli(self):
+        for field in ('vol_bucket', 'trend_bucket'):
+            code, result = self._run(['summary', '--group-by', field])
+            self.assertEqual(code, 0)
+            self.assertEqual(result['group_by'], field)
+            self.assertIn('groups', result)
+        self.assertIn('vol_bucket', ledger.GROUP_FIELDS)
+        self.assertIn('trend_bucket', ledger.GROUP_FIELDS)
+
+    def test_unknown_group_is_rejected(self):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                commands.main(['summary', '--group-by', 'unknown_bucket'],
+                              prog='predictions')
+        self.assertEqual(error.exception.code, 2)
+        with self.assertRaisesRegex(ValueError, 'group_by'):
+            ledger.summary(group_by='unknown_bucket')
 
 
 if __name__ == '__main__':

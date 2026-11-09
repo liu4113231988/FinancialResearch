@@ -239,6 +239,44 @@ def load_index_universe(start: Optional[str] = None,
     return df
 
 
+def _offline_cum_window(fund_code: str):
+    """只读结算：按前缀找 meta.basis=cum 且范围最宽的窗口缓存。
+
+    累计净值没有 canonical 正史，窗口缓存名又绑定分析起点；离线结算的
+    start 与落库时几乎不可能相同。严格按 meta.basis 匹配并排除 total，
+    只做 storage 读，绝不调用抓取函数，也不会混入 total 净值。
+    """
+    import market_research.tasks.sync as sync
+    prefix = f"fund_nav_{fund_code}_"
+    best_key, best_series = None, None
+    try:
+        candidates = sync.datasets()
+    except Exception:                                      # noqa: BLE001
+        return None
+    for name, meta, _columns in candidates:
+        if (not name.startswith(prefix)
+                or name.endswith(f"_{NAV_BASIS_TOTAL}")
+                or not isinstance(meta, dict)
+                or meta.get("basis") != NAV_BASIS_CUM
+                or meta.get("code") not in (None, fund_code)):
+            continue
+        try:
+            frame = storage.read(name)
+        except Exception:                                  # noqa: BLE001
+            continue
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            continue
+        try:
+            axis = pd.DatetimeIndex(frame.index)
+            span = int((axis.max() - axis.min()).days)
+        except (TypeError, ValueError):
+            span = -1
+        key = (span, len(frame), name)
+        if best_key is None or key > best_key:
+            best_key, best_series = key, frame.iloc[:, 0]
+    return best_series
+
+
 def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
                          refresh: bool = False,
                          basis: str = NAV_BASIS_TOTAL,
@@ -266,6 +304,12 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
             result = history.iloc[:, 0].copy()
             result.name = f"fund_{fund_code}"
             return _nav_basis_attrs(result, basis)
+        if not allow_fetch and basis == NAV_BASIS_CUM:
+            window = _offline_cum_window(fund_code)
+            if window is not None:
+                result = window.copy()
+                result.name = f"fund_{fund_code}"
+                return _nav_basis_attrs(result, basis)
     if refresh and sync.has_history("fund", fund_code, basis):
         # 分红、拆分与数据修订会影响完整净值历史，不能用部分窗口拼接正史。
         asset = {"asset_key": f"fund:{fund_code}:{basis}", "kind": "fund",

@@ -179,7 +179,7 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   assert.match(market, /el\('marketEnd'\)\.max = today/);
   assert.match(html, /id="btnRetryCatalog"/);
   // G-08：持仓拟合与分析/回测共用互斥状态，活动任务期间不得递增代次或发请求。
-  assert.match(source, /'btRun', 'holdRun'/);
+  assert.match(source, /'btRun', 'holdRun', 'presetSel', 'watchSel'/);
   assert.match(source, /if \(token === fundGeneration\) \{\s*activeJob = null;\s*setFundBusy\(false\)/);
   const holdCalls = [], holdAlerts = [];
   const holdContext = {
@@ -222,6 +222,112 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   raceContext.activeJob = 'new-job';
   releaseOldPoll(); await oldRun;
   assert.equal(raceContext.activeJob, 'new-job');
+
+  // POST 尚未返回时取消：拿到 job_id 后必须补发 cancel，且不得应用结果。
+  let resolveAnalyze;
+  const submitCalls = [], submitAlerts = [], submitNodes = new Map();
+  const submitContext = {
+    S: {params: {}, result: null}, selectedModels: () => ['ridge'],
+    selectedFundWindow: () => ({start: '2020-01-01', end: '2024-12-31'}),
+    selectedRebal: () => 12, selectedAuto: () => true,
+    checkName() {}, saveLastRun() {}, setProgress() {}, setFundBusy() {},
+    applyResult() {throw new Error('取消后不得应用结果');},
+    showAlert(message) {submitAlerts.push(message);},
+    $: id => {
+      if (!submitNodes.has(id)) submitNodes.set(id,
+        {hidden: false, value: '', setAttribute() {}, style: {}});
+      return submitNodes.get(id);
+    },
+    api: (url) => {
+      submitCalls.push(url);
+      if (url === '/api/analyze')
+        return new Promise(resolve => {resolveAnalyze = resolve;});
+      return Promise.resolve({});
+    },
+  };
+  vm.createContext(submitContext);
+  vm.runInContext(source.slice(source.indexOf('let fundGeneration'),
+                               source.indexOf('function setProgress')), submitContext);
+  vm.runInContext(source.slice(source.indexOf('async function cancelActiveJob'),
+                               source.indexOf('function applyResult(')), submitContext);
+  const submitting = submitContext.run('110022');
+  await new Promise(setImmediate);
+  await submitContext.cancelActiveJob();
+  resolveAnalyze({job_id: 'late-job'});
+  await new Promise(setImmediate); await new Promise(setImmediate);
+  await submitting;
+  assert.ok(submitCalls.includes('/api/job/late-job/cancel'));
+  assert.ok(submitAlerts.some(m => typeof m === 'string' && m.includes('自动取消')));
+
+  // 相关性窗口必须钳制到 [30,500]，非法值回退 120。
+  const clampUrls = [], clampNodes = new Map();
+  const clampTarget = {meta: {start: '2020-01-01', end: '2024-12-31'}};
+  const clampContext = {
+    S: {result: clampTarget, rollWin: 60}, URLSearchParams,
+    applyCorrelation() {}, renderCorr() {}, showAlert() {},
+    $: id => {
+      if (!clampNodes.has(id)) clampNodes.set(id, {value: ''});
+      return clampNodes.get(id);
+    },
+    api: async url => {clampUrls.push(url); return {correlation: {}};},
+  };
+  vm.createContext(clampContext);
+  vm.runInContext(source.slice(source.indexOf('let fundGeneration'),
+                               source.indexOf('function setProgress')), clampContext);
+  await clampContext.updateCorrelation(1);
+  await clampContext.updateCorrelation(9999);
+  await clampContext.updateCorrelation(NaN);
+  const wins = clampUrls.map(url => new URLSearchParams(url.split('?')[1]).get('win'));
+  assert.deepEqual(wins, ['30', '500', '120']);
+
+  // 相关性轮询：独立槽位，且单次查询抖动通过有限退避恢复。
+  const retryCalls = [], retryAlerts = [];
+  const retryTarget = {meta: {}, correlation: null};
+  const queue = [
+    () => Promise.reject(new Error('temporary')),
+    () => Promise.resolve({status: 'done'}),
+    () => Promise.resolve({result: {correlation: {ok: true}}}),
+  ];
+  const retryContext = {
+    S: {result: retryTarget, rollWin: 60}, renderCorr() {},
+    showAlert(message) {retryAlerts.push(message);},
+    setTimeout: fn => fn(),
+    api: url => {
+      retryCalls.push(url);
+      const next = queue.shift();
+      if (!next) throw new Error('unexpected api call: ' + url);
+      return next();
+    },
+  };
+  vm.createContext(retryContext);
+  vm.runInContext(source.slice(source.indexOf('let fundGeneration'),
+                               source.indexOf('function setProgress')), retryContext);
+  vm.runInContext(source.slice(source.indexOf('async function poll(jid'),
+                               source.indexOf('function applyResult(')), retryContext);
+  vm.runInContext('activeJob = "analysis-job"; correlationJob = null; correlationGeneration = 0;',
+                  retryContext);
+  await retryContext.pollCorrelation('corr-job', 120, retryTarget, 0);
+  assert.equal(retryCalls.filter(url => url.startsWith('/api/job/')).length, 2);
+  assert.equal(retryContext.S.result.correlation.ok, true);
+  assert.equal(vm.runInContext('activeJob', retryContext), 'analysis-job');
+  assert.equal(vm.runInContext('correlationJob', retryContext), null);
+  assert.equal(retryAlerts[retryAlerts.length - 1], null);
+
+  // 外部文本进入 innerHTML/ECharts formatter 前必须转义。
+  assert.match(source, /escapeHtml\(m\.title \|\| el\.textContent\.trim\(\)\)/);
+  assert.match(source, /data-k="\$\{escapeHtml\(m\.key\)\}"> \$\{escapeHtml\(m\.name\)\}/);
+  assert.match(source, /const key = escapeHtml\(pk\)/);
+  assert.match(source, /escapeHtml\(HINTS\[pk\] \|\| ''\)/);
+  assert.match(source, /escapeHtml\(r\.name\)/);
+  assert.match(source, /escapeHtml\(r\.layer\)/);
+  assert.match(source, /escapeHtml\(d\.name\)/);
+  assert.match(source, /escapeHtml\(bm\.name\.slice/);
+  assert.match(source, /data-k="\$\{escapeHtml\(k\)\}"/);
+  assert.match(source, /escapeHtml\(mx\.rows\[p\.value\[1\]\]\)/);
+  assert.match(source, /escapeHtml\(x\['方案'\]\)/);
+  assert.match(source, /escapeHtml\(t\.date\)/);
+  assert.match(source, /escapeHtml\(t\.reason \|\| '—'\)/);
+
   console.log('Cancel button wired, polling capped and backoff applied: OK');
   console.log('Correlation window, response ordering, replaced fund and stale polling: OK');
   console.log('Backtest stale error and late result fencing: OK');

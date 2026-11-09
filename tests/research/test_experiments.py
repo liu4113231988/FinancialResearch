@@ -39,5 +39,14 @@ class ICIRBlockTest(unittest.TestCase):
         self.assertTrue(np.isnan(row["ICIR"]))
 
 
+class SelectionConsoleEncodingTest(unittest.TestCase):
+    def test_skipped_fold_warning_uses_logger(self):
+        from market_research.config import ROOT
+        source = (ROOT / "src/market_research/research/commands/selection.py"
+                  ).read_text(encoding="utf-8")
+        self.assertNotIn('print(f"  ⚠ {msg}")', source)
+        self.assertIn('LOG.warning("跳过折：%s", msg)', source)
+
+
 if __name__ == "__main__":
     unittest.main()

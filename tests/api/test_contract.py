@@ -1,4 +1,6 @@
 """P3-H：对外 API 有版本路径、版本头与关键响应契约。"""
+import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -6,7 +8,7 @@ from fastapi.testclient import TestClient
 
 import market_research.services.analysis as services
 from market_research.api.app import app
-from market_research.api.version import API_VERSION
+from market_research.api.version import API_VERSION, VERSIONED_PREFIX
 
 
 class ApiVersionTests(unittest.TestCase):
@@ -77,6 +79,36 @@ class ApiVersionTests(unittest.TestCase):
             response = self.client.get('/api/v1/ready')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['api_version'], API_VERSION)
+
+    def test_legacy_path_marks_deprecation_and_successor(self):
+        env = {'FIL_API_SUNSET': 'Wed, 31 Dec 2026 23:59:59 GMT'}
+        with patch.dict(os.environ, env, clear=False):
+            legacy = self.client.get('/api/health')
+            versioned = self.client.get(VERSIONED_PREFIX + '/health')
+        self.assertEqual(legacy.headers['deprecation'], 'true')
+        self.assertIn(VERSIONED_PREFIX + '/health', legacy.headers['link'])
+        self.assertEqual(legacy.headers['sunset'], env['FIL_API_SUNSET'])
+        self.assertNotIn('deprecation', versioned.headers)
+
+    def test_config_view_is_sanitized(self):
+        env = {'FIL_API_TOKENS': 'secret-token', 'FIL_MAX_JOBS': '4'}
+        with patch.dict(os.environ, env, clear=False):
+            response = self.client.get('/api/v1/config')
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body['limits']['max_jobs'], 4)
+        self.assertIn('environment', body)
+        self.assertNotIn('secret-token', json.dumps(body, ensure_ascii=False))
+        self.assertNotIn('FIL_API_TOKENS', json.dumps(body, ensure_ascii=False))
+
+    def test_invalid_runtime_settings_are_rejected(self):
+        from market_research.settings import Settings
+        with patch.dict(os.environ, {'FIL_PORT': '70000'}, clear=False):
+            with self.assertRaisesRegex(ValueError, 'FIL_PORT'):
+                Settings.load()
+        with patch.dict(os.environ, {'FIL_MAX_JOBS': '0'}, clear=False):
+            with self.assertRaisesRegex(ValueError, 'max_jobs'):
+                Settings.load()
 
 
 if __name__ == '__main__':
