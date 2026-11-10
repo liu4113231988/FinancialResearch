@@ -2,14 +2,14 @@
   "schema_version": 1,
   "name": "future-unused-sample-and-real-trade-validation",
   "registered_at": "2026-11-10",
-  "status": "registered_not_executed",
   "holdout_start": "2026-11-11",
   "holdout_end": "2027-05-10",
   "evaluation_date": "2027-05-11",
+  "execution_ledger": "docs/future-validation-execution.json",
   "pre_registration": {
     "declared_untouched": true,
     "freeze_date": "2026-11-10",
-    "protocol_sha256": null,
+    "protocol_sha256": "0e2a5ca609bc0212cb7801625195a73bd0358d04c03db1bb2fe3d4fde16318bf",
     "evidence": [
       "本计划及固定规则在留出期开始前登记",
       "评估前需提交原始输入内容指纹、代码指纹和运行环境",
@@ -24,74 +24,62 @@
     {
       "id": "future_sample_pool",
       "title": "扩展代表性样本池并验证未来未使用区间",
-      "status": "scheduled_future_samples",
       "external_data_required": true,
       "completion_criteria": [
         "登记样本池、纳入/剔除规则和资产类别",
         "使用 2026-11-11 起未参与建模或调参的未来行情",
         "按预注册固定候选和阈值一次性评估，报告覆盖缺口与全部策略不确定性"
-      ],
-      "evidence": []
+      ]
     },
     {
       "id": "real_trade_execution",
       "title": "成交实证：公司行动、停牌/涨跌停、税费、实际 ETF、开盘容量及完整策略不确定性",
-      "status": "blocked_external_data",
       "external_data_required": true,
       "completion_criteria": [
         "提供历史时点公司行动、停牌/涨跌停、交易日历与可成交量",
         "使用实际可交易 ETF、逐笔或次日开盘成交、完整税费/费用明细",
         "报告零成交、拒单、容量、滑点和策略参数/路径不确定性"
-      ],
-      "evidence": []
+      ]
     },
     {
       "id": "relative_industry_history",
       "title": "个股相对行业、行业相对宽基；完整历史行业归属与指数成分版本",
-      "status": "blocked_external_data",
       "external_data_required": true,
       "completion_criteria": [
         "每个历史时点使用当时有效的行业归属与指数成分",
         "相对强弱特征不得使用未来成分或事后分类",
         "披露成分版本日期、可得日期和幸存者偏差检查"
-      ],
-      "evidence": []
+      ]
     },
     {
       "id": "market_breadth_history",
       "title": "指数市场宽度（MA20/60 以上比例、涨跌家数、新高新低）",
-      "status": "blocked_external_data",
       "external_data_required": true,
       "completion_criteria": [
         "每个历史日期使用当时的指数成分清单",
         "成分变更、停牌与缺失行情有明确处理规则",
         "对比仅使用事后成分的基准，量化幸存者偏差"
-      ],
-      "evidence": []
+      ]
     },
     {
       "id": "fundamental_point_in_time",
       "title": "财报、公告、分红、估值历史分位及报告期/公告时间/可得时间",
-      "status": "blocked_external_data",
       "external_data_required": true,
       "completion_criteria": [
         "每个字段保存报告期、公告时间、数据供应商可得时间",
         "历史分位只使用当时已公开且有可得时间戳的数据",
         "重述与修订单独留痕，不允许回填覆盖历史输入"
-      ],
-      "evidence": []
+      ]
     },
     {
       "id": "future_calibration_and_etf",
       "title": "未来区间概率校准有效性及实际 ETF 费用、成交与跟踪偏差",
-      "status": "scheduled_future_samples",
       "external_data_required": true,
       "completion_criteria": [
         "校准参数在 2026-11-11 前冻结，未来区间不做二次选择",
         "报告校准前后 Brier、可靠性曲线和完整区间不确定性",
         "实际 ETF 记录成交价、费用、未成交、跟踪偏差与可交易容量"
-      ],
-      "evidence": []
+      ]
     }
   ],
   "real_trades_schema": {

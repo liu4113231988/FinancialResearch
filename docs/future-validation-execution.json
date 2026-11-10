@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "plan": "docs/future-validation-plan.json",
+  "protocol_sha256": "0e2a5ca609bc0212cb7801625195a73bd0358d04c03db1bb2fe3d4fde16318bf",
+  "freeze_evidence": "docs/future-validation-freeze-evidence.json",
+  "freeze_evidence_sha256": "31491fbb2983727f96f3063bdbd88275649d89e5df3e6f1e1a8119aa71d2d149",
+  "status": "registered_not_executed",
+  "updated_at": "2026-11-10",
+  "note": "六项验证的执行状态与证据台账。协议文件冻结后不得修改；本文件随执行增长，补证据或改状态不改变协议指纹。freeze_evidence 绑定冻结日的代码/运行环境快照（不可变）；items[].evidence 用于评估前追加真实输入内容指纹。条目 id 须与协议六项一一对应，标记 complete 必须同时给出 evidence。",
+  "items": [
+    {
+      "id": "future_sample_pool",
+      "status": "scheduled_future_samples",
+      "evidence": []
+    },
+    {
+      "id": "real_trade_execution",
+      "status": "blocked_external_data",
+      "evidence": []
+    },
+    {
+      "id": "relative_industry_history",
+      "status": "blocked_external_data",
+      "evidence": []
+    },
+    {
+      "id": "market_breadth_history",
+      "status": "blocked_external_data",
+      "evidence": []
+    },
+    {
+      "id": "fundamental_point_in_time",
+      "status": "blocked_external_data",
+      "evidence": []
+    },
+    {
+      "id": "future_calibration_and_etf",
+      "status": "scheduled_future_samples",
+      "evidence": []
+    }
+  ]
+}

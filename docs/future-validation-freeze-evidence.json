@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "name": "future-validation-freeze-evidence",
+  "freeze_date": "2026-11-10",
+  "generated_at": "2026-11-10T13:23:09+00:00",
+  "plan": "docs/future-validation-plan.json",
+  "protocol_sha256": "0e2a5ca609bc0212cb7801625195a73bd0358d04c03db1bb2fe3d4fde16318bf",
+  "code": {
+    "git_commit": "054d0c82a4131f81da862ea6dce25fe82d8265c6",
+    "git_dirty": true,
+    "dirty_files": [
+      " M TODO.md",
+      " M docs/future-validation-plan.json",
+      " M \"docs/\\350\\202\\241\\347\\245\\250\\346\\214\\207\\346\\225\\260\\351\\252\\214\\350\\257\\201\\346\\265\\201\\347\\250\\213.md\"",
+      " M scripts/validate_real_trades.py",
+      " M src/market_research/research/future_validation.py",
+      " M tests/research/test_future_validation.py",
+      "?? docs/future-validation-execution.json",
+      "?? scripts/freeze_future_validation_evidence.py"
+    ],
+    "dirty_note": "冻结日证据固化时工作区存在未提交改动；source_sha256 是当时工作区文件的内容快照，提交后只要内容不变，指纹仍然有效。",
+    "source_sha256": {
+      "src/market_research/config.py": "3b74e5c2eabe1eaf751c86175de4c7a1343f9c939f47e05b84cf689d15e63318",
+      "src/market_research/research/future_validation.py": "7fbe76285224b93ff88df7e95089378fa778f55a54255eb7c39ff7f27abbf24a",
+      "src/market_research/research/market_validation.py": "6513f7dda07e68469e4c81063c147a45069cc593c2d07a16ff042c8a25db98f5",
+      "src/market_research/research/market_snapshot.py": "dcc94c542fb99c8813b7d2e42801dcf767e08e5d91b9097255e8b7a67291838f",
+      "src/market_research/research/runinfo.py": "c9c3aae97081a657d6f10922dfb2a1c864d50d98e68cca83b71efdbcdcd8baf4",
+      "src/market_research/research/calibration.py": "c3ac0a9dacdc294d05f331528fb33a7f69c5dee7d9d335a8184746acfc0a4d7e",
+      "src/market_research/market/technical.py": "045e89a2d6a529e481948973edb0da64eb839a2ca34fe53aa02b8cca1252dedb",
+      "src/market_research/market/context.py": "2c0c808fce95af2639051ac7f371da92ee88e0416a2ca770c3b69c97c3afc92a",
+      "src/market_research/market/execution.py": "94c5b47b47a2c46bbb8fbf12828852f7715bc402487a08a3541ebe36a42cfdb4",
+      "src/market_research/market/capital.py": "18f3a787bbb54df5e65658b4a5f62cbe5fe5b1af6b1ed6e38131fd4ef2f2edf3",
+      "src/market_research/market/uncertainty.py": "40c324202c5cc570cd3dea67ef0654b5c89d8c875097b5a3e35f999f2475b172",
+      "src/market_research/market/targets.py": "26a269bf69da3556c425eb4de94213fa05e8bf2994e8d213641dac31fb1431ac",
+      "scripts/validate_real_trades.py": "fd77fc1fa8a8616302445ff9db83a998e7f5f75ad4d6322d8688337d0e7d531b",
+      "scripts/freeze_future_validation_evidence.py": "0966effe8027d47a65ae483a5441f2e441c2e0709691fdccb0ae7370aea5aff3"
+    },
+    "source_scope": "研究结果相关计算模块、配置、预注册校验、成交诊断入口与冻结证据生成脚本；非全仓逐文件审计。"
+  },
+  "runtime": {
+    "python": "3.13.14",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "libs": {
+      "numpy": "2.4.4",
+      "pandas": "3.0.6",
+      "scipy": "1.18.1",
+      "sklearn": "1.9.1",
+      "matplotlib": "3.11.2",
+      "duckdb": "1.5.6"
+    },
+    "config_hash": "dbfd2431639d4c01",
+    "seeds": {
+      "bootstrap": 20261011,
+      "sklearn_random_state": 0
+    },
+    "lock_files_sha256": {
+      "requirements.txt": "7eabd0aca2b4b5f2ef9b9097d253f98c3e7a3833a7eea1a112cffb27aa361418",
+      "requirements.lock.txt": "3f1eb2203f86647e6f5adc984013274d3c38c597a540b3dd05ef48692262846a",
+      "uv.lock": "f1b2b4c3090067d085df7def67568793fb7419a7309a4e3eec0c47370b3871f9"
+    }
+  },
+  "inputs": {
+    "status": "no_future_inputs_at_freeze",
+    "declared_no_future_data": true,
+    "note": "留出期 2026-11-11 才开始，冻结日不存在未来行情、历史时点成分、公司行动或真实成交记录。评估前须按本文件 real_trades_schema 采集真实输入，把逐文件内容指纹与可复现命令追加到执行台账 items[].evidence，不得回填本文件，也不得用合成数据冒充原始输入。",
+    "fixed_inputs_sha256": {
+      "docs/future-validation-plan.json": "58b420e4cf4956f76669cf1eb2eacb3e783a5f04d9fd21b7fe8915a8417c747e",
+      "docs/market-validation-plan.json": "c2df0ca1780d245648fe1ebf5d4cb41316a852472e4def2824662feadec0996b",
+      "docs/market-calibration-plan.json": "892bd4cd0f0a0c6fe60218c586336140e1071e3e1c59ac781f5c98b672f0d389",
+      "docs/capital-validation-plan.json": "1eb10438c87565fa95a847760fbc201f194f5885068c730d8df647d7c649f92e",
+      "docs/capital-model-validation-plan.json": "8965d60059249c80715c39387048cf5e5c7637dc2907e231d218ed52a0fea2d1",
+      "tests/fixtures/providers/contracts.json": "00c4942492d9076197d747bc83af9911a19cef3928edd8c228dad32b66173dc7"
+    },
+    "real_trades_schema": {
+      "required_columns": [
+        "signal_date",
+        "available_at",
+        "execution_date",
+        "symbol",
+        "side",
+        "quantity",
+        "price",
+        "benchmark_price",
+        "fee",
+        "tax",
+        "slippage"
+      ],
+      "side_values": [
+        "buy",
+        "sell"
+      ],
+      "time_rule": "available_at <= signal_date <= execution_date",
+      "cost_rule": "price/quantity/benchmark_price > 0；fee/tax/slippage >= 0；slippage 为每笔总成本",
+      "output": "FIFO 已实现盈亏、成本、滑点与未来信息泄漏检查；未平仓头寸不按市值计价"
+    },
+    "real_trades_schema_sha256": "80aa5fb7c28dd6e983f33b011a598dba739433b75da2e4e7e768072e7da439a2",
+    "collection_rule": "逐文件记录 data_sha256/csv_sha256、采集时间、可得时间与来源；未取得的字段保留缺口，不推断为可交易。"
+  },
+  "data_authorization": {
+    "status": "review_required",
+    "raw_data_included": false,
+    "notice": "仅记录脱敏指纹与文件哈希；不采集、不提交、不再分发原始行情或成交记录。逐源数据授权与再分发范围仍待法务结论。"
+  },
+  "limitations": [
+    "本文件是冻结日快照，不是六项验证的结果或有效性证据。",
+    "程序化登记不能独立证明作者未查看过历史数据。",
+    "output/ 被 .gitignore 整体忽略，其快照 manifest/receipt 不作为本证据的唯一依据。"
+  ],
+  "evidence_sha256": "31491fbb2983727f96f3063bdbd88275649d89e5df3e6f1e1a8119aa71d2d149"
+}

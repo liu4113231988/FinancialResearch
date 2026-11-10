@@ -35,14 +35,39 @@ def _day(value: Any, field: str) -> date:
         raise ValueError(f"{field} 需为 YYYY-MM-DD") from error
 
 
-def _plan_hash(plan: dict) -> str:
-    encoded = json.dumps(plan, ensure_ascii=False, sort_keys=True,
+PROTOCOL_HASH_FIELD = "protocol_sha256"
+EVIDENCE_HASH_FIELD = "evidence_sha256"
+
+
+def _without_hash_field(value: Any, field: str) -> Any:
+    """递归剔除指纹字段，使指纹回填到文件后不会改变自身。"""
+    if isinstance(value, dict):
+        return {key: _without_hash_field(item, field)
+                for key, item in value.items() if key != field}
+    if isinstance(value, list):
+        return [_without_hash_field(item, field) for item in value]
+    return value
+
+
+def _digest(payload: Any, excluded_field: str) -> str:
+    encoded = json.dumps(_without_hash_field(payload, excluded_field),
+                         ensure_ascii=False, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _plan_hash(plan: dict) -> str:
+    """冻结协议的指纹；指纹字段本身不参与计算，避免自引用。"""
+    return _digest(plan, PROTOCOL_HASH_FIELD)
+
+
+def evidence_hash(evidence: dict) -> str:
+    """冻结日证据的指纹；排除自身字段以便回填。"""
+    return _digest(evidence, EVIDENCE_HASH_FIELD)
+
+
 def validate_plan(plan: dict, as_of: str | date | None = None) -> dict:
-    """校验六项未来验证预注册，返回当前时间点的真实状态。"""
+    """校验冻结协议；执行状态与证据不在协议里，见 validate_execution。"""
     if not isinstance(plan, dict) or plan.get("schema_version") != 1:
         raise ValueError("未来验证计划需为 schema_version=1 的对象")
     registered = _day(plan.get("registered_at"), "registered_at")
@@ -56,41 +81,124 @@ def validate_plan(plan: dict, as_of: str | date | None = None) -> dict:
                          "< holdout_end < evaluation_date")
     if pre.get("declared_untouched") is not True or not pre.get("evidence"):
         raise ValueError("预注册必须声明预留区间未触碰且提供证据清单")
+    if "status" in plan:
+        raise ValueError("协议文件不得含执行状态，状态写入执行台账")
+    if not plan.get("execution_ledger"):
+        raise ValueError("协议需指定执行台账路径 execution_ledger")
     items = plan.get("items")
     if not isinstance(items, list) or len(items) != 6:
         raise ValueError("必须预注册六项待验证条目")
     ids = [item.get("id") for item in items if isinstance(item, dict)]
     if len(set(ids)) != 6 or any(not value for value in ids):
         raise ValueError("六项条目需有唯一 id")
-    today = _day(as_of, "as_of") if as_of is not None else date.today()
     for item in items:
         if not item.get("title") or not item.get("completion_criteria"):
             raise ValueError(f"{item['id']} 缺少标题或完成标准")
-        if item.get("status") == "complete" and not item.get("evidence"):
-            raise ValueError(f"{item['id']} 不得无证据标记完成")
-    pending = sum(item.get("status") != "complete" for item in items)
+        if "status" in item or "evidence" in item:
+            raise ValueError(f"{item['id']} 含执行状态，协议文件必须保持冻结")
+    today = _day(as_of, "as_of") if as_of is not None else date.today()
     if today < start:
-        status = "scheduled"
+        phase = "scheduled"
     elif today <= end:
-        status = "collecting_future_samples"
+        phase = "collecting_future_samples"
     elif today < evaluation:
-        status = "waiting_evaluation"
-    elif pending:
-        status = "overdue_incomplete"
+        phase = "waiting_evaluation"
     else:
-        status = "ready_for_review"
-    return {"status": status, "as_of": today.isoformat(),
+        phase = "evaluation_due"
+    return {"phase": phase, "as_of": today.isoformat(),
             "registered_at": registered.isoformat(),
             "holdout_start": start.isoformat(),
             "holdout_end": end.isoformat(),
             "evaluation_date": evaluation.isoformat(),
-            "items_registered": len(items), "items_pending": pending,
+            "items_registered": len(items),
             "protocol_sha256": _plan_hash(plan),
             "limitations": pre.get("limitations") or []}
 
 
+def validate_execution(plan: dict, execution: dict,
+                       as_of: str | date | None = None) -> dict:
+    """把冻结协议与执行台账合起来，返回当前时间点的真实状态。"""
+    protocol = validate_plan(plan, as_of=as_of)
+    if not isinstance(execution, dict) or execution.get("schema_version") != 1:
+        raise ValueError("执行台账需为 schema_version=1 的对象")
+    if execution.get("protocol_sha256") != protocol["protocol_sha256"]:
+        raise ValueError("执行台账绑定的协议指纹不匹配，协议可能在冻结后被修改")
+    ledger_items = execution.get("items")
+    if not isinstance(ledger_items, list):
+        raise ValueError("执行台账缺少 items")
+    plan_ids = {item["id"] for item in plan["items"]}
+    ledger_ids = [item.get("id") for item in ledger_items
+                  if isinstance(item, dict)]
+    if len(ledger_ids) != len(plan_ids) or set(ledger_ids) != plan_ids:
+        raise ValueError("执行台账条目需与协议六项一一对应")
+    pending = 0
+    for item in ledger_items:
+        if not isinstance(item.get("status"), str) or not item["status"]:
+            raise ValueError(f"{item['id']} 缺少执行状态")
+        if item["status"] == "complete":
+            if not item.get("evidence"):
+                raise ValueError(f"{item['id']} 不得无证据标记完成")
+        else:
+            pending += 1
+    phase = protocol["phase"]
+    status = ("overdue_incomplete" if pending else "ready_for_review") \
+        if phase == "evaluation_due" else phase
+    return {**protocol, "status": status, "items_pending": pending,
+            "execution_status": execution.get("status"),
+            "execution_verified": True}
+
+
 def load_plan(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+
+
+def load_execution(path: str | Path) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+
+
+def load_freeze_evidence(path: str | Path) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+
+
+def validate_freeze_evidence(plan: dict, execution: dict,
+                             evidence: dict) -> dict:
+    """校验冻结日证据：协议绑定、自指纹、法务门控与台账绑定。"""
+    if not isinstance(evidence, dict) or evidence.get("schema_version") != 1:
+        raise ValueError("冻结证据需为 schema_version=1 的对象")
+    protocol_hash = validate_plan(plan)["protocol_sha256"]
+    if evidence.get("protocol_sha256") != protocol_hash:
+        raise ValueError("冻结证据绑定的协议指纹不匹配")
+    digest = evidence_hash(evidence)
+    if evidence.get(EVIDENCE_HASH_FIELD) != digest:
+        raise ValueError("冻结证据自身指纹不匹配，文件可能在冻结后被修改")
+    if evidence.get("freeze_date") != (plan.get("pre_registration") or {}).get("freeze_date"):
+        raise ValueError("冻结证据日期与协议冻结日不一致")
+    auth = evidence.get("data_authorization") or {}
+    if auth.get("raw_data_included") is not False:
+        raise ValueError("冻结证据不得包含原始数据")
+    code = evidence.get("code") or {}
+    if not code.get("git_commit") or not code.get("source_sha256"):
+        raise ValueError("冻结证据缺少代码指纹")
+    runtime = evidence.get("runtime") or {}
+    if not runtime.get("python") or not runtime.get("config_hash"):
+        raise ValueError("冻结证据缺少运行环境")
+    inputs = evidence.get("inputs") or {}
+    if inputs.get("declared_no_future_data") is not True:
+        raise ValueError("冻结证据须声明冻结日无未来输入，不得伪造原始输入指纹")
+    if execution.get("freeze_evidence_sha256") != digest:
+        raise ValueError("执行台账绑定的冻结证据指纹不匹配")
+    return {"verified": True, "freeze_date": evidence["freeze_date"],
+            "protocol_sha256": protocol_hash, "evidence_sha256": digest,
+            "code": {"git_commit": code["git_commit"],
+                     "git_dirty": code.get("git_dirty"),
+                     "source_files": len(code["source_sha256"])},
+            "runtime": {"python": runtime["python"],
+                        "config_hash": runtime["config_hash"]},
+            "inputs": {"status": inputs.get("status"),
+                       "declared_no_future_data": True,
+                       "fixed_inputs": len(inputs.get("fixed_inputs_sha256") or {})},
+            "raw_data_included": False,
+            "limitations": evidence.get("limitations") or []}
 
 
 def evaluate_real_trades(frame: pd.DataFrame) -> dict:
