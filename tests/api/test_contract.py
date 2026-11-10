@@ -11,6 +11,24 @@ from market_research.api.app import app
 from market_research.api.version import API_VERSION, VERSIONED_PREFIX
 
 
+def _stable_health(body):
+    """去掉按 0.1s 取整、随请求时刻递增的 uptime_s。"""
+    return {key: value for key, value in body.items() if key != 'uptime_s'}
+
+
+def _assert_same_health_contract(tc, legacy, versioned):
+    """两条路径的 health 契约一致；uptime_s 单独校验存在性与单调性。"""
+    tc.assertIn('uptime_s', legacy)
+    tc.assertIn('uptime_s', versioned)
+    legacy_uptime = legacy['uptime_s']
+    versioned_uptime = versioned['uptime_s']
+    for value in (legacy_uptime, versioned_uptime):
+        tc.assertIsInstance(value, (int, float))
+        tc.assertGreaterEqual(value, 0)
+    tc.assertGreaterEqual(versioned_uptime, legacy_uptime)
+    tc.assertEqual(_stable_health(legacy), _stable_health(versioned))
+
+
 class ApiVersionTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
@@ -20,10 +38,25 @@ class ApiVersionTests(unittest.TestCase):
         versioned = self.client.get('/api/v1/health')
         self.assertEqual(legacy.status_code, 200)
         self.assertEqual(versioned.status_code, 200)
-        self.assertEqual(legacy.json(), versioned.json())
-        self.assertEqual(legacy.json()['api_version'], API_VERSION)
+        legacy_body = legacy.json()
+        versioned_body = versioned.json()
+        _assert_same_health_contract(self, legacy_body, versioned_body)
+        self.assertEqual(legacy_body['api_version'], API_VERSION)
         self.assertEqual(legacy.headers['x-api-version'], API_VERSION)
         self.assertEqual(versioned.headers['x-api-version'], API_VERSION)
+
+    def test_health_contract_tolerates_uptime_rounding_but_not_other_changes(self):
+        base = {'ok': True, 'api_version': API_VERSION, 'framework': 'fastapi',
+                'uptime_s': 10.3, 'probe': 'liveness'}
+        _assert_same_health_contract(self, base, dict(base, uptime_s=10.4))
+        with self.assertRaises(AssertionError):
+            _assert_same_health_contract(self, base, dict(base, framework='flask'))
+        missing = dict(base)
+        missing.pop('uptime_s')
+        with self.assertRaises(AssertionError):
+            _assert_same_health_contract(self, base, missing)
+        with self.assertRaises(AssertionError):
+            _assert_same_health_contract(self, base, dict(base, uptime_s=10.2))
 
     def test_versioned_paths_are_documented_in_openapi(self):
         paths = self.client.get('/openapi.json').json()['paths']
