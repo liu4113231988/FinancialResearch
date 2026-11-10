@@ -2,7 +2,7 @@
 
 本地研究工作台，包含股票技术分析与方向估计、基金滚动 RBSA 与多模型比较、指数走势与风险分析。后端使用 FastAPI、独立计算进程和 DuckDB，环境与依赖由 uv 管理。
 
-文档核对日期：2026-11-07。本轮关闭生产评估 P3 六项（日志轮转、入队去重、阶段检查点、确定性排序、API 版本与契约、资源上限）并同步文档，配置、端点与数据契约以本文件及三份运维文档为准；未重抓全市场行情或重算全部基金研究。
+文档核对日期：2026-11-10。六项未来验证的冻结协议、执行台账与冻结日证据已分离落地，配置、端点与数据契约以本文件及三份运维文档为准；未完成项见 [TODO](TODO.md)。未重抓全市场行情、未重算全部基金研究，真实未来区间验证尚未执行。
 
 ## 安装与启动
 
@@ -262,7 +262,7 @@ src/market_research/
   envfile.py    可选 .env 读取（FIL_ENV_FILE）
 compat/         旧导入转发与 entrypoints/ 归档脚本
 tests/          按业务与测试类型分组
-scripts/        Windows 同步任务安装、一键启动（start.ps1）、真实数据冒烟入口（smoke_real.py）
+scripts/        同步任务安装/一键启动、真实数据冒烟、供应商契约录制、未来验证诊断与证据校验
 .github/        CI：compileall、node --check、全量离线 unittest
 ```
 
@@ -275,12 +275,13 @@ scripts/        Windows 同步任务安装、一键启动（start.ps1）、真�
 | [研究方案](docs/研究方案.md) | 基金研究方法、带样本/窗口口径的历史实验 |
 | [结论快照](docs/结论快照_口径修正前.md) | 修正前基线及后续重算对照，不能当当前绩效 |
 | [扩池预注册规则](docs/扩池预注册规则.md) | 冻结规则、历史执行状态与未满足条件 |
+| [未来验证协议](docs/future-validation-plan.json) / [执行台账](docs/future-validation-execution.json) / [冻结证据](docs/future-validation-freeze-evidence.json) | 六项未来样本与真实成交验证的冻结规则、执行状态、冻结日代码/环境/输入契约；用法见[股票指数验证流程](docs/股票指数验证流程.md) |
 | [合成基准与净值差距](docs/合成基准与基金净值的差距.md) | 历史诊断、股息口径和残差解释限制 |
 | [模型档案方案](docs/模型档案与算法记录_重构方案.md) | 尚未实现的产品提案及当前架构修订 |
 | [运行环境与配置](docs/运行环境与配置.md) | 环境变量、默认值、多环境目录与启动检查 |
 | [备份与恢复](docs/备份与恢复.md) | 数据资产清单、备份/校验/恢复命令与恢复后一致性检查 |
 | [数据源供应商契约](docs/数据源供应商契约.md) | 公开抓取端点、字段契约、限流/重试/降级与溯源 |
-| [TODO](TODO.md) | 仅记录未完成项、行动约束与关闭标准；已完成项的验证记录见测试说明与 git 历史 |
+| [TODO](TODO.md) | 仅未完成项与防止误判的约束；已完成记录见 git 历史与测试说明 |
 | [测试说明](tests/README.md) / [兼容说明](compat/README.md) | 验证方式及旧入口边界 |
 
 ## 验证
@@ -291,9 +292,11 @@ uv run python tests/regression/test_p0_fixes.py
 uv run python tests/regression/test_regressions.py
 node tests/frontend/test_refit.js
 node tests/frontend/test_ui_async.cjs
+node tests/frontend/test_market_async.cjs
+uv run python scripts/freeze_future_validation_evidence.py
 ```
 
-最新完整回归 407 项 unittest（2026-11-07 执行通过）、两套脚本式回归及两套前端回归通过；本轮未重跑真实浏览器渲染检查，已执行 `uv build` 确认 wheel 包含新增图标资源。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
+最新完整回归 568 项 unittest（2026-11-10 执行通过）；本轮另跑定向契约测试、lint 与冻结证据校验。两套脚本式回归、3 组前端回归与真实浏览器渲染检查沿用历史基线、本轮未重跑；Docker/wheel 构建安装与真实数据研究仍未覆盖。冻结证据校验默认只读，`--apply` 仅首次生成且拒绝覆盖。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
 
 依赖以 `pyproject.toml` 和 `uv.lock` 为准。`requirements.txt` 引用运行依赖兼容导出，更新命令为：
 
