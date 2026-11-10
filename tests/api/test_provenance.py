@@ -12,8 +12,9 @@ import pandas as pd
 
 import market_research.config as C
 import market_research.data.storage as storage
-from market_research.research.runinfo import result_provenance
-from market_research.services.analysis import _data_stamp_for, _stamp
+from market_research.research.runinfo import config_hash, config_snapshot, result_provenance
+from market_research.services.analysis import (_checkpoint_for, _data_stamp_for,
+                                               _stamp, result_cache_path)
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -36,6 +37,34 @@ class ProvenanceTests(unittest.TestCase):
         stamped = _stamp(payload, "stamp-v1")
         self.assertEqual(stamped["meta"]["provenance"]["data_stamp"], "stamp-v1")
         self.assertTrue(stamped["meta"]["provenance"]["generated_at"])
+
+    def test_config_hash_changes_with_research_and_window_parameters(self):
+        baseline = config_hash()
+        snapshot = config_snapshot()
+        self.assertIn("RBSA", snapshot)
+        self.assertIn("SIGNAL", snapshot)
+        self.assertIn("window", snapshot)
+        self.assertIn("config_hash", result_provenance())
+        baseline_path = result_cache_path("110022", ["enet_slsqp"], {})
+        with patch.dict(C.RBSA, {"window": C.RBSA["window"] + 1}):
+            self.assertNotEqual(config_hash(), baseline)
+            self.assertNotEqual(
+                result_cache_path("110022", ["enet_slsqp"], {}), baseline_path)
+        with patch.object(C, "MIN_WINDOW_YEARS", C.MIN_WINDOW_YEARS + 1):
+            self.assertNotEqual(config_hash(), baseline)
+
+    def test_checkpoint_fingerprint_changes_with_config(self):
+        import market_research.tasks.checkpoints as checkpoints
+        with tempfile.TemporaryDirectory(dir=C.ROOT / "output") as tmp, \
+             patch.object(checkpoints, "root", return_value=Path(tmp)):
+            first = _checkpoint_for("analyze", {"code": "110022"},
+                                    "job-config", "stamp")
+            baseline = first.fingerprint
+            with patch.dict(C.RBSA, {"window": C.RBSA["window"] + 1}):
+                second = _checkpoint_for("analyze", {"code": "110022"},
+                                         "job-config", "stamp")
+            self.assertNotEqual(second.fingerprint, baseline)
+            self.assertIn("config_hash", second.fingerprint)
 
     def test_data_stamp_changes_when_data_version_changes(self):
         """数据变化后指纹必须随之变化；基金窗口只跟踪自己的依赖。"""

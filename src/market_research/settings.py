@@ -28,6 +28,7 @@ class Settings:
     job_workers: int = 0
     job_workers_max: int = 0
     job_memory_mb: int = 0
+    sync_asset_timeout: float = 300.0
 
     def validate(self):
         """启动期 schema 校验：尽早拒绝明显非法的运行配置。"""
@@ -36,7 +37,7 @@ class Settings:
         if not self.host.strip():
             raise ValueError("FIL_HOST 不能为空")
         for name in ("max_jobs", "queue_limit", "job_timeout", "max_attempts",
-                     "job_terminal_ttl", "job_queued_ttl"):
+                     "job_terminal_ttl", "job_queued_ttl", "sync_asset_timeout"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
         for name in ("job_drain_grace", "job_workers", "job_workers_max",
@@ -59,4 +60,5 @@ class Settings:
                    auto_services=os.environ.get("FIL_AUTO_SERVICES", "1") != "0",
                    job_workers=int(os.environ.get("FIL_JOB_WORKERS", "0")),
                    job_workers_max=int(os.environ.get("FIL_JOB_WORKERS_MAX", "0")),
-                   job_memory_mb=int(os.environ.get("FIL_JOB_MEMORY_MB", "0"))).validate()
+                   job_memory_mb=int(os.environ.get("FIL_JOB_MEMORY_MB", "0")),
+                   sync_asset_timeout=float(os.environ.get("FIL_SYNC_ASSET_TIMEOUT", "300"))).validate()

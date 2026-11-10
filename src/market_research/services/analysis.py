@@ -7,7 +7,7 @@ import time
 
 import market_research.audit as audit
 import market_research.config as C
-from market_research.research.runinfo import result_provenance
+from market_research.research.runinfo import config_hash, result_provenance
 from market_research.security import current_identity
 import market_research.data.marketdata as D
 import market_research.tasks.sync as sync
@@ -90,7 +90,7 @@ RUNNER = JOBS
 
 
 def result_cache_path(code, models, params, max_rebal=None, auto_equity=False, data_stamp="", start="", end=""):
-    key = json.dumps({"v":C.CACHE_VERSION,"c":code,"m":sorted(models or []),"p":params or {},
+    key = json.dumps({"v":C.CACHE_VERSION,"g":config_hash(),"c":code,"m":sorted(models or []),"p":params or {},
                       "r":C.RBSA.get("max_rebal") if max_rebal is None else max_rebal,
                       "a":bool(auto_equity),"d":data_stamp,"s":start or "","e":end or ""},sort_keys=True,ensure_ascii=False)
     return CACHE_DIR / f"result_v{C.CACHE_VERSION}_{code}_{hashlib.md5(key.encode()).hexdigest()[:10]}.pkl"
@@ -252,6 +252,7 @@ def _checkpoint_for(operation, params, jid, stamp):
     if not jid or operation not in _CHECKPOINT_OPERATIONS:
         return checkpoints.NullCheckpoint()
     fingerprint = {"operation": operation, "stamp": stamp,
+                   "config_hash": config_hash(),
                    "args": {key: value for key, value in params.items()
                             if key != "job_id"}}
     return checkpoints.StageCheckpoint(jid, fingerprint)

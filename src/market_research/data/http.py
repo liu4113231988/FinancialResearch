@@ -21,17 +21,21 @@ def _max_rps() -> float:
     return max(value, 0.0)
 
 
-def rate_limit() -> None:
-    """全进程共享的最小请求间隔（令牌桶的简化版）。"""
+def rate_limit(deadline: Optional[float] = None) -> None:
+    """全进程共享的最小请求间隔；单资产 deadline 到期立即停止等待。"""
     rps = _max_rps()
     if rps <= 0:
         return
     interval = 1.0 / rps
     with _RATE_LOCK:
         delay = _LAST_CALL[0] + interval - time.monotonic()
+        if deadline is not None and delay > 0:
+            delay = min(delay, max(0.0, deadline - time.monotonic()))
         if delay > 0:
             time.sleep(delay)
         _LAST_CALL[0] = time.monotonic()
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("单资产请求总截止时间已到")
 
 
 def _non_retryable(exc: Exception) -> bool:
@@ -54,8 +58,17 @@ def _default_http_timeout() -> float:
     return v if v > 0 else 0.0
 
 
+def _thread_deadline() -> Optional[float]:
+    return getattr(_TLS, "deadline", None)
+
+
 def _thread_timeout() -> Optional[float]:
-    return getattr(_TLS, "timeout", None)
+    sec = getattr(_TLS, "timeout", None)
+    deadline = _thread_deadline()
+    if deadline is None:
+        return sec
+    remaining = max(0.001, deadline - time.monotonic())
+    return min(sec, remaining) if sec and sec > 0 else remaining
 
 
 def _apply_request_timeout(kwargs: dict) -> dict:
@@ -99,7 +112,10 @@ def http_timeout(seconds: Optional[float] = None):
       监听 socket 与其它线程；这里改为线程局部值 + requests 请求级 timeout。
     """
     sec = _default_http_timeout() if seconds is None else seconds
-    previous = _thread_timeout()
+    deadline = _thread_deadline()
+    if sec and sec > 0 and deadline is not None:
+        sec = min(sec, max(0.001, deadline - time.monotonic()))
+    previous = getattr(_TLS, "timeout", None)
     _TLS.timeout = sec if sec and sec > 0 else None
     try:
         yield
@@ -107,16 +123,37 @@ def http_timeout(seconds: Optional[float] = None):
         _TLS.timeout = previous
 
 
-def _retry(fn, tries: int = 4, wait: float = 1.2, source: str = "", **kw):
+@contextlib.contextmanager
+def http_deadline(deadline: Optional[float]):
+    """仅当前同步线程生效的请求总截止时间（monotonic 秒）。"""
+    previous = _thread_deadline()
+    _TLS.deadline = deadline
+    try:
+        yield
+    finally:
+        _TLS.deadline = previous
+
+
+def _retry(fn, tries: int = 4, wait: float = 1.2, source: str = "",
+           deadline: Optional[float] = None, **kw):
     """统一的重试 / 退避 / 限流 / 溯源入口（P2-29）。
 
     只重试可恢复的网络类异常；字段缺失、类型错误等编程错误立即抛出，
-    避免把一个问题重试四次后仍得到同样的错误结果。
+    避免把一个问题重试四次后仍得到同样的错误结果。deadline 是单资产同步
+    的总预算，耗尽后不再发起下一轮请求。
     """
     last = None
+    limit = deadline if deadline is not None else _thread_deadline()
     tries = max(int(tries), 1)
     for i in range(tries):
-        rate_limit()
+        if limit is not None and time.monotonic() >= limit:
+            last = TimeoutError("单资产请求总截止时间已到")
+            break
+        try:
+            rate_limit(deadline=limit)
+        except TimeoutError as exc:
+            last = exc
+            break
         # ★ 超时只在当前线程的抓取请求上生效（P2-37）：注入 requests 的
         #   timeout，不动进程级 socket 默认值。
         with http_timeout():
@@ -130,10 +167,12 @@ def _retry(fn, tries: int = 4, wait: float = 1.2, source: str = "", **kw):
                     provenance.record(source, ok=False, error=_describe(e))
                     raise
         if i < tries - 1:
-            time.sleep(min(wait * (2 ** i), 30.0) +
-                       random.uniform(0, min(1.0, wait)))
+            delay = min(wait * (2 ** i), 30.0) + random.uniform(0, min(1.0, wait))
+            if limit is not None:
+                delay = min(delay, max(0.0, limit - time.monotonic()))
+            time.sleep(delay)
     provenance.record(source, ok=False, degraded=True, error=_describe(last))
-    raise last
+    raise last or RuntimeError("数据源请求失败")
 
 
 def _describe(exc: Exception) -> str:

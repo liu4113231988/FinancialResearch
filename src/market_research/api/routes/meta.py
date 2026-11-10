@@ -10,6 +10,7 @@ from market_research.data import storage
 from market_research.api.schemas import HealthResponse, ReadyResponse
 from market_research.api.version import API_VERSION, SERVICE_VERSION
 from market_research.resources import limits_snapshot
+from market_research.research.runinfo import config_hash, config_snapshot
 from market_research.security import access_mode, mode_description
 from market_research.settings import Settings
 from market_research.modeling.catalog import MODEL_ORDER, model_catalog
@@ -130,10 +131,17 @@ def disclosure_info():
 def config_info():
     """P2-34：只读、脱敏的运行配置视图；不返回令牌、目录或认证材料。"""
     settings = Settings.load()
+    snapshot = config_snapshot()
     return {"ok": True, "environment": C.ENV,
             "version": SERVICE_VERSION, "api_version": API_VERSION,
             "access_control": access_mode(),
             "disclosure_scope": disclosure.scope(),
+            "config_hash": config_hash(),
+            "research": {"window": snapshot.get("window"),
+                         "policy": snapshot.get("policy"),
+                         "rbsa": {key: snapshot["RBSA"].get(key) for key in
+                                  ("window", "refit", "rebal_mode",
+                                   "auto_equity", "equity_method")}},
             "limits": {"max_jobs": settings.max_jobs,
                        "queue_limit": settings.queue_limit,
                        "job_timeout": settings.job_timeout,
@@ -142,7 +150,8 @@ def config_info():
                        "job_workers_max": settings.job_workers_max,
                        "job_memory_mb": settings.job_memory_mb,
                        "data_stale_days": getattr(C, "DATA_STALE_DAYS", None),
-                       "storage_lock_timeout": getattr(C, "STORAGE_LOCK_TIMEOUT", None)},
+                       "storage_lock_timeout": getattr(C, "STORAGE_LOCK_TIMEOUT", None),
+                       "sync_asset_timeout": settings.sync_asset_timeout},
             "auto_services": settings.auto_services}
 
 

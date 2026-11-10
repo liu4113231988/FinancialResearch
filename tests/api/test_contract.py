@@ -55,7 +55,7 @@ class ApiVersionTests(unittest.TestCase):
             response = self.client.get('/api/v1/job/job-1')
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(set(body), set(job), '契约字段不得悄悄增删')
+        self.assertEqual(set(body), set(job) | {'meta'}, '契约字段不得悄悄增删')
         self.assertEqual(body['status'], 'running')
 
     def test_result_envelope_contract(self):
@@ -66,7 +66,7 @@ class ApiVersionTests(unittest.TestCase):
             response = self.client.get('/api/v1/result/job-1')
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(set(body), {'ok', 'status', 'completeness', 'result'})
+        self.assertEqual(set(body), {'ok', 'status', 'completeness', 'result', 'meta'})
         self.assertEqual(body['status'], 'partial')
         self.assertIn('sections', body['result'])
 
@@ -97,6 +97,8 @@ class ApiVersionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body['limits']['max_jobs'], 4)
+        self.assertIn('sync_asset_timeout', body['limits'])
+        self.assertRegex(body['config_hash'], r'^[0-9a-f]{16}$')
         self.assertIn('environment', body)
         self.assertNotIn('secret-token', json.dumps(body, ensure_ascii=False))
         self.assertNotIn('FIL_API_TOKENS', json.dumps(body, ensure_ascii=False))
@@ -108,6 +110,9 @@ class ApiVersionTests(unittest.TestCase):
                 Settings.load()
         with patch.dict(os.environ, {'FIL_MAX_JOBS': '0'}, clear=False):
             with self.assertRaisesRegex(ValueError, 'max_jobs'):
+                Settings.load()
+        with patch.dict(os.environ, {'FIL_SYNC_ASSET_TIMEOUT': '0'}, clear=False):
+            with self.assertRaisesRegex(ValueError, 'sync_asset_timeout'):
                 Settings.load()
 
 

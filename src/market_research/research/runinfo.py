@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import platform
 import subprocess
 import sys
@@ -70,24 +72,6 @@ def _lib_versions() -> Dict[str, Optional[str]]:
     return out
 
 
-def _config_snapshot() -> Dict[str, Any]:
-    """只取会影响结果的键，避免把整个 config  dump 成噪音。"""
-    try:
-        import market_research.config as C
-        snap: Dict[str, Any] = {}
-        for name, blk in (("RBSA", getattr(C, "RBSA", {})),
-                          ("BACKTEST", getattr(C, "BACKTEST", {})),
-                          ("SIGNAL", getattr(C, "SIGNAL", {}))):
-            snap[name] = {k: _jsonable(v) for k, v in dict(blk).items()}
-        snap["CACHE_VERSION"] = getattr(C, "CACHE_VERSION", None)
-        snap["DATA_CACHE_VERSION"] = getattr(C, "DATA_CACHE_VERSION", None)
-        snap["n_candidates"] = len(getattr(C, "NAME_OF", {}))
-        snap["n_extended_funds"] = len(getattr(C, "EXTENDED_FUNDS", {}))
-        return snap
-    except Exception as e:                                    # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}"}
-
-
 def _jsonable(v):
     try:
         import numpy as np
@@ -106,6 +90,38 @@ def _jsonable(v):
     if isinstance(v, dict):
         return {str(k): _jsonable(x) for k, x in v.items()}
     return str(v)
+
+
+def config_snapshot() -> Dict[str, Any]:
+    """影响结果的参数快照（P2-34）；滚动 START_DATE/END_DATE 不进入全局指纹。"""
+    try:
+        import market_research.config as C
+        snap: Dict[str, Any] = {}
+        for name in ("RBSA", "BACKTEST", "SIGNAL"):
+            snap[name] = _jsonable(dict(getattr(C, name, {}) or {}))
+        snap["window"] = {key: _jsonable(getattr(C, key, None)) for key in
+                          ("DEFAULT_WINDOW_YEARS", "MIN_WINDOW_YEARS",
+                           "MIN_WINDOW_DAYS", "FETCH_START_DATE")}
+        snap["policy"] = {key: _jsonable(getattr(C, key, None)) for key in
+                          ("NAV_DEGRADED_POLICY", "DATA_STALE_DAYS",
+                           "DATA_MISSING_RATIO_LIMIT")}
+        snap["CACHE_VERSION"] = getattr(C, "CACHE_VERSION", None)
+        snap["DATA_CACHE_VERSION"] = getattr(C, "DATA_CACHE_VERSION", None)
+        snap["n_candidates"] = len(getattr(C, "NAME_OF", {}))
+        snap["n_extended_funds"] = len(getattr(C, "EXTENDED_FUNDS", {}))
+        return snap
+    except Exception as e:                                    # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+def config_hash() -> str:
+    """参数级配置哈希：配置变化后结果缓存和在途阶段必须自动失效。"""
+    payload = json.dumps(config_snapshot(), sort_keys=True, ensure_ascii=False,
+                         separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+_config_snapshot = config_snapshot
 
 
 def data_summary() -> Dict[str, Any]:
@@ -127,6 +143,7 @@ def data_summary() -> Dict[str, Any]:
             "window_years": getattr(C, "DEFAULT_WINDOW_YEARS", None),
             "min_window_years": getattr(C, "MIN_WINDOW_YEARS", None),
             "fetch_start": getattr(C, "FETCH_START_DATE", None),
+            "config_hash": config_hash(),
         }
     except Exception as e:                                    # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
@@ -150,6 +167,7 @@ def result_provenance(data_stamp: Optional[str] = None) -> Dict[str, Any]:
         "environment": getattr(C, "ENV", None),
         "code_version": getattr(C, "CACHE_VERSION", None),
         "config_version": getattr(C, "DATA_CACHE_VERSION", None),
+        "config_hash": config_hash(),
         "git_commit": git.get("commit"),
         "git_dirty": git.get("dirty"),
         "data_stamp": data_stamp,
@@ -167,7 +185,8 @@ def run_fingerprint(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "git_dirty": _git_dirty(),
         "libs": _lib_versions(),
         "data": data_summary(),
-        "config": _config_snapshot(),
+        "config": config_snapshot(),
+        "config_hash": config_hash(),
         # ★ 随机性说明：本流水线的 sklearn 组件都固定了 random_state=0，
         #   进程池/spawn 不引入随机性；但 bootstrap 的 seed 在
         #   src/robustness.block_bootstrap 里显式给出，也一并记录。
@@ -199,6 +218,7 @@ def fingerprint_lines(info: Dict[str, Any], prefix: str = "  ") -> list:
          f"{prefix}依赖        " + ", ".join(
              f"{k} {v}" for k, v in (info.get("libs") or {}).items() if v),
          f"{prefix}数据指纹    {(info.get('data') or {}).get('data_stamp')}",
+         f"{prefix}配置指纹    {info.get('config_hash') or (info.get('data') or {}).get('config_hash')}",
          f"{prefix}候选指数    {(info.get('config') or {}).get('n_candidates')} 个"]
     run = info.get("run") or {}
     if run:

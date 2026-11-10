@@ -1,6 +1,7 @@
 """FastAPI composition root. Start with uv run market-research --port 8877."""
 from contextlib import asynccontextmanager
 import argparse
+import json
 import logging
 import os
 from pathlib import Path
@@ -24,8 +25,11 @@ import market_research.api.routes.market as market
 import market_research.api.routes.meta as meta
 import market_research.api.routes.sync as sync
 import market_research.api.routes.tasks as tasks
+from market_research.api.response_meta import enrich as enrich_response_meta
 from market_research.api.schemas import ErrorResponse
-from market_research.api.version import API_PREFIX, API_VERSION, SERVICE_VERSION, VERSIONED_PREFIX
+from market_research.api.version import (API_PREFIX, API_VERSION, SERVICE_VERSION,
+                                         VERSIONED_PREFIX, legacy_enabled,
+                                         legacy_sunset)
 
 LOG=logging.getLogger(__name__)
 STATIC=Path(str(files('market_research.api')/'static'))
@@ -64,7 +68,8 @@ class VersionHeader:
             return await self.app(scope,receive,send)
         path=scope.get('path','')
         legacy=(path.startswith(API_PREFIX + '/')
-                and not path.startswith(VERSIONED_PREFIX + '/'))
+                and not path.startswith(VERSIONED_PREFIX + '/')
+                and legacy_enabled())
         successor=VERSIONED_PREFIX + path[len(API_PREFIX):]
         async def wrapped(message):
             if message['type']=='http.response.start':
@@ -73,12 +78,55 @@ class VersionHeader:
                 if legacy:
                     headers.append((b'deprecation',b'true'))
                     headers.append((b'link',f'<{successor}>; rel="successor-version"'.encode('ascii')))
-                    sunset=os.environ.get('FIL_API_SUNSET','').strip()
-                    if sunset:
-                        headers.append((b'sunset',sunset.encode('ascii','ignore')))
+                    headers.append((b'sunset',
+                                    legacy_sunset().encode('ascii','ignore')))
                 message={**message,'headers':headers}
             await send(message)
         await self.app(scope,receive,wrapped)
+
+
+class MetaEnvelope:
+    """给所有 API JSON 响应补齐 meta 信封，包括异常和中间件错误（P2-36）。"""
+    def __init__(self,app):
+        self.app=app
+
+    async def __call__(self,scope,receive,send):
+        if scope['type']!='http' or not scope.get('path','').startswith(API_PREFIX):
+            return await self.app(scope,receive,send)
+        messages=[]
+        async def capture(message):
+            messages.append(message)
+        await self.app(scope,receive,capture)
+        start=next((m for m in messages if m['type']=='http.response.start'),None)
+        headers=(start or {}).get('headers',[])
+        content_type=next((value.decode('latin-1').lower() for key,value in headers
+                           if key.lower()==b'content-type'),'')
+        chunks=[m.get('body',b'') for m in messages if m['type']=='http.response.body']
+        if not start or 'application/json' not in content_type or not any(chunks):
+            for message in messages:
+                await send(message)
+            return
+        try:
+            payload=json.loads(b''.join(chunks).decode('utf-8'))
+            enriched=enrich_response_meta(payload)
+            body=json.dumps(enriched,ensure_ascii=False,separators=(',',':')).encode('utf-8')
+        except (UnicodeDecodeError,ValueError,TypeError):
+            for message in messages:
+                await send(message)
+            return
+        updated=[(key,value) for key,value in headers
+                 if key.lower()!=b'content-length']
+        updated.append((b'content-length',str(len(body)).encode('ascii')))
+        sent_body=False
+        for message in messages:
+            if message['type']=='http.response.start':
+                await send({**message,'headers':updated})
+            elif message['type']=='http.response.body':
+                if not sent_body:
+                    await send({**message,'body':body,'more_body':False})
+                    sent_body=True
+            else:
+                await send(message)
 
 
 _CACHEABLE_SUFFIXES=('.ico','.svg','.png','.webmanifest')
@@ -128,6 +176,8 @@ def create_app():
     origins=[v.strip() for v in os.environ.get('FIL_CORS_ORIGINS','').split(',') if v.strip()]
     if origins:
         app.add_middleware(CORSMiddleware,allow_origins=origins,allow_methods=['GET','POST'],allow_headers=['Content-Type','Authorization','X-API-Key'])
+    # 最后注册成为最外层，确保所有 API JSON 结果（含认证/校验/限流错误）都有信封。
+    app.add_middleware(MetaEnvelope)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request:Request,error:RequestValidationError):
@@ -179,9 +229,10 @@ def create_app():
     def index():
         return FileResponse(STATIC/'index.html')
 
-    # /api/v1 是正式契约路径；/api 保留为兼容路径，两者挂同一批路由，
-    # OpenAPI 同时列出，避免新旧调用方各自维护一套实现。
-    for prefix in (API_PREFIX,VERSIONED_PREFIX):
+    # /api/v1 是正式契约路径；/api 在 legacy_enabled() 时挂同一批路由。
+    # 到计划移除日或显式 FIL_API_LEGACY=0 后，只保留带版本前缀的契约。
+    prefixes=(API_PREFIX,VERSIONED_PREFIX) if legacy_enabled() else (VERSIONED_PREFIX,)
+    for prefix in prefixes:
         for module in (meta,analysis,market,sync,tasks):
             app.include_router(module.router,prefix=prefix)
     app.mount('/static',StaticFiles(directory=STATIC),name='static')

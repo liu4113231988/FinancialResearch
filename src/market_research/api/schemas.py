@@ -2,6 +2,7 @@
 from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 import market_research.config as C
+from market_research.api.response_meta import build as response_meta
 from market_research.modeling.catalog import MODEL_ORDER
 from market_research.market.analysis import normalize_code
 from market_research.validation.parameters import _parse_max_rebal, _parse_auto_equity, _check_params
@@ -150,6 +151,7 @@ class SubmissionResponse(BaseModel):
     cached: bool = False
     merged: bool | None = None
     result: dict | None = None
+    meta: dict[str, Any] = Field(default_factory=response_meta)
 
 
 class JobResponse(BaseModel):
@@ -165,6 +167,7 @@ class JobResponse(BaseModel):
     updated: float | None = None
     attempts: int = 0
     error: str | None = None
+    meta: dict[str, Any] = Field(default_factory=response_meta)
 
 
 class ResultResponse(BaseModel):
@@ -173,6 +176,7 @@ class ResultResponse(BaseModel):
     status: str
     completeness: dict[str, Any]
     result: dict[str, Any]
+    meta: dict[str, Any] = Field(default_factory=response_meta)
 
 
 class HealthResponse(BaseModel):
@@ -186,6 +190,7 @@ class HealthResponse(BaseModel):
     environment: str
     access_control: dict[str, Any]
     probe: str
+    meta: dict[str, Any] = Field(default_factory=response_meta)
 
 
 class ReadyResponse(BaseModel):
@@ -196,9 +201,11 @@ class ReadyResponse(BaseModel):
     api_version: str
     uptime_s: float
     probe: str
+    meta: dict[str, Any] = Field(default_factory=response_meta)
 
 
 class ErrorResponse(BaseModel):
     ok: bool = False
     error: str
     field: str | None = None
+    meta: dict[str, Any] = Field(default_factory=response_meta)

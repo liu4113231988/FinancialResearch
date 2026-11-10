@@ -21,12 +21,38 @@
 - P2-34：`/api/config` 只读脱敏视图、`Settings.validate()` 启动期 schema 校验；P3-H：旧 `/api/*` 增加 `Deprecation`、后继版本 `Link` 与可选 `FIL_API_SUNSET`。回归见 `tests/api/test_contract.py`。参数级配置指纹仍开放。
 - 验证：全量离线单测 **523 项通过**；`tests/regression/test_regressions.py`、`tests/regression/test_p0_fixes.py` 全部通过；3 组前端回归、前端语法检查、`git diff --check`、IDE lint 均通过。本轮修改尚未提交。
 
-**仍开放（需要真实数据 / 产品口径 / 法务运维决策，或会改变默认研究结论）**
+**2026-11-09 时仍开放（代码类已由 2026-11-10 复核关闭，见下节；此处保留历史快照）**
 
 - 股票与指数的 6 项外部数据/未来样本验证；P1-10 真实行业股息、P1-11 历史时点行业成分。
 - P2-35 真实数据 CI、录制 fixture 库、每日 live smoke 告警；P2-36 所有 API 响应统一 `meta.disclaimer/data_as_of/data_latency/model_limits` 信封及数据源再分发授权评估；P2-37 单资产同步 watchdog/超时隔离；P2-34 参数级 `C.RBSA`/窗口指纹。
 - P3-H 旧路径自动迁移脚本与兼容路径移除日期；其他生产化条目中需要产品、法务、容量、监控、备份或外部采购决策的部分按原状态保留。
 - 失效模型剔除、严格历史分位、脉冲订单等会改变默认研究数值的候选，仍需独立的研究口径评估，不在本轮离线修复中擅自启用。
+
+## 2026-11-10 外部依赖与生产化续办复核
+
+按「6 项未来样本与真实交易验证；P2-35 真实数据 CI / fixture 库 / live smoke；P2-36 统一 meta 信封及数据授权；P2-37 单资产同步 watchdog；参数级配置指纹、旧路径迁移脚本、移除日期」逐项落地。原则是**能离线实现的补齐框架/护栏并补回归，真实数据/法务/产品决策明确标注门控**，不伪造证据。
+
+**本轮已落地（均有回归测试）**
+
+- 六项未来样本与真实交易验证：`docs/future-validation-plan.json` 预注册六项（冻结日 2026-11-10、未来区间 2026-11-11~2027-05-10、评估日 2027-05-11、逐项完成标准与真实成交 schema）；`research/future_validation.py` 提供预注册状态机（无证据不得标完成）与真实成交 FIFO/成本/滑点/未来信息泄漏诊断；`scripts/validate_real_trades.py` 输出可审计 JSON。计划状态仍是 `registered_not_executed`。回归见 `tests/research/test_future_validation.py`。
+- P2-35：`tests/fixtures/providers/contracts.json` 脱敏 fixture 库；`scripts/record_provider_fixtures.py` 默认离线校验、`--live --apply` 录制观测指纹、`--with-raw` 受法务门控；`.github/workflows/ci.yml` 离线回放；`.github/workflows/live-smoke.yml` 工作日计划 smoke + artifact + 失败 Issue 去重告警；`ops/smoke.py` 区分 `data_source|logic`。**本机真实录制 7/7 成功**（2026-11-10），脱敏观测指纹已写回 fixture 库，仅含列名/dtype/行数/日期范围/内容哈希，无原始响应。
+- P2-36：`api/response_meta.py` + `MetaEnvelope` 给 `/api*` 全部 JSON 响应（含 400/401 错误响应，`openapi.json` 例外）补 `disclaimer/data_as_of/data_latency/model_limits/data_source_license/config_hash`；`data_license.py` 默认 `review_required` 且禁止原始 fixture 再分发。回归见 `tests/api/test_disclosure.py`。
+- P2-37：`tasks/sync.py` 的 `_synchronize_with_watchdog()` / `AssetSyncTimeout` / `abort` 协作取消，按资产隔离并记录 `watchdog_timeout`，`FIL_SYNC_ASSET_TIMEOUT` 默认 300s 且 `Settings.validate()` 校验。回归见 `tests/tasks/test_sync.py`。
+- 参数级配置指纹：`research/runinfo.py:config_hash()` 覆盖 `C.RBSA/BACKTEST/SIGNAL`、窗口参数、降级策略与缓存版本，暴露到 `meta.config_hash`、`/api/v1/config`、`result_provenance`、结果缓存键。回归见 `tests/api/test_provenance.py`。
+- 旧路径迁移与移除日期：`api/version.py` 的 `LEGACY_REMOVE_AFTER=2027-04-01`、默认 `Sunset` HTTP 日期、`FIL_API_LEGACY` 开关；`scripts/migrate_api_paths.py` 默认 dry-run、`--apply` 才写入。回归见 `tests/api/test_legacy_migration.py`。
+- **字段契约漂移修复（本轮实测触发）**：真实 AkShare 把 `fund_nav`/`fund_unit_nav` 日期列从 `日期` 改为 `净值日期`，录制脚本原按硬列名校验误报失败。现由 `data/provenance.py:FIELD_ALIASES/resolve_columns()` 登记可接受别名（生产严格 `require_columns` 不放宽），观测指纹如实记录真实列名与别名应用，未登记改名仍显式失败；`validate_manifest()` 拒绝原始响应行与未登记别名；`--live` 逐源汇总失败、不伪造数据并返回非零。回归见 `tests/data/test_provider_fixtures.py`。
+
+**仍开放（真实数据 / 产品法务运维决策，非代码缺陷）**
+
+- 六项验证的执行：需真实未来行情、历史时点行业成分/公司行动、真实 ETF 成交记录；计划与诊断只是框架，`protocol_sha256` 仍为 `null`，不得离线标完成。P1-10 / P1-11 数据缺口同上。
+- 逐源数据授权：默认 `review_required`、禁止原始响应再分发；需法务/数据治理逐源审查并登记编号后才可放开 `--with-raw` 与对外分发。
+- 产品/运维决策：对外披露具体措辞、旧路径**实际**移除日与对外 `Sunset` 日期（2027-04-01 是代码内计划值，到期前旧路由仍挂载）、live smoke 的 GitHub 变量与告警策略、真实慢源按资产调 `FIL_SYNC_ASSET_TIMEOUT`。
+- 实现边界（非外部依赖）：watchdog 守护线程不被强杀、只在检查点协作退出；配置指纹只含研究常量级运行配置，运行时 `Settings` 环境变量与单次请求参数不进 hash（另见 `run_fingerprint.extra`）；live smoke 的失败 Issue 去重仅按精确标题取前 100 个 open issue。
+- 失效模型剔除、严格历史分位、脉冲订单等会改变默认研究数值的候选，仍需独立的研究口径评估。
+
+**验证（2026-11-10）**：全量离线单测 **552 项通过**；`scripts/record_provider_fixtures.py` 离线校验 7 个来源通过、真实 `--live --apply` 7/7 成功；`tests/regression/test_regressions.py`、`test_p0_fixes.py` 全部通过；3 组前端回归、`compileall`、`node --check`、`git diff --check`、IDE lint 均通过。**本轮修改尚未提交。**
+
+**历史描述校准**：下方 P2-34「参数级指纹仍开放」、P2-35「未做真实数据 CI / 录制 fixture 库 / live smoke」、P2-36「未做统一 meta 信封」、P2-37「未做 watchdog」、P3-H「自动迁移脚本仍开放」均为 2026-11-06/09 的状态快照，已按本轮实现逐条更新，仅保留其中真正需要外部输入的子项。
 
 ## 2026-11-08 全局复审（第二轮）
 
@@ -468,7 +494,8 @@
   - 影响面：发布管理、问题回溯、合规审计、跨环境对比。
   - 建议：启动时用 `pydantic-settings` 校验并打印生效配置；把 `data_stamp`、git commit、关键 `C.RBSA`/窗口参数、`cache_version`、同步状态写入 `meta.provenance`（API/报告/导出统一）；提供脱敏的 `/api/config`。
   - **实际修法**：`config.py` 新增 `ENV`（`FIL_ENV=dev|local|prod`，未知回退 `local`）与可分离目录：`FIL_DATA_DIR` / `FIL_FIG_DIR` / `FIL_RES_DIR`；`local` 默认路径保持 `output/data|figures|results`，`dev` 默认落 `output/dev/*`，行为不变。`research/runinfo.py:result_provenance()` 输出 `environment/code_version/config_version/git_commit/git_dirty/data_stamp/generated_at`（git 查询进程内缓存）；`services.analysis._stamp()` 在 `_dispatch` 对所有操作结果写 `meta.provenance`，缓存文件保留产出时的版本；报告 `runinfo.data_summary()` 增加 `environment/data_dir`；`/api/health` 返回 `environment`。配置说明见 [运行环境与配置](docs/运行环境与配置.md)。
-  - **仍开放**：把完整 `C.RBSA`/窗口参数写入每个结果（当前指纹是版本级，非参数级）。`/api/config` 脱敏视图和启动期配置 schema 校验已关闭，见 `tests/api/test_contract.py`；采用项目现有 `Settings.validate()`，未新增 pydantic-settings 依赖。
+  - **已关闭（2026-11-10）**：参数级配置指纹由 `research/runinfo.py:config_hash()` 落地，覆盖 `C.RBSA/BACKTEST/SIGNAL`、窗口参数、降级策略与缓存版本，写入 `meta.config_hash`、`/api/v1/config`、`result_provenance` 与结果缓存键；改参数会同时改变 hash 与缓存路径（见 `tests/api/test_provenance.py`、`tests/api/test_contract.py`）。`/api/config` 脱敏视图和启动期配置 schema 校验已于 2026-11-09 关闭，采用项目现有 `Settings.validate()`，未新增 pydantic-settings 依赖。
+  - **范围边界**：指纹只含研究常量级运行配置；滚动 `START_DATE/END_DATE`、运行时 `Settings` 环境变量与单次请求参数不进 hash（单次实参另见 `run_fingerprint.extra`）。
   - 回归：`tests/api/test_provenance.py`（指纹字段、`_stamp` 挂载与缺 meta 兜底、数据变化后 `data_stamp` 变化/基金窗口只跟踪自身依赖、`FIL_ENV=dev` 切换数据目录、未知环境回退）；`tests/api/test_routes.py` 仅调整一处断言以容纳新增 `meta.provenance`，缓存语义不变。
   - 语义变化：结果 payload 新增 `meta.provenance`；默认 `FIL_ENV=local` 时路径与数值完全不变。
 
@@ -482,8 +509,9 @@
     - 手动真实冒烟：`market_research/ops/smoke.py` + `scripts/smoke_real.py`，覆盖抓取→面板→分析→报告，产物 `smoke_result.json`；失败按阶段与异常来源分类 `data_source | logic`（契约/净值口径/存储/网络类归 data_source，其余本地计算/渲染归 logic）。
     - CI：新增 `.github/workflows/ci.yml`，跑 `python -m compileall src scripts`、`node --check` 全部前端 JS、`python -m unittest discover`（全量离线单测）；不跑真实数据。
     - 字段契约：provider 缺列/改名由 P2-29 的 `ProviderContractError` 在单测中覆盖（`tests/data/test_http.py`）。
-  - **未做**：真实数据 CI、录制 fixture 库、每日 live smoke 告警。真实冒烟失败时由 `failure_class` 区分数据源/逻辑，不自动重试。
-  - 回归：`tests/data/test_smoke.py`（分类与失败落盘）；CI 配置为新增文件，未在本机执行 GitHub Actions。
+  - **已落地（2026-11-10）**：脱敏 fixture 库 `tests/fixtures/providers/contracts.json`（含 2026-11-10 真实录制的 7 个 `live_observation`，仅观测指纹、无原始响应）；`scripts/record_provider_fixtures.py` 默认离线校验、`--live --apply` 录制、`--with-raw` 受法务门控、逐源汇总失败不伪造数据；`.github/workflows/ci.yml` 增加离线契约回放；`.github/workflows/live-smoke.yml` 工作日计划 smoke + artifact + 失败 Issue 去重告警。真实冒烟失败由 `failure_class` 区分数据源/逻辑，不自动重试。
+  - **仍开放**：离线 CI 不联网，库内观测是一次性快照（行数/哈希随每日行情变化，不作断言基准）；live smoke 需配置 GitHub 变量并依赖真实网络；原始响应导出需逐源法务审查编号。
+  - 回归：`tests/data/test_smoke.py`（分类与失败落盘）、`tests/data/test_provider_fixtures.py`（fixture 覆盖/重放、原始响应禁止、字段漂移别名、失败不伪造数据）；CI 配置为新增文件，未在本机执行 GitHub Actions。
 
 - **P2-36（缺失功能，产品与合规）：免责声明、数据延迟披露与数据源授权** **部分落地（2026-11-06 回查）**
   - **回查差距**：`disclosure.py`、`/api/disclosure`、Web 顶部横幅与报告首页横幅、`FIL_DISCLOSURE_SCOPE/TEXT/POSITION` 开关已落地并有 `tests/api/test_disclosure.py`、`DisclosureTests`；未落地：每个 API 响应的统一 `meta.disclaimer/data_as_of/data_latency/model_limits` 信封；数据源再分发授权评估仍属法务事项。
@@ -492,7 +520,9 @@
   - 影响面：合规、用户误解、对外分发风险。
   - 建议：所有响应加统一 `meta.disclaimer/data_as_of/data_latency/model_limits`；报告/导出与 API 同源；明确「仅内部研究」或采购合规数据源；具体措辞与授权范围需产品/法务拍板。
   - **实际修法（拍板：内部研究，保留对外交付升级位）**：新增 `market_research/disclosure.py`，默认文案明确「数据来源为公开抓取、存在延迟与不完整、结论仅供研究参考、不构成投资建议」；Web 页顶部显著横幅（`index.html` + `app.js` 从 `/api/disclosure` 读取，失败保留内置文案）与报告首页横幅（`build_report` 在 hero 之前插入，带独立高对比样式）。文案与位置可配：`FIL_DISCLOSURE_SCOPE=internal|external`、`FIL_DISCLOSURE_TEXT`、`FIL_DISCLOSURE_POSITION=top|footer`；`/api/disclosure` 与页面/报告同源，便于未来对外交付统一替换。
-  - **未做**：每个 API 响应的统一 `meta.disclaimer/data_as_of/data_latency/model_limits` 信封（当前是页面与报告级披露 + `data_quality` 已有数据截止/降级信息）；数据源再分发授权评估仍属法务事项（拍板继续公开抓取、API 内部使用）。
+  - **已落地（2026-11-10）**：`api/response_meta.py:build()/enrich()` 生成统一 `meta` 信封（`disclaimer/data_as_of/data_latency/model_limits/data_source_license/config_hash`），`api/app.py:MetaEnvelope` 作为最外层中间件覆盖 `/api*` 下所有 JSON 响应（含 400/401 错误响应，`openapi.json` 例外），`api/schemas.py` 各响应模型默认携带；`data_license.py` 默认 `review_required`、禁止原始 fixture 再分发，并随 `/api/disclosure` 与 `meta.data_source_license` 透出。`data_as_of/data_latency` 只从响应内 `data_quality` 快照提取，缺失即 `unknown`，不猜联网日期。
+  - **仍开放**：对外披露具体措辞与「仅内部研究 / 采购合规数据源」的产品拍板，以及逐源数据授权与再分发范围的法务结论（技术护栏不替代法务意见）。
+  - 回归补充：`tests/api/test_disclosure.py`（统一 meta 字段、错误响应也带信封、`openapi.json` 不受影响、授权默认拒绝）。
   - 回归：`tests/research/test_report_render.py:DisclosureTests`（横幅位于 hero 之前且含三项声明、文案覆盖生效）、`tests/api/test_disclosure.py`（默认内部文案、对外作用域/位置/自定义文案、token 模式下接口仍公开）；相关 19 项测试通过。
   - 语义变化：Web 页与报告新增显著声明条；默认文案为内部研究口径，数值结果不变。
 
@@ -504,7 +534,8 @@
   - 建议：改用显式 per-request timeout（或执行器内线程局部配置），不要在共享进程里改全局默认；至少给同步单资产抓取加 watchdog/总超时，并在 `finally` 用引用计数保证最后一个退出者才恢复原值。
   - 与 P2-29 的关系：P2-29 讲限流与单点，本条是并发实现本身的全局状态缺陷，修法不同。
   - **实际修法**：`http_timeout` 改为 `threading.local()` 保存超时值（支持嵌套并在退出时恢复上一值），完全不调用 `socket.setdefaulttimeout`；模块导入时一次性给 `requests.Session.request` 注入线程级 `timeout`（已有显式 timeout 时不覆盖），把超时下沉到**每个请求**。这样 6 线程各自超时互不干扰，Flask 监听/连接 socket 不再被波及。
-  - **未做**：同步单资产的 watchdog/总超时（属 P2-29 数据源路线/调度策略范畴，保持挂起）。
+  - **已落地（2026-11-10）**：`tasks/sync.py` 新增 `_synchronize_with_watchdog()` / `AssetSyncTimeout` / `AssetSyncAborted`，在 daemon 线程内以 `http_deadline` + `abort` 协作取消，超时按资产隔离并记录 `watchdog_timeout` 后继续下一资产，写库前检查 abort；`FIL_SYNC_ASSET_TIMEOUT` 默认 300s，由 `Settings.validate()` 校验为正数。回归见 `tests/tasks/test_sync.py`（超时不阻塞下一资产、abort 后不写 store、非法值被拒）。
+  - **范围边界**：守护线程不被强杀，只在检查点协作退出；真实网络死锁场景需运维按资产调 `FIL_SYNC_ASSET_TIMEOUT`。
   - 回归：`tests/data/test_http.py`（全局 socket 默认值不变、线程隔离、嵌套恢复、requests 注入仅在缺省时）。
   - 语义变化：所有走 `requests` 的抓取（AkShare 主要入口）在 `http_timeout` 内都会收到显式 timeout；若某 provider 走原生 `urllib`/socket 且未传 timeout，则不再受进程级默认值保护（这是本次刻意移除的全局副作用）。
 
@@ -541,7 +572,9 @@
   - 已落地：新增 `api/version.py` 作为版本单一来源（`SERVICE_VERSION=0.3.0`、`API_VERSION=1`）。同一批路由同时挂在 `/api`（兼容）与 `/api/v1`（正式契约），两者都在 `/openapi.json` 中可见；所有 HTTP 响应带 `X-API-Version: 1` 头；`/api/health` 与 `/api/ready` 增加 `api_version` 字段。关键响应定义 Pydantic 契约：任务状态 `JobResponse`、结果信封 `ResultResponse`、存活/就绪 `HealthResponse`/`ReadyResponse`，由 FastAPI 在返回时校验并过滤未声明字段。认证模式下 v1 的 health/ready/disclosure 与旧路径一样公开。
   - 前端：`api/static/*` 继续调用兼容路径（两个路径由同一实现提供），本轮未改动，避免打断；文档注明 v1 为推荐路径。
   - 回归：`tests/api/test_contract.py`（原始 6 项，加 2026-11-09 的弃用头、脱敏配置、配置校验 3 项：新旧路径同体、版本头、OpenAPI 同时列出、v1 校验/提交、任务状态字段集合、结果信封字段集合、就绪版本）。`tests/api/test_routes.py` 18 项保持通过。
-  - **已关闭（2026-11-09）**：旧 `/api/*` 返回 `Deprecation: true`、后继版本 `Link`，以及可选的 `FIL_API_SUNSET` 日期；`v1` 路径不标弃用。仍开放：自动迁移脚本、兼容路径移除日期及 `Sunset` 具体日期的产品决定。
+  - **已关闭（2026-11-09）**：旧 `/api/*` 返回 `Deprecation: true`、后继版本 `Link`，以及可选的 `FIL_API_SUNSET` 日期；`v1` 路径不标弃用。
+  - **已落地（2026-11-10）**：`api/version.py` 增加 `LEGACY_REMOVE_AFTER=2027-04-01`、`LEGACY_SUNSET_HTTP_DATE` 默认 Sunset 头、`legacy_sunset()` 环境变量覆盖、`legacy_enabled()`（`FIL_API_LEGACY=0/1/auto`，auto 到期自动关闭）；`scripts/migrate_api_paths.py` 默认 dry-run、`--apply` 才写回，只替换未版本化的旧路径。回归见 `tests/api/test_legacy_migration.py`、`tests/api/test_contract.py`。
+  - **仍开放（产品决策）**：`2027-04-01` 是代码内计划值，到期前旧路由仍挂载；实际移除日、对外 `Sunset` 日期与外部客户端迁移完成度需产品拍板。
 
 - **P3-I（缺失功能）：资源上限与容器配额** — **已修复（2026-11-07）**
   - 现状（修复前）：`modeling/engine.py` 每个任务默认开 `cpu_count()-1` 个子进程；`FIL_MAX_JOBS=2` 时理论上同时占用约 `2×(CPU-1)` 个进程；不读取 cgroup，也没有单任务内存上限。

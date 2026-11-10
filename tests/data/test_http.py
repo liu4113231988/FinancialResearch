@@ -179,6 +179,27 @@ class RetryEdgeTests(unittest.TestCase):
         self.assertEqual(http._retry(flaky, tries=3, wait=0, source="x"), "ok")
         self.assertEqual(len(calls), 2)
 
+    def test_expired_deadline_prevents_another_request(self):
+        calls = []
+
+        def live():
+            calls.append(1)
+            return "ok"
+
+        with patch.object(http.provenance, "record"):
+            with self.assertRaises(TimeoutError):
+                http._retry(live, tries=4, wait=0,
+                            deadline=http.time.monotonic() - 1)
+        self.assertEqual(calls, [])
+
+    def test_deadline_caps_request_timeout_and_restores_state(self):
+        deadline = http.time.monotonic() + 0.5
+        with http.http_timeout(30), http.http_deadline(deadline):
+            self.assertEqual(http._thread_deadline(), deadline)
+            self.assertLessEqual(http._thread_timeout(), 0.5)
+        self.assertIsNone(http._thread_deadline())
+        self.assertIsNone(http._thread_timeout())
+
 
 if __name__ == "__main__":
     unittest.main()

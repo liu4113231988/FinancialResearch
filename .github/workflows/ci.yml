@@ -28,3 +28,14 @@ jobs:
           done
       - name: Unit tests
         run: python -u -m unittest discover -s tests -p "test_*.py" -t .
+      - name: Provider contract fixture replay
+        run: |
+          python -u scripts/record_provider_fixtures.py
+          python -u -m unittest tests.data.test_provider_fixtures
+      - name: Offline behavior regressions
+        run: |
+          python -u tests/regression/test_regressions.py
+          python -u tests/regression/test_p0_fixes.py
+          node tests/frontend/test_refit.js
+          node tests/frontend/test_ui_async.cjs
+          node tests/frontend/test_market_async.cjs

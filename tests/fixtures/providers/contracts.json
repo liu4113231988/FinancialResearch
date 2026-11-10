@@ -1,0 +1,345 @@
+{
+  "schema_version": 1,
+  "mode": "sanitized_schema_fixtures",
+  "raw_data_included": false,
+  "origin": "synthetic_contract_baseline",
+  "notice": "仅保存供应商字段契约与合成的可重放行；真实响应体涉及第三方再分发授权，禁止默认提交。使用 scripts/record_provider_fixtures.py --live 更新观测指纹。",
+  "sources": {
+    "fund_nav": {
+      "endpoint": "akshare fund_open_fund_info_em(累计净值走势)",
+      "fields": [
+        "日期",
+        "累计净值"
+      ],
+      "date_field": "日期",
+      "numeric_field": "累计净值",
+      "rows": [
+        {
+          "日期": "2026-11-02",
+          "累计净值": 1.0
+        },
+        {
+          "日期": "2026-11-03",
+          "累计净值": 1.01
+        },
+        {
+          "日期": "2026-11-04",
+          "累计净值": 1.02
+        }
+      ],
+      "live_observation": {
+        "endpoint": "akshare fund_open_fund_info_em(累计净值走势)",
+        "observed_at": "2026-11-10T00:59:47.012527+00:00",
+        "contract_fields": [
+          "日期",
+          "累计净值"
+        ],
+        "fields": [
+          "净值日期",
+          "累计净值"
+        ],
+        "field_aliases_applied": {
+          "日期": "净值日期"
+        },
+        "dtypes": {
+          "净值日期": "object",
+          "累计净值": "float64"
+        },
+        "row_count": 3920,
+        "date_min": "2010-08-20",
+        "date_max": "2026-11-09",
+        "numeric_min": 0.729,
+        "numeric_max": 6.129,
+        "content_sha256": "bdf462f73b467af7fcb78b387d437bd3f49314678a9813fc724707cebd8da0ea",
+        "raw_response_included": false
+      }
+    },
+    "fund_unit_nav": {
+      "endpoint": "akshare fund_open_fund_info_em(单位净值走势)",
+      "fields": [
+        "日期",
+        "单位净值"
+      ],
+      "date_field": "日期",
+      "numeric_field": "单位净值",
+      "rows": [
+        {
+          "日期": "2026-11-02",
+          "单位净值": 1.0
+        },
+        {
+          "日期": "2026-11-03",
+          "单位净值": 1.01
+        },
+        {
+          "日期": "2026-11-04",
+          "单位净值": 1.02
+        }
+      ],
+      "live_observation": {
+        "endpoint": "akshare fund_open_fund_info_em(单位净值走势)",
+        "observed_at": "2026-11-10T00:59:47.447748+00:00",
+        "contract_fields": [
+          "日期",
+          "单位净值"
+        ],
+        "fields": [
+          "净值日期",
+          "单位净值"
+        ],
+        "field_aliases_applied": {
+          "日期": "净值日期"
+        },
+        "dtypes": {
+          "净值日期": "object",
+          "单位净值": "float64"
+        },
+        "row_count": 3920,
+        "date_min": "2010-08-20",
+        "date_max": "2026-11-09",
+        "numeric_min": 0.729,
+        "numeric_max": 6.129,
+        "content_sha256": "c6dc234d2ed6fe0a9419d654692990c8ef7c4e655a650795d1e75d7b9c7fadea",
+        "raw_response_included": false
+      }
+    },
+    "fund_cum_return": {
+      "endpoint": "akshare fund_open_fund_info_em(累计收益率走势)",
+      "fields": [
+        "日期",
+        "累计收益率"
+      ],
+      "date_field": "日期",
+      "numeric_field": "累计收益率",
+      "rows": [
+        {
+          "日期": "2026-11-02",
+          "累计收益率": 0.0
+        },
+        {
+          "日期": "2026-11-03",
+          "累计收益率": 1.0
+        },
+        {
+          "日期": "2026-11-04",
+          "累计收益率": 2.0
+        }
+      ],
+      "live_observation": {
+        "endpoint": "akshare fund_open_fund_info_em(累计收益率走势)",
+        "observed_at": "2026-11-10T00:59:48.213814+00:00",
+        "contract_fields": [
+          "日期",
+          "累计收益率"
+        ],
+        "fields": [
+          "日期",
+          "累计收益率"
+        ],
+        "field_aliases_applied": {},
+        "dtypes": {
+          "日期": "object",
+          "累计收益率": "float64"
+        },
+        "row_count": 208,
+        "date_min": "2010-08-20",
+        "date_max": "2026-11-09",
+        "numeric_min": -26.3,
+        "numeric_max": 487.2,
+        "content_sha256": "5b40a0f4b024302627b37c90402eb220174af3dbdf3d6b7a325675c810b05da2",
+        "raw_response_included": false
+      }
+    },
+    "index_sina": {
+      "endpoint": "akshare stock_zh_index_daily",
+      "fields": [
+        "date",
+        "close"
+      ],
+      "date_field": "date",
+      "numeric_field": "close",
+      "rows": [
+        {
+          "date": "2026-11-02",
+          "close": 4000.0
+        },
+        {
+          "date": "2026-11-03",
+          "close": 4010.0
+        },
+        {
+          "date": "2026-11-04",
+          "close": 4020.0
+        }
+      ],
+      "live_observation": {
+        "endpoint": "akshare stock_zh_index_daily",
+        "observed_at": "2026-11-10T00:59:48.651109+00:00",
+        "contract_fields": [
+          "date",
+          "close"
+        ],
+        "fields": [
+          "date",
+          "close"
+        ],
+        "field_aliases_applied": {},
+        "dtypes": {
+          "date": "object",
+          "close": "float64"
+        },
+        "row_count": 6026,
+        "date_min": "2002-01-04",
+        "date_max": "2026-11-09",
+        "numeric_min": 818.033,
+        "numeric_max": 5877.202,
+        "content_sha256": "8aa378d3b10a82ef9d831d511c654fe4165762c03db9b5a667d8a6f108d7ef05",
+        "raw_response_included": false
+      }
+    },
+    "index_sw": {
+      "endpoint": "akshare index_hist_sw(period=day)",
+      "fields": [
+        "日期",
+        "收盘"
+      ],
+      "date_field": "日期",
+      "numeric_field": "收盘",
+      "rows": [
+        {
+          "日期": "2026-11-02",
+          "收盘": 3000.0
+        },
+        {
+          "日期": "2026-11-03",
+          "收盘": 3010.0
+        },
+        {
+          "日期": "2026-11-04",
+          "收盘": 3020.0
+        }
+      ],
+      "live_observation": {
+        "endpoint": "akshare index_hist_sw(period=day)",
+        "observed_at": "2026-11-10T00:59:49.194049+00:00",
+        "contract_fields": [
+          "日期",
+          "收盘"
+        ],
+        "fields": [
+          "日期",
+          "收盘"
+        ],
+        "field_aliases_applied": {},
+        "dtypes": {
+          "日期": "object",
+          "收盘": "float64"
+        },
+        "row_count": 6488,
+        "date_min": "1999-12-30",
+        "date_max": "2026-11-09",
+        "numeric_min": 337.64,
+        "numeric_max": 4952.95,
+        "content_sha256": "a3f8acca87572454a3ac1890240d3b781b2424a757a243ff412bc40ef30ee29e",
+        "raw_response_included": false
+      }
+    },
+    "csindex_pe": {
+      "endpoint": "akshare stock_zh_index_value_csindex(市盈率2)",
+      "fields": [
+        "日期",
+        "市盈率2"
+      ],
+      "date_field": "日期",
+      "numeric_field": "市盈率2",
+      "rows": [
+        {
+          "日期": "2026-11-02",
+          "市盈率2": 12.0
+        },
+        {
+          "日期": "2026-11-03",
+          "市盈率2": 12.1
+        },
+        {
+          "日期": "2026-11-04",
+          "市盈率2": 12.2
+        }
+      ],
+      "live_observation": {
+        "endpoint": "akshare stock_zh_index_value_csindex(市盈率2)",
+        "observed_at": "2026-11-10T00:59:49.386001+00:00",
+        "contract_fields": [
+          "日期",
+          "市盈率2"
+        ],
+        "fields": [
+          "日期",
+          "市盈率2"
+        ],
+        "field_aliases_applied": {},
+        "dtypes": {
+          "日期": "object",
+          "市盈率2": "float64"
+        },
+        "row_count": 20,
+        "date_min": "2026-10-13",
+        "date_max": "2026-11-09",
+        "numeric_min": 15.0,
+        "numeric_max": 16.06,
+        "content_sha256": "5314f2c58f183d416105085a7112ef8e1797ce16afc1658372b2eb967c491868",
+        "raw_response_included": false
+      }
+    },
+    "csindex_dividend": {
+      "endpoint": "akshare stock_zh_index_value_csindex(股息率2)",
+      "fields": [
+        "日期",
+        "股息率2"
+      ],
+      "date_field": "日期",
+      "numeric_field": "股息率2",
+      "rows": [
+        {
+          "日期": "2026-11-02",
+          "股息率2": 2.0
+        },
+        {
+          "日期": "2026-11-03",
+          "股息率2": 2.1
+        },
+        {
+          "日期": "2026-11-04",
+          "股息率2": 2.2
+        }
+      ],
+      "live_observation": {
+        "endpoint": "akshare stock_zh_index_value_csindex(股息率2)",
+        "observed_at": "2026-11-10T00:59:49.549218+00:00",
+        "contract_fields": [
+          "日期",
+          "股息率2"
+        ],
+        "fields": [
+          "日期",
+          "股息率2"
+        ],
+        "field_aliases_applied": {},
+        "dtypes": {
+          "日期": "object",
+          "股息率2": "float64"
+        },
+        "row_count": 20,
+        "date_min": "2026-10-13",
+        "date_max": "2026-11-09",
+        "numeric_min": 2.54,
+        "numeric_max": 2.73,
+        "content_sha256": "c738bbe11cd3e0aae77b3bd166219321f7ec33cda2e8cc2b8dbf91244f8dcd8a",
+        "raw_response_included": false
+      }
+    }
+  },
+  "live_recorded_at": "2026-11-10T00:59:49.550029+00:00",
+  "live_errors": {},
+  "live_observations_mode": "sanitized_fingerprint_snapshot"
+}

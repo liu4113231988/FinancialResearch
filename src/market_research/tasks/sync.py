@@ -11,18 +11,74 @@ import logging
 import os
 from pathlib import Path
 from importlib.resources import files
+import queue
 import threading
+import time
 
 import numpy as np
 import pandas as pd
 
 import market_research.config as C
+import market_research.data.http as http
 import market_research.data.storage as storage
 from market_research import logs
 
 LOG = logging.getLogger(__name__)
 SHANGHAI = timezone(timedelta(hours=8))
 HISTORY_START = "1990-01-01"
+
+
+class AssetSyncTimeout(TimeoutError):
+    """单个资产超过同步总预算；调用方应记录错误并继续下一资产。"""
+
+
+class AssetSyncAborted(RuntimeError):
+    """已超时资产在恢复后不得再写 canonical 或窗口缓存。"""
+
+
+def sync_asset_timeout() -> float:
+    from market_research.settings import Settings
+    return float(Settings.load().sync_asset_timeout)
+
+
+def _check_abort(abort) -> None:
+    if abort is not None and abort.is_set():
+        raise AssetSyncAborted("单资产同步已超时，取消后续写入")
+
+
+def _synchronize_with_watchdog(asset, current, timeout=None, runner=None):
+    """在守护线程内同步单资产，超时置 abort 并立即返回（P2-37）。
+
+    守护线程不会被强杀；fetch/synchronize/窗口回写的写入点都检查 abort，
+    HTTP deadline 同时阻止超时资产继续重试或等待限流，避免后续写旧数据。
+    """
+    runner = runner or synchronize
+    timeout = sync_asset_timeout() if timeout is None else float(timeout)
+    abort = threading.Event()
+    deadline = time.monotonic() + timeout
+    outcome = queue.Queue(maxsize=1)
+
+    def worker():
+        with http.http_deadline(deadline):
+            try:
+                outcome.put(("ok", runner(asset, current, abort=abort)))
+            except BaseException as exc:                  # noqa: BLE001
+                outcome.put(("error", exc))
+
+    thread = threading.Thread(target=worker, name=f"sync-{asset.get('asset_key')}",
+                              daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        abort.set()
+        raise AssetSyncTimeout(
+            f"{asset.get('asset_key')} 同步超过 {timeout:g}s，已隔离")
+    if outcome.empty():
+        raise RuntimeError(f"{asset.get('asset_key')} 同步线程未返回结果")
+    status, value = outcome.get_nowait()
+    if status == "error":
+        raise value
+    return value
 
 
 def now():
@@ -201,24 +257,29 @@ def due(asset, current):
     return datetime.fromisoformat(success) < scheduled
 
 
-def fetch(asset, start, end):
+def fetch(asset, start, end, abort=None):
     import market_research.data.marketdata as D
+    _check_abort(abort)
     kind, code, basis = asset["kind"], asset["code"], asset["basis"]
     if kind == "fund":
         series = D.fetch_fund_total_return(code, start) if basis == "total" else D.fetch_fund_nav(code, start)
         if series.attrs.get("degraded"):
             raise ValueError("总回报构造降级，保留上一份数据")
-        return series.to_frame()
-    if kind == "index" and code in C.SW_INDUSTRY:
-        return D.fetch_index_sw(code, start).to_frame(name="close")
-    from market_research.market.analysis import load_bars
-    return load_bars(kind, code, start, end, basis, refresh=True, _fetch_only=True)
+        result = series.to_frame()
+    elif kind == "index" and code in C.SW_INDUSTRY:
+        result = D.fetch_index_sw(code, start).to_frame(name="close")
+    else:
+        from market_research.market.analysis import load_bars
+        result = load_bars(kind, code, start, end, basis, refresh=True, _fetch_only=True)
+    _check_abort(abort)
+    return result
 
 
-def _refresh_window_caches(asset, frame):
+def _refresh_window_caches(asset, frame, abort=None):
     """用 canonical 正史刷新既有窗口，不扩大任何同步资产池。"""
     import market_research.data.marketdata as D
     for target, saved, columns in datasets():
+        _check_abort(abort)
         if asset["kind"] == "fund" and target.startswith("fund_nav_") and saved.get("code") == asset["code"] and saved.get("basis", "cum") == asset["basis"]:
             sliced = frame.loc[saved.get("start"):].copy()
             sliced.columns = columns
@@ -232,6 +293,7 @@ def _refresh_window_caches(asset, frame):
         else:
             continue
         if len(sliced):
+            _check_abort(abort)
             storage.write(target, sliced, D._with_info({k:v for k,v in saved.items() if k != "info"}, sliced))
 
 
@@ -276,7 +338,8 @@ def overlay_refresh(kind, code, basis, incoming, end=None):
     return True
 
 
-def synchronize(asset, current, end=None):
+def synchronize(asset, current, end=None, abort=None):
+    _check_abort(abort)
     end = end or current.date().isoformat()
     name = history_name(asset)
     old = storage.read(name)
@@ -284,7 +347,7 @@ def synchronize(asset, current, end=None):
     # can revise old prices without a reliable corporate-action feed.
     full = old is None or asset["kind"] == "fund" or bool(asset["basis"])
     start = HISTORY_START if full else max(HISTORY_START, (old.index[-1] - pd.Timedelta(days=10)).strftime("%Y-%m-%d"))
-    incoming = fetch(asset, start, end)
+    incoming = fetch(asset, start, end, abort=abort)
     if incoming is None or incoming.empty:
         raise ValueError("数据源返回空历史，保留旧数据")
     incoming = incoming.loc[:end].sort_index()
@@ -307,10 +370,11 @@ def synchronize(asset, current, end=None):
         frame = pd.concat([head, incoming, tail]).sort_index()
         if len(frame) < len(old):
             raise ValueError("增量合并后行数减少，保留旧数据")
+    _check_abort(abort)
     meta = {"kind": asset["kind"], "code": asset["code"], "basis": asset["basis"], "through": end,
             "info": {**incoming.attrs, "fetched_at": current.isoformat(), "data_end": frame.index[-1].date().isoformat()}}
     storage.write(name, frame, meta)
-    _refresh_window_caches(asset, frame)
+    _refresh_window_caches(asset, frame, abort=abort)
     return "full" if full else "incremental", len(frame)
 
 
@@ -403,14 +467,17 @@ def tick(current=None):
             with storage.connection() as db:
                 db.execute("UPDATE sync_assets SET last_attempt=?,error=NULL,state='running' WHERE asset_key=?", [current.isoformat(), asset["asset_key"]])
             try:
-                mode, rows = synchronize(asset, current)
+                mode, rows = _synchronize_with_watchdog(asset, current)
                 with storage.connection() as db:
                     db.execute("UPDATE sync_assets SET last_success=?,mode=?,rows=?,error=NULL,state='success' WHERE asset_key=?",
                                [current.isoformat(), mode, rows, asset["asset_key"]])
             except Exception as error:
                 LOG.exception("同步失败 %s", asset["asset_key"])
+                message = str(error)[:500]
+                if isinstance(error, AssetSyncTimeout):
+                    message = f"watchdog_timeout: {message}"
                 with storage.connection() as db:
-                    db.execute("UPDATE sync_assets SET error=?,state='error' WHERE asset_key=?", [str(error)[:500], asset["asset_key"]])
+                    db.execute("UPDATE sync_assets SET error=?,state='error' WHERE asset_key=?", [message, asset["asset_key"]])
         _accumulate_valuation(current)
 
 

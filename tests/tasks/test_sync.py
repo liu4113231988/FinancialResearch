@@ -234,5 +234,55 @@ class DataEndFreshnessTests(unittest.TestCase):
         self.assertEqual(len(out), 2)
 
 
+class AssetWatchdogTests(unittest.TestCase):
+    """P2-37：单资产超时必须被隔离，且后续资产继续执行。"""
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(dir=C.ROOT / "output")
+        self.config = patch.object(C, "DATA_DIR", Path(self.directory.name))
+        self.config.start()
+
+    def tearDown(self):
+        self.config.stop()
+        self.directory.cleanup()
+
+    def test_timeout_does_not_block_next_asset_or_write_after_abort(self):
+        first = sync.register("stock", "600519", "qfq")
+        second = sync.register("stock", "000001", "qfq")
+
+        def fake_synchronize(asset, current, abort=None):
+            if str(asset["code"]).endswith("600519"):
+                while not abort.wait(0.01):
+                    pass
+                sync._check_abort(abort)
+            return "full", 1
+
+        with patch.dict(os.environ, {"FIL_SYNC_ASSET_TIMEOUT": "0.05"}, clear=False), \
+             patch.object(sync, "discover"), \
+             patch.object(sync, "_accumulate_valuation"), \
+             patch.object(sync, "synchronize", side_effect=fake_synchronize):
+            sync.tick(sync.now())
+        states = {row["asset_key"]: row for row in sync.assets()}
+        self.assertIn("watchdog_timeout", states[first]["error"])
+        self.assertEqual(states[second]["state"], "success")
+
+        with patch.object(storage, "write") as write:
+            with self.assertRaises(sync.AssetSyncTimeout):
+                sync._synchronize_with_watchdog(
+                    {"asset_key": "late", "kind": "stock", "code": "600519",
+                     "basis": "qfq"},
+                    sync.now(), timeout=0.02, runner=fake_synchronize)
+        write.assert_not_called()
+
+    def test_aborted_synchronize_rejects_canonical_write(self):
+        abort = sync.threading.Event()
+        abort.set()
+        with patch.object(storage, "write") as write, \
+             self.assertRaises(sync.AssetSyncAborted):
+            sync.synchronize({"asset_key": "x", "kind": "stock",
+                              "code": "600519", "basis": "qfq"},
+                             sync.now(), abort=abort)
+        write.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

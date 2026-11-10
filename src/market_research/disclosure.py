@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os
 
+from market_research import data_license
+
 TEXT = {
     "internal": ("数据来源为公开抓取，存在延迟与不完整；"
                  "历史研究未建立稳定的日频方向预测优势，方向概率、规则条件与仓位状态"
@@ -39,7 +41,8 @@ def text() -> str:
 
 
 def payload() -> dict:
-    return {"scope": scope(), "position": position(), "text": text()}
+    return {"scope": scope(), "position": position(), "text": text(),
+            "data_source_license": data_license.status()}
 
 
 def html() -> str:
