@@ -7,6 +7,7 @@
     python run.py holdings --pool             # 用扩池后的基金池（market_research.funds.universe.load_pool）
     python run.py holdings --refresh          # 强制重抓持仓与行业映射
     python run.py holdings --window-years 2   # 近 2 年窗口（下限 2 年）
+    python run.py holdings --suggest-dividend # 打印当期静态股息率建议值（不参与计算）
 
 做两件事：
 
@@ -61,6 +62,26 @@ def _corr_series(al: dict) -> pd.Series:
     return al["periods"]["权重相关"].dropna()
 
 
+def _format_suggestion(s: dict, actual: float) -> list[str]:
+    """格式化股息率建议值；必须明确声明未参与本次计算。"""
+    lines = [f"[holdings] 参考建议（{s['source']} 当期静态快照 {s['as_of']}）："]
+    if not s.get("available"):
+        lines.append(f"  不可用：{s.get('reason')}；"
+                     f"本次实际取值仍为 {actual:.2%}，结果不变")
+        return lines
+    lines.append(
+        f"  覆盖 {s['covered']}/{s['expected']} 个申万一级行业 · "
+        f"中位数 {s['suggested']:.2%} / 均值 {s['mean']:.2%} · "
+        f"区间 {s['min']:.2%}~{s['max']:.2%}")
+    lines.append(
+        "  仅作 C.RBSA['index_dividend_annual'] 情景参数建议值；"
+        f"本次实际取值仍为 {actual:.2%}，结果不变。")
+    lines.append(
+        "  当期静态截面不可回填历史（会引入未来信息）；"
+        "P1-10 仍需逐行业历史时点股息率或全收益行业指数。")
+    return lines
+
+
 def run_one(code: str, industry_map: pd.Series, refresh: bool = False) -> dict:
     """单只基金：数据 → RBSA → 对齐 → 持仓基准（实现见 funds/holdings.py）。"""
     return H.fit_fund_holdings(code, industry_map, refresh=refresh)
@@ -76,6 +97,9 @@ def main(argv=None, *, prog=None):
     ap.add_argument("--pool", action="store_true",
                     help="用扩池后的基金池（output/data/fund_pool.csv），"
                          "而非 C.EXTENDED_FUNDS")
+    ap.add_argument("--suggest-dividend", action="store_true",
+                    help="联网打印申万一级行业当期静态股息率建议值；"
+                         "仅作情景参数参考，不改默认值、不参与计算")
     args = ap.parse_args(argv)
     win_start, _ = apply_window(args)
     codes = args.codes
@@ -93,6 +117,18 @@ def main(argv=None, *, prog=None):
     div = float(C.RBSA.get("index_dividend_annual", 0.0) or 0.0)
     print(f"[holdings] 行业指数不含股息，持仓基准股息腿按年化 {div:.2%} 计"
           f"（`C.RBSA['index_dividend_annual']`，0 = 历史口径）")
+
+    if args.suggest_dividend:
+        from market_research.data.providers.industry_dividend import (
+            fetch_snapshot, suggest_index_dividend)
+        try:
+            suggestion = suggest_index_dividend(fetch_snapshot())
+        except Exception as error:        # noqa: BLE001
+            print(f"[holdings] 建议值取数失败：{type(error).__name__}: "
+                  f"{str(error)[:120]}（不影响本次计算）")
+        else:
+            for line in _format_suggestion(suggestion, div):
+                print(line)
 
     industry_map = H.load_industry_map(refresh=args.refresh)
     if industry_map.empty:

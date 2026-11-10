@@ -145,6 +145,8 @@ uv run python run.py predictions summary
 uv run python run.py predictions settle --limit 500
 ```
 
+`holdings --suggest-dividend` 联网读取 `sw_index_first_info` 的逐申万一级行业**当期静态股息率**，仅把候选行业中位数等统计作为 `RBSA["index_dividend_annual"]` 的情景参数建议值打印：不写配置、不改默认值 `0.0`、不参与任何计算，现有结果不变。当期截面不可回填历史（会引入未来信息），逐行业历史时点股息率与全收益行业指数仍待补齐，见 [TODO](TODO.md)。只想查看建议值可用只读入口（不触发持仓分析）：`uv run python -m market_research.data.providers.industry_dividend`。
+
 实盘最新收盘的方向概率与规则买卖信号会写入 `prediction_records`；到期后用 `predictions settle` 结算，`predictions summary` 查看命中率/Brier。口径与边界见[预测台账与回验](docs/预测台账与回验.md)。
 
 也可使用 `uv run market-research-cli ...`、安装后的 `fil ...` 或 `uv run python -m market_research.cli ...`。原 `uv run python run.py 110022` 仍默认基金分析；不带参数仍分析全部演示基金。查看帮助不会执行研究计算。
