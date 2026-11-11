@@ -43,6 +43,16 @@ def main(argv=None, *, prog=None):
                     help="抓取起点，默认 C.FETCH_START_DATE（分析窗口在分析时裁剪）")
     args = ap.parse_args(argv)
 
+    # P3-S：--start 必须是合法 ISO 日期 —— 旧实现直接把用户输入交给
+    # fetch_start_for 的**字符串字典序**比较，"2021/10/12" 这类非法格式被
+    # 静默判为"晚于固定起点"，且提示文案固定说"早于固定抓取起点"，
+    # 方向完全误导。validation/window._iso 的严格校验正是为此写的，这里复用。
+    if args.start:
+        from market_research.validation.window import _iso
+        try:
+            _iso(args.start, "--start")
+        except ValueError as error:
+            ap.error(str(error))
     start = D.fetch_start_for(args.start)
     if args.start and args.start != start:
         print(f"  注：--start {args.start} 早于固定抓取起点，按 {start} 抓取")

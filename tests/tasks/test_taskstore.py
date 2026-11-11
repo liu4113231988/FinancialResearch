@@ -13,7 +13,8 @@ import pandas as pd
 import market_research.config as C
 import market_research.data.storage as storage
 import market_research.tasks.sync as sync
-from market_research.tasks.store import DurableJobStore, bind_attempt, LEASE_SECONDS
+from market_research.tasks.store import (DurableJobStore, bind_attempt,
+                                         LEASE_SECONDS, RECOVER_GRACE_SECONDS)
 from market_research.errors import JobsBusy
 
 
@@ -72,7 +73,12 @@ class TaskTests(unittest.TestCase):
         jid,_=self.enqueue()
         first=self.store.claim()
         self.assertTrue(self.store.heartbeat(jid,first['token']))
+        # P2-39：租约刚过期但仍在回收宽限期内时不得转回 queued —— 否则同步
+        # 长事务让心跳拿不到锁时，任务会被二次领取、双进程并发执行。
         with patch('market_research.tasks.store.time.time',return_value=time.time()+LEASE_SECONDS+1):
+            self.assertIsNone(self.store.claim())
+            self.assertEqual(self.store.get(jid)['status'],'running')
+        with patch('market_research.tasks.store.time.time',return_value=time.time()+LEASE_SECONDS+RECOVER_GRACE_SECONDS+1):
             second=self.store.claim()
         self.assertEqual(second['id'],jid)
         self.assertNotEqual(first['token'],second['token'])

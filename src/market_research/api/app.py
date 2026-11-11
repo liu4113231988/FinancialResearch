@@ -15,7 +15,8 @@ from fastapi.staticfiles import StaticFiles
 
 import market_research.config as C
 from market_research import logs
-from market_research.errors import JobsBusy, StorageBusy
+from market_research.errors import (JobsBusy, StorageBusy, NavBasisUnavailable,
+                                    ProviderContractError)
 from market_research.security import AccessControl, mode_description
 from market_research.tasks.jobs import JOBS
 from market_research.tasks.processes import launch
@@ -50,7 +51,11 @@ class BodyLimit:
             messages.append(message)
             size+=len(message.get('body',b''))
             if size>self.limit:
-                return await JSONResponse({'ok':False,'error':'请求体超过 8 MB','field':'body'},status_code=413)(scope,receive,send)
+                # 超限后请求体未读完，keep-alive 连接上继续读会协议错乱：
+                # 明确要求服务端在响应后关闭连接（P2-42）。
+                return await JSONResponse({'ok':False,'error':'请求体超过 8 MB','field':'body'},
+                                          status_code=413,
+                                          headers={'connection':'close'})(scope,receive,send)
             if message['type']=='http.disconnect' or not message.get('more_body',False):
                 break
         async def replay():
@@ -199,6 +204,12 @@ def create_app():
 
     @app.exception_handler(ValueError)
     async def invalid(request:Request,error:ValueError):
+        # P2-42：NavBasisUnavailable / ProviderContractError 是 ValueError 子类，
+        # 但它们是**服务端数据问题**（口径降级、供应商契约破坏），不是用户
+        # 参数错误 —— 不能被这里伪装成 400 field=params；交给 500 并留日志。
+        if isinstance(error,(NavBasisUnavailable,ProviderContractError)):
+            LOG.error('数据契约失败 %s',request.url.path,exc_info=error)
+            return JSONResponse({'ok':False,'error':str(error),'field':'data_source'},status_code=500)
         return JSONResponse({'ok':False,'error':str(error),'field':'params'},status_code=400)
 
     @app.exception_handler(Exception)

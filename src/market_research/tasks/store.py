@@ -13,6 +13,11 @@ from market_research.settings import Settings
 
 _TOKEN = ContextVar("job_attempt_token", default=None)
 LEASE_SECONDS = 45
+# P2-39：心跳用普通连接（默认 10s 锁等待），同步长事务可能让心跳连续失败。
+# recover 只在租约过期后再留一段宽限才回收，避免「锁饿死 → 租约过期 →
+# 二次领取 → 双进程并发执行」；配合 supervisor 的本地子进程排除（claim
+# 的 exclude 参数），单 supervisor 部署下同 jid 不会被本机重复领取。
+RECOVER_GRACE_SECONDS = 60
 
 
 @contextmanager
@@ -26,6 +31,21 @@ def bind_attempt(token):
 
 def _schema(db):
     db.execute((files("market_research.data") / "migrations/003_jobs.sql").read_text(encoding="utf-8"))
+
+
+def _ensure_schema(db):
+    """读/轮询路径的建表守卫（P3-M）：表已存在时不执行 DDL。
+
+    旧实现每次连接都跑 CREATE TABLE IF NOT EXISTS —— 即便表已存在，
+    DuckDB 也会开启写事务与同步写锁争抢（supervisor 每 0.5s 轮询 public、
+    /api/ready 在库繁忙时兜底建表，都会加剧锁饥饿）。这里先查目录再建，
+    只读查询不产生写事务；表缺失时行为与旧的 IF NOT EXISTS 等价。
+    """
+    exists = db.execute(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name='analysis_jobs'"
+    ).fetchone()[0]
+    if not exists:
+        _schema(db)
 
 
 def _row(cursor):
@@ -45,14 +65,14 @@ class DurableJobStore:
             _schema(db)
 
     def stats(self):
-        """队列深度与状态分布（供 /api/ready，不创建 schema）。"""
+        """队列深度与状态分布（供 /api/ready）。"""
         try:
             with storage.connection(timeout=2.0) as db:
                 rows = db.execute(
                     "SELECT status, count(*) FROM analysis_jobs GROUP BY status").fetchall()
         except Exception:                                  # noqa: BLE001
             with storage.connection() as db:
-                _schema(db)
+                _ensure_schema(db)
                 rows = db.execute(
                     "SELECT status, count(*) FROM analysis_jobs GROUP BY status").fetchall()
         return {str(status): int(count) for status, count in rows}
@@ -123,19 +143,28 @@ class DurableJobStore:
 
     def recover(self, db, current):
         maximum = Settings.load().max_attempts
+        # P2-39：宽限期叠加在租约之上 —— 心跳必须连续 LEASE+GRACE 秒拿不到锁
+        # 才判真死。锁短暂饿死（同步长事务）时任务保持 running，不再被转回
+        # queued 造成双进程并发。
         db.execute("UPDATE analysis_jobs SET status=CASE WHEN attempts < ? THEN 'queued' ELSE 'error' END, stage=CASE WHEN attempts < ? THEN '恢复中断任务' ELSE '恢复失败' END, error=CASE WHEN attempts < ? THEN NULL ELSE '计算进程多次中断' END, token=NULL, updated=? WHERE status='running' AND lease_until < ?",
-                   [maximum, maximum, maximum, current, current])
+                   [maximum, maximum, maximum, current, current - RECOVER_GRACE_SECONDS])
 
-    def claim(self):
+    def claim(self, exclude=()):
         current = time.time()
         settings = Settings.load()
         with storage.connection() as db:
-            _schema(db)
+            _ensure_schema(db)
             self._expire(db, current, settings)
             self.recover(db, current)
             if self._active_count(db, current, settings) >= settings.max_jobs:
                 return None
-            job = _row(db.execute("SELECT * FROM analysis_jobs WHERE status='queued' ORDER BY created,id LIMIT 1"))
+            query = "SELECT * FROM analysis_jobs WHERE status='queued'"
+            params = []
+            if exclude:
+                query += " AND id NOT IN (" + ",".join("?" * len(exclude)) + ")"
+                params = list(exclude)
+            query += " ORDER BY created,id LIMIT 1"
+            job = _row(db.execute(query, params))
             if job is None:
                 return None
             token = uuid.uuid4().hex
@@ -159,7 +188,7 @@ class DurableJobStore:
             values["detail"] = json.dumps(values["detail"], ensure_ascii=False)
         assignments = ",".join(f"{k}=?" for k in values)
         with storage.connection() as db:
-            _schema(db)
+            _ensure_schema(db)
             db.execute(f"UPDATE analysis_jobs SET {assignments},updated=? WHERE id=? AND status='running' AND token=?",
                        [*values.values(), time.time(), jid, _TOKEN.get()])
 
@@ -167,7 +196,7 @@ class DurableJobStore:
         from market_research.serialization import _jsafe
         serialized = json.dumps(_jsafe(result), ensure_ascii=False, allow_nan=False) if result is not None else None
         with storage.connection() as db:
-            _schema(db)
+            _ensure_schema(db)
             db.execute("UPDATE analysis_jobs SET status=?,stage=?,progress=?,result=?,error=?,updated=? WHERE id=? AND status='running' AND token=?",
                        [status, "完成" if status == "done" else "失败", 1.0 if status == "done" else 0.0, serialized, error, time.time(), jid, token or _TOKEN.get()])
 
@@ -185,12 +214,12 @@ class DurableJobStore:
 
     def get(self, jid):
         with storage.connection() as db:
-            _schema(db)
+            _ensure_schema(db)
             return _row(db.execute("SELECT * FROM analysis_jobs WHERE id=?", [jid]))
 
     def public(self, jid):
         with storage.connection() as db:
-            _schema(db)
+            _ensure_schema(db)
             job = _row(db.execute("SELECT id,code,models,status,stage,progress,detail,created,updated,attempts,error FROM analysis_jobs WHERE id=?", [jid]))
         return job
 

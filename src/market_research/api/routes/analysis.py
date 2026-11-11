@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+import logging
 import market_research.config as C
 import market_research.data.marketdata as D
 from market_research.validation.window import parse_window
@@ -8,6 +9,7 @@ import market_research.services.analysis as services
 from market_research.api.schemas import AnalysisRequest, RefitRequest, BacktestRequest, HoldingsRequest, SubmissionResponse
 
 router=APIRouter()
+LOG=logging.getLogger(__name__)
 
 # 这两个端点跑在 URL 请求线程里，**不能**联网取数：
 #   - /api/corr 首次取数要抓 40+ 个指数，几十秒起，请求线程里既不可取消也不占
@@ -69,13 +71,20 @@ def correlation(code:str,win:int=120,start:str|None=None,end:str|None=None):
             submission=services.submit('corr',{'code':code,'win':win,
                                                'start':start,'end':end})
         except JobsBusy as error:
-            return JSONResponse({'error':str(error)},status_code=429)
+            # P2-42：手工错误响应补齐 ErrorResponse 契约（ok/field）与
+            # Retry-After，与全局异常处理器的口径一致。
+            return JSONResponse({'ok':False,'error':str(error),'field':'concurrency'},
+                                status_code=429,headers={'Retry-After':'30'})
         return JSONResponse(dict(submission),status_code=202)
     except StorageBusy:
         # P2-30：交给全局异常处理映射为 503，不要在这里退化成通用 500。
         raise
     except Exception as error:
-        return JSONResponse({'error':f'{type(error).__name__}: {str(error)[:200]}'},status_code=500)
+        # P2-42：catch-all 必须留日志 —— 只把 500 回给客户端、日志里查不到
+        # 根因，与全局 handler 记 exc_info 的口径不一致。
+        LOG.exception('相关性面板读取失败 %s',code)
+        return JSONResponse({'ok':False,'field':'internal',
+                             'error':f'{type(error).__name__}: {str(error)[:200]}'},status_code=500)
     try:
         from market_research.funds.payloads import correlation_block
         result=correlation_block(panel,panel['__FUND__'],roll_n=max(20,min(win,750)))
@@ -84,4 +93,6 @@ def correlation(code:str,win:int=120,start:str|None=None,end:str|None=None):
                 'data_quality':dict(getattr(panel,'attrs',{}).get('data_quality') or {}),
                 'data_warnings':list(getattr(panel,'attrs',{}).get('warnings') or [])}
     except Exception as error:
-        return JSONResponse({'error':f'{type(error).__name__}: {str(error)[:200]}'},status_code=500)
+        LOG.exception('相关性计算失败 %s',code)
+        return JSONResponse({'ok':False,'field':'internal',
+                             'error':f'{type(error).__name__}: {str(error)[:200]}'},status_code=500)

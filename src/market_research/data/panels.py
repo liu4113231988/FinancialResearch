@@ -56,6 +56,15 @@ def align_prices(px: pd.DataFrame, nav: pd.Series, max_ffill: int = 5,
     df = df.drop(columns=dropped)
 
     # 掐头去尾并剔除中间缺失日（连续缺失超过 max_ffill 的交易日直接放弃）
+    dropped_rows = len(df) - int(df.dropna().shape[0])
+    if dropped_rows:
+        # P3-R：整行 dropna 会把「任一指数连续缺失 >max_ffill 区间」的行连同
+        # 基金净值一起删除，滚动窗口实际跨度被静默压缩 —— 只有覆盖率剔除
+        # 有 warnings，行删除本身此前无提示。
+        message = (f"对齐剔除中间缺失日 {dropped_rows} 个（指数连续缺失超过 "
+                   f"{max_ffill} 天，基金净值一并被删，窗口跨度被压缩）")
+        LOG.warning("%s", message)
+        warnings.append(message)
     out = df.dropna()
     # ★ 降级必须留痕：否则前端/报告只看到"对齐后的干净表"，
     #   不知道口径已经从"全候选池"变成了"剔除后的子集"。

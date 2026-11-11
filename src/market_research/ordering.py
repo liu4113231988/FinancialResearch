@@ -6,20 +6,27 @@ from typing import Iterable
 import pandas as pd
 
 
-def _missing(value) -> bool:
+def _sortable(value) -> float | None:
+    """数值化排序键（P2-42）：缺失或非数值一律返回 None（按缺失排序）。
+
+    排序输入是不可信数据（配置快照、缓存表格都可能混入脏值）；
+    直接 float() 抛 ValueError 会被请求线程的处理器误标成 400 参数错误。
+    """
     try:
-        return bool(pd.isna(value))
+        if pd.isna(value):
+            return None
+        return float(value)
     except (TypeError, ValueError):
-        return False
+        return None
 
 
 def series_order(series: pd.Series, *, ascending: bool = False) -> list[str]:
-    """返回排序后的索引名；数值并列按名称升序，NaN 一律排最后。"""
+    """返回排序后的索引名；数值并列按名称升序，NaN/非数值一律排最后。"""
     def key(pair):
         name, value = pair
-        missing = _missing(value)
-        number = 0.0 if missing else float(value)
-        return (missing, number if ascending else -number, str(name))
+        number = _sortable(value)
+        missing = number is None
+        return (missing, 0.0 if missing else (number if ascending else -number), str(name))
 
     return [name for name, _ in sorted(series.items(), key=key)]
 
@@ -49,10 +56,9 @@ def rows_order(rows: Iterable[dict], *, value: str, ascending: bool = False,
                tie: str = "code") -> list[dict]:
     """对 list[dict] 按数值字段排序，并列按 tie 字段（缺省时用 name）升序。"""
     def key(row):
-        number = row.get(value)
-        missing = _missing(number)
-        number = 0.0 if missing else float(number)
+        number = _sortable(row.get(value))
+        missing = number is None
         name = row.get(tie) or row.get("name") or row.get("名称") or ""
-        return (missing, number if ascending else -number, str(name))
+        return (missing, 0.0 if missing else (number if ascending else -number), str(name))
 
     return sorted(rows, key=key)

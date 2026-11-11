@@ -237,6 +237,14 @@ def walk_forward(per_fund: Dict[str, dict], grid: Optional[List[dict]] = None
     #   配置并当成"全体最优"。必须显式判无结论。
     means_all = ir_panel(codes).mean()
     finite_all = means_all[np.isfinite(means_all)]
+    # P3-Q：ir_panel 的回退（共同可用基金 <2 → 逐配置不等样本）必须在
+    # summary 里标注 —— docstring 承诺过"没有共同可用子集时才退回并在
+    # summary 里标注"，且 oracle 在不等样本上取 max 正是本函数自警的
+    # 抬高机制，回退发生时使用方必须能察觉。
+    common_all = [c for c in codes if all(k in table[c] for k in keys)]
+    ir_basis = ("共同可用基金" if len(common_all) >= 2
+                else "逐配置可用（共同基金不足 2 只，oracle 口径被系统性抬高，"
+                     "不与共同口径结果直接比较）")
     if finite_all.empty:
         return {
             "ok": False,
@@ -267,6 +275,7 @@ def walk_forward(per_fund: Dict[str, dict], grid: Optional[List[dict]] = None
             # 未见过的管理人"，**不是**"参数能否迁移到未来的时间段"。
             # 结论里不得出现"时间向前验证通过""可实现"这类措辞。
             "检验类型": "按管理人分组的横截面迁移检验（非时间向前验证）",
+            "IR面板口径": ir_basis,
             "全体最优配置": f"{global_best[0]}/{global_best[1]}",
             "固定配置在测试集均值IR": round(fixed_ir, 3),
             "迁移配置在测试集均值IR": round(migrated_ir, 3),

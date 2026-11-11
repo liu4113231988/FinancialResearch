@@ -72,7 +72,14 @@ if NAV_DEGRADED_POLICY not in ("reject", "allow_cum"):
 
 # 数据新鲜度与降级判定（P2-27）：数据末日距参考日超过该天数即标记 stale；
 # 缺失去重后的候选指数占比超过该阈值即标记 degraded（否则 partial）。
-DATA_STALE_DAYS = int(os.environ.get("FIL_DATA_STALE_DAYS", "10"))
+# P3-S：非法值回退默认并告警，而不是让所有入口 import 崩溃 ——
+# 相邻的 STORAGE_LOCK_TIMEOUT / FIL_START_DATE 都有兜底，行为应当一致。
+try:
+    DATA_STALE_DAYS = int(os.environ.get("FIL_DATA_STALE_DAYS", "10"))
+except ValueError:
+    print(f"[config] FIL_DATA_STALE_DAYS={os.environ.get('FIL_DATA_STALE_DAYS')!r}"
+          " 不是整数，回退默认 10")
+    DATA_STALE_DAYS = 10
 DATA_MISSING_RATIO_LIMIT = 0.2
 
 # DuckDB 文件锁等待上限（秒，P2-30）。同步整表重写与请求路径共用一把锁，

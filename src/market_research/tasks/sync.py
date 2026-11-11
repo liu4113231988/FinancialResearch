@@ -276,25 +276,36 @@ def fetch(asset, start, end, abort=None):
 
 
 def _refresh_window_caches(asset, frame, abort=None):
-    """用 canonical 正史刷新既有窗口，不扩大任何同步资产池。"""
+    """用 canonical 正史刷新既有窗口，不扩大任何同步资产池。
+
+    P3-L：canonical 已写成功后，单个窗口缓存刷新失败只记日志继续 ——
+    把整资产标成 error 会让「正史已更新、窗口缓存滞后」的状态与事实不符，
+    且用户看到同步失败却拿不到新数据。窗口缓存滞后由下一次 due 重试收敛。
+    AssetSyncAborted 仍然传播：超时资产不得继续写任何缓存。
+    """
     import market_research.data.marketdata as D
     for target, saved, columns in datasets():
         _check_abort(abort)
-        if asset["kind"] == "fund" and target.startswith("fund_nav_") and saved.get("code") == asset["code"] and saved.get("basis", "cum") == asset["basis"]:
-            sliced = frame.loc[saved.get("start"):].copy()
-            sliced.columns = columns
-        elif target.startswith("market_v1_") and saved.get("kind") == asset["kind"] and saved.get("code") == asset["code"] and saved.get("adjust", "") == asset["basis"]:
-            sliced = frame.loc[saved.get("start"):saved.get("end")]
-        elif asset["kind"] == "index" and target.startswith("index_universe_") and asset["code"] in columns:
-            sliced = storage.read(target)
-            values = frame.close.loc[saved.get("start"):saved.get("end")]
-            sliced = sliced.reindex(sliced.index.union(values.index))
-            sliced[asset["code"]] = values.reindex(sliced.index)
-        else:
-            continue
-        if len(sliced):
-            _check_abort(abort)
-            storage.write(target, sliced, D._with_info({k:v for k,v in saved.items() if k != "info"}, sliced))
+        try:
+            if asset["kind"] == "fund" and target.startswith("fund_nav_") and saved.get("code") == asset["code"] and saved.get("basis", "cum") == asset["basis"]:
+                sliced = frame.loc[saved.get("start"):].copy()
+                sliced.columns = columns
+            elif target.startswith("market_v1_") and saved.get("kind") == asset["kind"] and saved.get("code") == asset["code"] and saved.get("adjust", "") == asset["basis"]:
+                sliced = frame.loc[saved.get("start"):saved.get("end")]
+            elif asset["kind"] == "index" and target.startswith("index_universe_") and asset["code"] in columns:
+                sliced = storage.read(target)
+                values = frame.close.loc[saved.get("start"):saved.get("end")]
+                sliced = sliced.reindex(sliced.index.union(values.index))
+                sliced[asset["code"]] = values.reindex(sliced.index)
+            else:
+                continue
+            if len(sliced):
+                _check_abort(abort)
+                storage.write(target, sliced, D._with_info({k:v for k,v in saved.items() if k != "info"}, sliced))
+        except AssetSyncAborted:
+            raise
+        except Exception:
+            LOG.exception("窗口缓存 %s 刷新失败（canonical 已更新，下次到期重试）", target)
 
 
 def has_history(kind, code, basis):
@@ -311,31 +322,41 @@ def overlay_refresh(kind, code, basis, incoming, end=None):
 
     没有 canonical 时不创建部分历史；此时普通读取会自然命中刚刷新的窗口缓存。
     基金与复权行情可能重订整个历史，只允许完整覆盖，不能拼接不同基准。
+
+    P2-40：read→concat→write 必须与同步进程的 tick() 互斥 —— storage.write
+    只保证单次写原子，不保证读-改-写跨连接互斥；不加锁时手动刷新与同步
+    交错会丢失一方的更新。拿不到 leader 锁（同步正在跑）时放弃本次合并：
+    窗口缓存已经写入了手动刷新的数据，canonical 由下一次同步统一刷新。
     """
     asset = {"asset_key": f"{kind}:{code}:{basis}", "kind": kind,
              "code": code, "basis": basis}
     name = history_name(asset)
-    old = storage.read(name)
-    if old is None or old.empty:
-        return False
-    if incoming is None or incoming.empty:
-        raise ValueError("数据源返回空历史，保留旧数据")
-    incoming = incoming.loc[:end].sort_index()
-    if incoming.empty or not np.isfinite(incoming.to_numpy(dtype=float)[~pd.isna(incoming.to_numpy(dtype=float))]).all():
-        raise ValueError("历史数据包含非法数值")
-    if (kind == "fund" or basis) and (
-            incoming.index[0] > old.index[0] or len(old.index.difference(incoming.index))):
-        raise ValueError("基金或复权行情必须完整刷新，拒绝拼接部分历史")
-    frame = pd.concat([old.loc[~old.index.isin(incoming.index)], incoming]).sort_index()
-    previous = storage.metadata(name) or {}
-    through = max(str(previous.get("through", "")), str(end or now().date().isoformat()))
-    info = {**(previous.get("info") or {}), **incoming.attrs,
-            "fetched_at": now().isoformat(),
-            "data_end": frame.index[-1].date().isoformat()}
-    storage.write(name, frame, {"kind": kind, "code": code, "basis": basis,
-                                "through": through, "info": info})
-    _refresh_window_caches(asset, frame)
-    return True
+    with leader() as acquired:
+        if not acquired:
+            LOG.info("同步进程持有 sync.lock，跳过 %s 的 canonical 合并"
+                     "（窗口缓存已更新，正史由下次同步刷新）", asset["asset_key"])
+            return False
+        old = storage.read(name)
+        if old is None or old.empty:
+            return False
+        if incoming is None or incoming.empty:
+            raise ValueError("数据源返回空历史，保留旧数据")
+        incoming = incoming.loc[:end].sort_index()
+        if incoming.empty or not np.isfinite(incoming.to_numpy(dtype=float)[~pd.isna(incoming.to_numpy(dtype=float))]).all():
+            raise ValueError("历史数据包含非法数值")
+        if (kind == "fund" or basis) and (
+                incoming.index[0] > old.index[0] or len(old.index.difference(incoming.index))):
+            raise ValueError("基金或复权行情必须完整刷新，拒绝拼接部分历史")
+        frame = pd.concat([old.loc[~old.index.isin(incoming.index)], incoming]).sort_index()
+        previous = storage.metadata(name) or {}
+        through = max(str(previous.get("through", "")), str(end or now().date().isoformat()))
+        info = {**(previous.get("info") or {}), **incoming.attrs,
+                "fetched_at": now().isoformat(),
+                "data_end": frame.index[-1].date().isoformat()}
+        storage.write(name, frame, {"kind": kind, "code": code, "basis": basis,
+                                    "through": through, "info": info})
+        _refresh_window_caches(asset, frame)
+        return True
 
 
 def synchronize(asset, current, end=None, abort=None):

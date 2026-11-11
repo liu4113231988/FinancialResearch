@@ -12,7 +12,7 @@ import hashlib
 import json
 import math
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from importlib.resources import files
 from typing import Any, Dict, Iterable, List
 
@@ -21,6 +21,15 @@ from market_research.serialization import _jsafe
 
 HORIZONS = (5, 20)
 GRACE_SESSIONS = 2
+
+# P3-J：台账口径的"今天"用北京时间（与同步调度、`tasks/sync.now()` 一致），
+# 不随宿主时区漂移 —— 非东八区部署时 datetime.now() 会让实盘判定/历史窗口
+# 判定与同步的"今天"错位一天，把已可见的历史回看误记为实盘。
+SHANGHAI = timezone(timedelta(hours=8))
+
+
+def _now() -> datetime:
+    return datetime.now(SHANGHAI)
 # 只记录最近这么多自然日内的“最新收盘”，周末与长假留出余量。
 LIVE_MAX_LAG_DAYS = 14
 # 规则买卖事件不是方向预测：horizon=0 表示无固定方向周期，结算时按固定
@@ -87,7 +96,7 @@ def is_live(as_of, now=None) -> bool:
     signal_date = _date(as_of)
     if signal_date is None:
         return False
-    today = (now or datetime.now()).date()
+    today = (now or _now()).date()
     return 0 <= (today - signal_date).days <= LIVE_MAX_LAG_DAYS
 
 
@@ -100,7 +109,7 @@ def is_historical_window(params, now=None) -> bool:
     """
     if not isinstance(params, dict):
         return False
-    today = (now or datetime.now()).date()
+    today = (now or _now()).date()
     for key in ("end", "window_end"):
         parsed = _date(params.get(key))
         if parsed is not None and parsed < today:
@@ -360,7 +369,7 @@ def record_result(operation: str, params: dict, result: dict,
     """
     if not isinstance(result, dict):
         return 0
-    now = now or datetime.now()
+    now = now or _now()
     if is_historical_window(params, now):
         return 0
     if operation == "market":

@@ -42,7 +42,7 @@ def main(argv=None, *, prog=None):
 
     codes = args.codes or list(C.DEMO_FUNDS.keys())
     t0 = time.time()
-    results, rows = [], []
+    results, rows, failed = [], [], []
 
     for code in codes:
         try:
@@ -83,6 +83,7 @@ def main(argv=None, *, prog=None):
             import traceback
             print(f"[ERROR] {code} 失败: {type(e).__name__}: {e}")
             traceback.print_exc()
+            failed.append(code)
 
     if rows:
         summary = pd.DataFrame(rows)
@@ -95,6 +96,13 @@ def main(argv=None, *, prog=None):
         print(f"\n汇总已保存: {fp}")
 
     print(f"\n总耗时 {time.time()-t0:.1f}s")
+
+    # ★ P1-09 口径（P3-S）：批量入口失败必须有非零退出码 —— 全部失败与
+    #   全部成功在 CI 里必须可区分；部分失败也以 1 退出（与 cache_warm 一致）。
+    if failed:
+        print(f"[analyze] {len(failed)}/{len(codes)} 只基金失败：{', '.join(failed)}")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

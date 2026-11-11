@@ -600,7 +600,7 @@ def fit_window(model_key: str, X: np.ndarray, y: np.ndarray, cols: List[str],
 def estimate_equity(fit_fn, X: np.ndarray, y: np.ndarray, cols: List[str],
                     bounds: tuple = (0.2, 1.0),
                     grid=(0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.95),
-                    method: str = "grid"):
+                    method: str = "local"):
     """
     估计基金在窗口内的实际股票仓位，返回 (仓位, 已按该仓位拟合好的结果)。
 
@@ -622,9 +622,12 @@ def estimate_equity(fit_fn, X: np.ndarray, y: np.ndarray, cols: List[str],
 
     两种估法（都只用窗口内数据，不引入前瞻）：
 
-    - ``method="grid"``（默认）：在 E 网格上**直接最大化窗口内 R²**。
-      R² 就是我们要优化的目标，没有代理误差。
-      代价是每窗口要拟合 len(grid) 次（默认 8 次，约慢 4 倍）。
+    - ``method="local"``（默认，P3-R 修正）：以 beta 不动点给初值，在邻域
+      内细搜。几乎不增加耗时即可拿到全网格的精度（见下方实测表）。
+    - ``method="grid"``：在 E 网格上**直接最大化窗口内 R²**。R² 就是
+      要优化的目标、没有代理误差；代价是每窗口要拟合 len(grid) 次
+      （默认 8 次，约慢 4 倍）。旧版默认是 grid 且 docstring 自相矛盾，
+      引擎运行时一直显式传 local，此处与文档统一。
     - ``method="beta"``：隐含 beta 不动点，γ = β·E（β = cov(y,s)/var(s)）。
       只需 2 次拟合，但 **γ 的估计会混入 alpha 与基准的协方差**：
       持续跑赢且做反向选择的基金（如行业主题基金）会被系统性低估 ——

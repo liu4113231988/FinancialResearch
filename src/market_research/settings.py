@@ -48,17 +48,38 @@ class Settings:
 
     @classmethod
     def load(cls):
+        # P3-S：int/float 裸解析抛 "invalid literal for int()" —— validate()
+        # 精心写的字段级友好文案永远到不了。这里给出字段名，失败仍是
+        # fail-fast 非零退出，但错误可定位。
+        def _int(name, default):
+            raw = os.environ.get(name)
+            if raw is None:
+                return default
+            try:
+                return int(raw)
+            except ValueError:
+                raise ValueError(f"{name} 必须是整数，收到 {raw!r}") from None
+
+        def _float(name, default):
+            raw = os.environ.get(name)
+            if raw is None:
+                return default
+            try:
+                return float(raw)
+            except ValueError:
+                raise ValueError(f"{name} 必须是数值，收到 {raw!r}") from None
+
         return cls(host=os.environ.get("FIL_HOST", "127.0.0.1"),
-                   port=int(os.environ.get("FIL_PORT", "8760")),
-                   max_jobs=int(os.environ.get("FIL_MAX_JOBS", "2")),
-                   queue_limit=int(os.environ.get("FIL_QUEUE_LIMIT", "100")),
-                   job_timeout=int(os.environ.get("FIL_JOB_TIMEOUT", "900")),
-                   max_attempts=int(os.environ.get("FIL_JOB_ATTEMPTS", "3")),
-                   job_terminal_ttl=int(os.environ.get("FIL_JOB_TERMINAL_TTL", "86400")),
-                   job_queued_ttl=int(os.environ.get("FIL_JOB_QUEUED_TTL", "3600")),
-                   job_drain_grace=int(os.environ.get("FIL_JOB_DRAIN_GRACE", "30")),
+                   port=_int("FIL_PORT", 8760),
+                   max_jobs=_int("FIL_MAX_JOBS", 2),
+                   queue_limit=_int("FIL_QUEUE_LIMIT", 100),
+                   job_timeout=_int("FIL_JOB_TIMEOUT", 900),
+                   max_attempts=_int("FIL_JOB_ATTEMPTS", 3),
+                   job_terminal_ttl=_int("FIL_JOB_TERMINAL_TTL", 86400),
+                   job_queued_ttl=_int("FIL_JOB_QUEUED_TTL", 3600),
+                   job_drain_grace=_int("FIL_JOB_DRAIN_GRACE", 30),
                    auto_services=os.environ.get("FIL_AUTO_SERVICES", "1") != "0",
-                   job_workers=int(os.environ.get("FIL_JOB_WORKERS", "0")),
-                   job_workers_max=int(os.environ.get("FIL_JOB_WORKERS_MAX", "0")),
-                   job_memory_mb=int(os.environ.get("FIL_JOB_MEMORY_MB", "0")),
-                   sync_asset_timeout=float(os.environ.get("FIL_SYNC_ASSET_TIMEOUT", "300"))).validate()
+                   job_workers=_int("FIL_JOB_WORKERS", 0),
+                   job_workers_max=_int("FIL_JOB_WORKERS_MAX", 0),
+                   job_memory_mb=_int("FIL_JOB_MEMORY_MB", 0),
+                   sync_asset_timeout=_float("FIL_SYNC_ASSET_TIMEOUT", 300)).validate()

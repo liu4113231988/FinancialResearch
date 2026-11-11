@@ -482,9 +482,13 @@ class LoadFundHoldingsCacheTest(unittest.TestCase):
         self.assertIn(2020, meta["fetched_years"])
 
     def test_fully_covered_cache_does_not_refetch(self):
+        """P1-18/P1-21：终版年份 + 未到披露季的当年，缓存命中不打网络。"""
         code = "110022"
-        self._write_cache(code, "2024年2季度")
-        years = list(range(2020, pd.Timestamp.today().year + 1))
+        year = pd.Timestamp.today().year
+        # 当年已拿到 Q2：Q4 要到次年 1 月末才开始披露 → 本次调用不重抓；
+        # 过去年份披露窗口均已关闭 → 终版。这正是离线测试不打网络的前提。
+        self._write_cache(code, f"{year}年2季度")
+        years = list(range(2020, year + 1))
         fp = C.DATA_DIR / f"fund_holdings_{code}_v{H.HOLDINGS_CACHE_VERSION}_meta.json"
         fp.write_text(json.dumps({"fetched_years": years, "failed_years": [],
                                   "start_year": 2020, "end_year": years[-1],
@@ -493,7 +497,34 @@ class LoadFundHoldingsCacheTest(unittest.TestCase):
         with patch.object(ak, "fund_portfolio_hold_em") as fetch:
             hd = H.load_fund_holdings(code, start_year=2020, verbose=False)
         fetch.assert_not_called()
-        self.assertEqual(set(hd["期数"]), {"2024Q2"})
+        self.assertEqual(set(hd["期数"]), {f"{year}Q2"})
+
+    def test_open_window_year_is_not_frozen_by_fetched(self):
+        """P1-21：披露窗口未关闭的年份，fetched/空结果不得永久冻结。
+
+        旧口径把「当年 1 月的空结果」记入 fetched 后永不重试，Q2/Q4 新披露
+        的完整持仓不会被增量拉取；新口径在披露季开始后必须重试。
+        """
+        code = "110022"
+        self._write_cache(code, "2024年2季度")
+        years = list(range(2020, pd.Timestamp.today().year + 1))
+        fp = C.DATA_DIR / f"fund_holdings_{code}_v{H.HOLDINGS_CACHE_VERSION}_meta.json"
+        fp.write_text(json.dumps({"fetched_years": years, "failed_years": [],
+                                  "start_year": 2020, "end_year": years[-1],
+                                  "refreshed_at": "2026-01-01"}), encoding="utf-8")
+        import akshare as ak
+        with patch.object(ak, "fund_portfolio_hold_em",
+                          return_value=self._ak_frame(
+                              f"{pd.Timestamp.today().year}年2季度")) as fetch, \
+             patch("time.sleep"):
+            hd = H.load_fund_holdings(code, start_year=2020, verbose=False)
+        # 当年（含 Q2 披露季已开始）必须被重新拉取
+        called_years = {call.kwargs.get("date") for call in fetch.call_args_list}
+        self.assertIn(str(pd.Timestamp.today().year), called_years)
+        self.assertIn(f"{pd.Timestamp.today().year}Q2", set(hd["期数"]))
+        # 重试后 pending 记录了仍未终版的年份（Q4 未到披露季）
+        meta = self._meta(code)
+        self.assertIn(str(pd.Timestamp.today().year), meta["pending_years"])
 
     def test_failed_year_is_retried_and_not_faked_as_complete(self):
         code = "110022"

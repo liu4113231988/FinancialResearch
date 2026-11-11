@@ -157,7 +157,10 @@ def supervise(once=False):
                         JOBS.retry_crashed(jid,job['token'],f'计算进程退出（{child.returncode}），将按策略重试')
                         del children[jid]
                 while len(children)<Settings.load().max_jobs:
-                    job=JOBS.claim()
+                    # P2-39：排除本机仍有存活子进程的 jid —— recover 在锁饿死宽限
+                    # 之外把任务转回 queued 时，本 supervisor 不重复领取自己还在
+                    # 跑的任务（另一台机器的 worker 才是 recover 的服务对象）。
+                    job=JOBS.claim(exclude=children.keys())
                     if not job:
                         break
                     try:
@@ -172,7 +175,13 @@ def supervise(once=False):
                     if sync_child and sync_child.poll() is not None:
                         sync_child=None;next_sync=time.time()+30
                     if sync_child is None and time.time()>=next_sync:
-                        sync_child=launch('market_research.tasks.sync','--once',log_name='sync-process.log')
+                        # P2-41：启动失败（磁盘满/权限）只推迟重试，不能让
+                        # supervisor 整体退出 —— 那会把整个队列服务一起带下线。
+                        try:
+                            sync_child=launch('market_research.tasks.sync','--once',log_name='sync-process.log')
+                        except Exception:
+                            LOG.warning('同步进程启动失败（不影响任务队列，30s 后重试）',exc_info=True)
+                            next_sync=time.time()+30
                 settle_child,next_settle=_advance_settle(settle_child,next_settle,once)
                 time.sleep(.5)
         finally:

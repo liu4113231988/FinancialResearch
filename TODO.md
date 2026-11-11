@@ -22,7 +22,7 @@
 - **交易实证补充**：交易所公告核验、区分停牌与漏抓、真实订单及基金申赎/持有期费用模型。
 - **股票基本面与独立样本**：财报/估值/同业比较，以及方向估计与概率校准的未来独立样本有效性。
 - **长期模型档案**：[待评估提案](docs/模型档案与算法记录_重构方案.md) 未实现。
-- **未覆盖范围**：真实数据研究重放、真实浏览器/移动端、多进程与锁竞争压力、Docker/wheel 构建安装；历次全局审查只核对参数/任务入口、队列与 worker、调用链、缓存同步与前端脚本，**未逐行穷尽全部算法**。历次验证记录均标注未重跑，勿据历史测试记录推定已覆盖。
+- **未覆盖范围**：真实数据研究重放、真实浏览器/移动端、多进程与锁竞争压力、Docker/wheel 构建安装；2026-11-11 前历次全局审查只核对参数/任务入口、队列与 worker、调用链、缓存同步与前端脚本，2026-11-11 一轮新增了 RBSA/持仓/技术分析/资金账户/校准等算法层逻辑与边界核对（发现见新增小节），但仍**未逐行穷尽全部算法**。历次验证记录均标注未重跑，勿据历史测试记录推定已覆盖。
 
 ### 工程与生产化剩余
 
@@ -54,6 +54,44 @@
 - 关键宽基缺失单独升级 `degraded`（P2-28，需产品先定义「关键指数」清单）。
 - 脉冲订单挂单直到成交或反向信号（与上节脉冲订单行为层为同一问题，会改变资金曲线，与既有报告数值不可直接比较）。
 
+### 2026-11-11 全局功能完整性审查（修复轮次与剩余项）
+
+本轮覆盖五个域（API/服务层、任务队列与存储、基金研究、股票/指数研究、CLI 与配置）的调用链、逻辑与边界审查；已登记项与「已知实现边界」不重复。编号接续既有序列，已关闭项保留编号供历史引用。
+
+**验证与提交状态（2026-11-11）**：`uv run --locked python -m unittest discover -s tests -t . -p 'test_*.py'` → 575 项 OK（离线，约 178s；上一轮基线 574 项）；修改模块导入冒烟通过。新增 `tests/funds/test_payloads.py::test_open_window_year_is_not_frozen_by_fetched`（P1-21），更新 `tests/tasks/test_taskstore.py` 租约回收测试（P2-39 宽限期）。代码修改随本轮修复提交（提交哈希与验证快照见 `git log`），按关闭标准的实现记录已补齐；推送状态另以 `git status -sb` 为准。本轮未改变研究数值口径（P3-N/O/P、P3-R 的仓位/阈值项一律未动），无旧报告重算要求；未重跑浏览器/真实数据验证。
+
+#### 本轮已关闭（实现摘要，不重复全文）
+
+- **P1-21**：`funds/holdings.py` 增量缓存新增 `pending_years` —— 只有拿到 Q4 或披露窗口关闭（次年 3/31 后）的年份才算终版；未终版年份按披露季起点（Q2 约 7/30、Q4 约次年 1/30）+ 7 天冷却自动重试，空结果不再永久冻结；meta 读写兼容旧文件（缺 `pending_years` 视为无冷却）。新增回归覆盖「当年被 fetched 冻结」不再成立。
+- **P2-38**：删除 `semiannual_exposure` / `_map_industries` / `exposure_coverage` 的 `only_full` 死参数，口径改由 `_normalize_holdings` 数据流保证；行动约束中的错误否定结论已更正。
+- **P2-39**：`tasks/store.py` 新增 `RECOVER_GRACE_SECONDS=60`（recover 阈值改为 `lease_until < now-60`）与 `claim(exclude=...)`；`tasks/worker.py` 领取时排除本机仍有存活子进程的 jid。锁短暂饿死不再二次领取。
+- **P2-40**：`tasks/sync.py::overlay_refresh` 的 read→concat→write 纳入 `leader()`（sync.lock）互斥；拿不到锁时跳过 canonical 合并（窗口缓存已写入、正史由下次同步刷新），不再与 `tick()` 交错丢失更新。
+- **P2-41**：supervisor 启动同步子进程加 try/except，失败只记日志并 30s 后重试，不拖垮队列。
+- **P2-42**（主要部分）：手工 JSONResponse 补 `ok`/`field` 与 429 `Retry-After`；`/api/corr` catch-all 记 `LOG.exception`；`NavBasisUnavailable`/`ProviderContractError` 不再被 `ValueError→400 params` 误标（改 500 `field=data_source` + 日志）；`/api/config` 改 `.get("RBSA")`；`ordering.py` 非数值排序值按缺失处理不抛 `ValueError`；BodyLimit 413 加 `connection: close`；`/api/result` 取消/超时分类优先用终态 `stage`，文案仅兜底。
+- **P3-J**：`market/analysis.py` 默认终点、`predictions/ledger.py` 三处「今天」统一北京时间（`SHANGHAI`），与同步调度一致；可注入的 `now=` 参数不变。
+- **P3-L**：`_refresh_window_caches` 逐数据集容错（`AssetSyncAborted` 仍传播），canonical 写成功后单窗口失败记日志继续，不再把整资产标 `error`。
+- **P3-M**（DDL 部分）：`tasks/store.py` 新增 `_ensure_schema()`（查 `information_schema.tables` 后才建表），`stats/claim/update/_terminal/public/get` 改用，高频读/轮询不再每次跑 `CREATE TABLE`。
+- **P3-Q**（walkforward 部分）：`research/walkforward.py` summary 新增 `IR面板口径`，标注共同可用基金 <2 的不等样本回退及 oracle 抬高提示。
+- **P3-R**（一致性部分）：`fit_fund_holdings` 捕获 RBSA 样本不足 `ValueError` 返回 `ok=False`；`estimate_equity` 默认 `method` 与 docstring 统一为 `local`（运行时显式传参，不改结果）；`align_prices` 整行 dropna 的删除行数写入 `attrs.warnings` 并记日志。
+- **P3-S**（入口契约部分）：`fil analyze` 失败返回 1；`cli/serve.py` docstring 改为真实入口、`main(argv, prog)` 兼容注册表、就绪失败返回 1、stdout 重配 UTF-8；`cache-warm --start` 复用 `_iso` 严格校验；`FIL_DATA_STALE_DAYS` 非法值回退默认并告警；`Settings.load` 数值解析报出字段名。
+
+#### 复核更正（勿再列为待修）
+
+- **P3-K `through=max(...)` 不成立为缺陷**：`overlay_refresh` 的 `frame` 只做合并（保留旧行 + 新行），`data_end` 取 `frame.index[-1]`，不会因更早 `end` 回退；`cached()`（`sync.py:220-229`）另有 `data_end` 滞后 `DATA_STALE_DAYS` 的未就绪守卫。剩余只是 `through`（检查日）语义单调、与 `synchronize` 倒退拒绝的表述不对称，归入已登记的 `meta.through` 新鲜度口径候选，未改代码。
+- **P3-Q 的块自助「循环复用」是误报**：`research/robustness.py:216` 的 `starts` 已限制在 `[0, n-block]`，拼接索引恒 `< n`，`idx[:n]` 恰为 n 个，`np.resize`（`:221`）为不可达的防御性死代码；non-circular 口径成立。
+
+#### 剩余未完成项
+
+- **P2-42 剩余**：`FIL_SYNC_TIME` 非法值经 `GET /api/sync`（`routes/sync.py:11`）抛 `ValueError` 仍被全局处理器标成 400 `field=params` —— 服务端配置错误需单独分类；其余子项已修。
+- **P3-H 补充** `[产品]`：前端 `static/app.js:939,1000,1019,1068,1079`、`market.js`、`data-center.js`、`ledger.js` 全部硬编码 `/api/*` 旧路径；`api/version.py:21-28` 的 2027-04-01 legacy 自动下线若按期触发，SPA 当天全量 404。auto 下线必须与前端自身迁移同批决策，不能只等外部客户端。
+- **P3-M 剩余**：不可回收的僵尸子进程永久占用并发名额、队列停摆（`worker.py:20-43,147-158`），只能重启 supervisor。
+- **P3-N**（行为层，会改变资金曲线，未动）：`market/capital.py:71` 无 `units==0` 门控 vs `market/execution.py:99` 仅空仓首买；`capital.py:143-145` `_retry_note` 文案与 orders=targets.shift(1) 实现不符；`compare_probability_execution` 两种账户实际评估不同策略。
+- **P3-O**（口径）：离线 `(future > 0)`（`market/technical.py:90`）把平盘计入下跌类，台账 `neutral` 不入分母（`predictions/judge.py:173-176`）；跨口径比较 accuracy/Brier 有偏。
+- **P3-P**：`market/technical.py:130-137,202-208` 少样本仍输出数值（仅 `ok=False` 标记），未像 `market_validation.py` 留空。
+- **P3-Q 剩余**：`market/capital.py:103-104` 残余仓位卖出额低于最低佣金时被 `insufficient_cash_for_sell_fee` 永久阻塞、闭合周期不计（费用触发的平仓死锁，区别于已登记的容量触发残留）。
+- **P3-R 剩余**：`rbsa.py:48-49` 的 `W+30` vs `modeling/engine.py:177-178` 的 `W+60` 两套门槛；`payloads.py:629-654`「仓位假设失配」以名义 0.9 诊断（`auto_equity=True` 实际逐窗自适应）；`pipeline.py:117` 波动目标变体 `fillna(1.0)` vs `backtest.py:177,203` 的 0.5；`config.py:251-252` `l1_ratio/alpha_grid` 死配置；`estimators.py:276,320,380,402` 四模型等权降级不传 status 不可观测。以上均会改变数值或诊断结论，须独立评估。
+- **P3-S 剩余**：`commands/holdings.py:135` 的 `✗`、`market_snapshot.py:118/121` 的 `…` 等在 GBK 重定向下仍可能 `UnicodeEncodeError`（`serve.py` 已加 reconfigure，其余入口未推广）。
+
 ## 行动约束
 
 复核已否定的判断，不要重复引入：
@@ -61,7 +99,7 @@
 - 不要回退到「CSV 写行情 / Flask / 进程内线程跑任务」；旧导入只留在 `compat/`，不要再新增根目录 `run_*`，研究入口只登记到 CLI 注册表。
 - 请求线程内的端点（`/api/corr`、`/api/name`）**不得联网取数**：取数交回一次正式的基金分析（走队列、可取消、有名额限制）。
 - `src/__init__.py`、`webapp/__init__.py` 是 `compat/` 的兼容桥接（`src.*` → `compat/src`），`tests/data/test_storage.py` 与 `pyproject.toml` 的 `include` 依赖它们，不是遗留脚手架。
-- `semiannual_exposure(only_full=False)` 在函数体内真实生效（`holdings[holdings["完整"]]` vs 全量），上游 `dropna` 不使该分支失效，不是死参数。
+- ~~`semiannual_exposure(only_full=False)` 不是死参数~~ **该结论有误，已更正（2026-11-11）**：`_normalize_holdings` 的 `dropna(subset=["季末"])` 删除的正是 Q1/Q3 行，存活行 `完整` 恒为 True，`only_full=True/False` 输出相同（最小样本实证与参数删除见 P2-38）。原否定只验证了分支语法会执行，未核对 dropna 删除的行集合；参数已于 2026-11-11 删除。
 - 持仓暴露表里「行合计 < 100%」的差额**不是现金**：包含抓不到行业的新股/北交所/停牌股。引用时必须带上 `exposure_coverage()` 的覆盖率，否则会把股票仓位说成现金。
 - 不要记为「完全没有交易日历」；也不要把 `live_observation` 一次性快照的行数/哈希当作 CI 断言基准。
 

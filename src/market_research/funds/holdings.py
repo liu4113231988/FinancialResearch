@@ -58,6 +58,10 @@ DISCLOSURE_LAG_DAYS = 45  # 仅当季末月份无法识别时的兜底
 
 _LAG_BY_MONTH = {6: 62, 12: 90, 3: 31, 9: 31}
 
+# P1-21：供应商返回空/缺 Q4 的年份按此冷却后自动重试，避免每次调用都打
+# 网络，也避免旧口径把「披露尚未发生」的空年份永久冻结。
+HOLDINGS_EMPTY_RETRY_SECONDS = 7 * 86400
+
 
 def disclosure_lag_days(qend) -> int:
     """某期持仓的法定披露滞后（自然日）。"""
@@ -223,17 +227,33 @@ def _holdings_meta_fp(code: str) -> Path:
     return C.DATA_DIR / f"fund_holdings_{code}_v{HOLDINGS_CACHE_VERSION}_meta.json"
 
 
-def _write_holdings_meta(meta_fp: Path, fetched, failed, wanted) -> None:
-    """记录已成功抓取（含合法空结果）与失败的年份，供下次增量补取。"""
+def _write_holdings_meta(meta_fp: Path, fetched, failed, wanted,
+                         pending=None) -> None:
+    """记录已成功抓取（含合法空结果）与失败的年份，供下次增量补取。
+
+    P1-21：`pending_years` 记录「供应商返回空、但该年披露周期尚未走完」
+    的年份与时间戳 —— 这种空可能是「尚未披露」，不能像 fetched 一样永久
+    冻结；到期后自动重试，避免当年 Q2/Q4 新披露的持仓永不补取。
+    """
     meta = {
         "fetched_years": sorted(int(y) for y in fetched),
         "failed_years": sorted(int(y) for y in failed),
+        "pending_years": {str(int(y)): str(ts) for y, ts in (pending or {}).items()},
         "start_year": int(wanted[0]),
         "end_year": int(wanted[-1]),
         "refreshed_at": pd.Timestamp.today().isoformat(),
     }
     meta_fp.write_text(json.dumps(meta, ensure_ascii=False, indent=1),
                        encoding="utf-8")
+
+
+def _year_disclosure_closed(year: int) -> bool:
+    """该年全部披露（Q4 年报最晚次年 3/31）是否已经结束。
+
+    披露窗口已关闭仍为空 → 基金当年大概率确无持仓（未成立/已清盘），
+    可以像 fetched 一样合法冻结；窗口未关闭的空可能是「尚未披露」。
+    """
+    return pd.Timestamp.today() > pd.Timestamp(year + 1, 3, 31)
 
 
 def load_fund_holdings(code: str, refresh: bool = False,
@@ -252,6 +272,12 @@ def load_fund_holdings(code: str, refresh: bool = False,
       空结果）与失败年份。请求窗口内未被覆盖的年份（含上次失败的）会自动
       补取并与缓存合并；失败年份**不会伪装成完整历史**，每次调用重试并在
       警告中留痕。`refresh=True` 才无条件重抓整个窗口。
+
+    ★ P1-21：年份"已抓取"不再无条件豁免重试。该年只有满足以下之一才算
+      终版：已拿到 Q4（年报）持仓；或披露窗口已关闭（次年 3/31 之后仍无）。
+      否则记入 `pending_years` 并按 `HOLDINGS_EMPTY_RETRY_SECONDS` 冷却
+      重试 —— 旧口径会把"当年 1 月的空结果 / 只有 Q2 的年份"永久冻结，
+      Q2/Q4 新披露的完整持仓永远不会被增量拉取，持仓基准静默沿用旧期数。
     """
     if start_year is None:
         start_year = int(pd.Timestamp(C.START_DATE).year)
@@ -267,6 +293,12 @@ def load_fund_holdings(code: str, refresh: bool = False,
         except Exception:                                     # noqa: BLE001
             meta = {}                        # meta 损坏等价于无 meta：全部补取
     fetched = set(meta.get("fetched_years", []))
+    pending = {}
+    for y, ts in (meta.get("pending_years") or {}).items():
+        try:
+            pending[int(y)] = pd.Timestamp(ts)
+        except (TypeError, ValueError):
+            pass               # 损坏的时间戳视为无冷却：宁可重抓也不冻结
 
     cached = None
     if fp.exists():
@@ -280,16 +312,64 @@ def load_fund_holdings(code: str, refresh: bool = False,
         except Exception:                                     # noqa: BLE001
             cached = None
 
+    def _have_quarters(frame):
+        """返回 (有 Q2 的年份集合, 有 Q4 的年份集合)。"""
+        if frame is None or frame.empty or "期数" not in frame.columns:
+            return set(), set()
+        q = frame["期数"].astype(str)
+        return ({s[:4] for s in q[q.str.endswith("Q2")]},
+                {s[:4] for s in q[q.str.endswith("Q4")]})
+
+    have_q2, have_q4 = _have_quarters(cached)
+
+    def _year_final(year: int) -> bool:
+        """该年是否已拿到终版披露（Q4 持仓）或披露窗口已关闭（P1-21）。"""
+        return str(year) in have_q4 or _year_disclosure_closed(year)
+
+    def _year_expected(year: int):
+        """该年下一个**可能有新披露**的最早时点；终版返回 None。
+
+        只在披露季开始后才重试，避免「缓存已拿 Q2、Q4 要次年 1 月末才
+        披露」的年份在每次调用/离线测试里打无用网络。Q2 最早约 7 月末、
+        Q4（年报）最早约次年 1 月末开始披露；法定截止分别是 8/31、次年 3/31
+        （见文件头披露滞后说明）。
+        """
+        if _year_final(year):
+            return None
+        if str(year) in have_q2:
+            return pd.Timestamp(year + 1, 1, 30)
+        return pd.Timestamp(year, 7, 30)
+
+    def _retry_due(year: int) -> bool:
+        ts = pending.get(year)
+        if ts is None or pd.isna(ts):
+            return True
+        return (pd.Timestamp.today() - ts).total_seconds() \
+            > HOLDINGS_EMPTY_RETRY_SECONDS
+
+    def _year_due(year: int) -> bool:
+        """增量口径下该年本次是否需要打网（P1-21）。"""
+        if year not in fetched:
+            return True                      # 从未抓过：首次拉取（拿已有的期数）
+        if _year_final(year):
+            return False                     # 终版：不再豁免期之外重试
+        expected = _year_expected(year)
+        if expected is not None and pd.Timestamp.today() < expected:
+            return False                     # 下一期披露季未开始：不可能有新数据
+        return _retry_due(year)              # 披露季已到：冷却后重试
+
     if refresh:
         to_fetch = list(wanted)
         fetched = set()          # 强刷后重建 meta：旧成功记录不再豁免本窗口
+        pending = {}
     else:
-        to_fetch = [y for y in wanted if y not in fetched]
+        to_fetch = [y for y in wanted if _year_due(y)]
         if cached is not None and not to_fetch:
             return cached
 
     frames = []
     newly_failed = []
+    attempted = set()          # 本次真实打网且未抛错的年份（P1-21 冷却起点）
     if to_fetch:
         if verbose:
             print(f"[holdings] {code} 抓取 {to_fetch[0]}~{to_fetch[-1]} 年持仓"
@@ -303,17 +383,39 @@ def load_fund_holdings(code: str, refresh: bool = False,
                 if d is not None and len(d):
                     frames.append(d)
                 fetched.add(yr)
+                attempted.add(yr)
             except Exception as e:                            # noqa: BLE001
                 newly_failed.append(yr)
                 LOG.warning("%s %s 年持仓获取失败：%s", code, yr, type(e).__name__)
             time.sleep(0.15)                  # 轻微限速，避免被限流
+
+    def _settle_pending(final_frame):
+        """按合并后的实际内容结算 pending（P1-21）。
+
+        终版年份（已见 Q4 或披露窗口已关闭）清除冷却；非终版年份若本次
+        触过网则以本次时间为冷却起点，否则保留旧时间戳 —— 冷却总是从
+        上次真实尝试起算。重试时机还要等披露季（`_year_expected`），
+        冷却只是防止披露季内的密集重试。
+        """
+        nonlocal have_q2, have_q4
+        have_q2, have_q4 = _have_quarters(final_frame)
+        settled = {}
+        for y in sorted((fetched & set(wanted)) | attempted):
+            if _year_final(y):
+                continue          # 终版：不再重试
+            if y in attempted:
+                settled[y] = pd.Timestamp.today().isoformat()
+            elif y in pending:
+                settled[y] = pending[y]
+        return settled
 
     failed = ((set(meta.get("failed_years", [])) - set(to_fetch))
               | set(newly_failed))
     if not frames and cached is None:
         # 一期成功的历史都没有：也要写 meta（成功年份不再重复打网络），
         # 但失败年份不写入 fetched，下次调用自动重试。
-        _write_holdings_meta(meta_fp, fetched - set(newly_failed), failed, wanted)
+        _write_holdings_meta(meta_fp, fetched - set(newly_failed), failed,
+                             wanted, _settle_pending(None))
         return pd.DataFrame()
 
     merged = cached
@@ -326,7 +428,8 @@ def load_fund_holdings(code: str, refresh: bool = False,
         out = (merged.drop_duplicates(subset=["季末", "股票代码"], keep="last")
                .sort_values("季末").reset_index(drop=True))
         _atomic_csv_write(out, fp)
-    _write_holdings_meta(meta_fp, fetched - set(newly_failed), failed, wanted)
+    _write_holdings_meta(meta_fp, fetched - set(newly_failed), failed,
+                         wanted, _settle_pending(out))
     still_failed = sorted(failed & set(wanted))
     if still_failed:
         # 失败年份不得伪装成完整历史：明确留痕，下次调用自动重试。
@@ -385,17 +488,22 @@ def _normalize_holdings(df: pd.DataFrame) -> pd.DataFrame:
     return out.dropna(subset=["季末"])
 
 
-def _map_industries(holdings: pd.DataFrame, industry_map: pd.Series,
-                    only_full: bool = True):
+def _map_industries(holdings: pd.DataFrame, industry_map: pd.Series):
     """统一过滤口径，返回 `(已映射, 未映射)` 两张持仓表。
 
     两张表都保留，是因为"被丢弃的未映射权重"必须能被统计出来：
     暴露表只含能映射到申万一级行业的持仓，未映射的新股/北交所/停牌股
     同样是股票仓位，不能说成现金。
+
+    P2-38：不再提供 `only_full` 参数 —— `_normalize_holdings` 只给 Q2/Q4
+    行构造 `季末` 并 dropna，传入本函数的表**不可能**含季报行，`完整`
+    恒为 True；旧参数 `only_full=False` 承诺"纳入 Q1/Q3"但实际输出与
+    True 完全相同（2026-11-11 最小样本实证）。模块头已声明季度数据一律
+    不参与，口径由数据流保证而不是参数。
     """
     if holdings is None or holdings.empty:
         return pd.DataFrame(), pd.DataFrame()
-    h = holdings[holdings["完整"]] if only_full else holdings
+    h = holdings[holdings["完整"]]
     h = h[h["占净值比例"].notna()].copy()
     if h.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -406,19 +514,19 @@ def _map_industries(holdings: pd.DataFrame, industry_map: pd.Series,
 
 
 def semiannual_exposure(holdings: pd.DataFrame,
-                        industry_map: pd.Series,
-                        only_full: bool = True) -> pd.DataFrame:
+                        industry_map: pd.Series) -> pd.DataFrame:
     """
     按申万一级行业聚合的**半年度**暴露（index=季末, columns=行业, values=占净值比例%）。
 
-    only_full=True 时只取 Q2/Q4（完整持仓）。这是唯一诚实的口径 ——
-    Q1/Q3 只有前十大，聚合出来的小仓位行业会被系统性低估。
+    只取 Q2/Q4（完整持仓）。这是唯一诚实的口径 —— Q1/Q3 只有前十大，
+    聚合出来的小仓位行业会被系统性低估。该口径由 `_normalize_holdings`
+    的数据流保证：传入表只含 Q2/Q4 行（P2-38，无 `only_full` 参数）。
 
     ★ 返回表**只含能映射的行业**，行合计因此小于 100%。差额里有现金/债券，
       也有抓不到行业的股票 —— 两者必须靠 `exposure_coverage()` 区分，
       否则"真实暴露合计 87~91%"会被误读成"其余都是现金"。
     """
-    mapped, unmapped = _map_industries(holdings, industry_map, only_full)
+    mapped, unmapped = _map_industries(holdings, industry_map)
     if len(unmapped):
         # 走日志而不是 print：这条警告含 ⚠（U+26A0），在 GBK 控制台会抛
         # UnicodeEncodeError，把一次聚合变成崩溃。
@@ -433,19 +541,19 @@ def semiannual_exposure(holdings: pd.DataFrame,
     return exp
 
 
-def exposure_coverage(holdings: pd.DataFrame, industry_map: pd.Series,
-                      only_full: bool = True) -> pd.DataFrame:
+def exposure_coverage(holdings: pd.DataFrame, industry_map: pd.Series) -> pd.DataFrame:
     """
     每期持仓的映射覆盖率（index=季末，单位=百分点）。
 
     列：`已映射权重` / `未映射权重` / `合计` / `覆盖率`。
+    口径与 `semiannual_exposure` 一致：传入表只含 Q2/Q4 行（P2-38）。
 
     ★ 为什么单独输出：`semiannual_exposure` 丢掉未映射行后，行合计（实测
       87~91%）同时包含"现金+债券"和"抓不到行业的股票"。覆盖不足的期次，
       结构比（`align_vs_rbsa` 把共同行业归一到 100%）会把未映射部分
       按比例摊到其它行业上，偏差方向因此不可知 —— 有了本表就能标注。
     """
-    mapped, unmapped = _map_industries(holdings, industry_map, only_full)
+    mapped, unmapped = _map_industries(holdings, industry_map)
     frames = []
     if mapped is not None and not mapped.empty:
         frames.append(mapped.groupby("季末")["占净值比例"].sum()
@@ -818,7 +926,14 @@ def fit_fund_holdings(code: str, industry_map: pd.Series,
     if exp.empty:
         return {"code": code, "ok": False, "reason": "无完整（半年报/年报）持仓"}
 
-    fit = RBSA().fit_rolling(panel, verbose=False)
+    # P3-R：短历史基金在此链路上应与其余失败同样优雅降级 ——
+    # RBSA 样本不足抛 ValueError（rbsa.py 的 W+30 门槛），不捕获会让
+    # CLI / Web / 报告直接异常，而不是 ok=False + reason。
+    try:
+        fit = RBSA().fit_rolling(panel, verbose=False)
+    except ValueError as error:
+        return {"code": code, "ok": False,
+                "reason": f"RBSA 样本不足：{error}"}
     cov = exposure_coverage(hd, industry_map)
     al = align_vs_rbsa(fit["weights"], exp, coverage=cov)
     if not al.get("ok"):

@@ -6,13 +6,14 @@
 堆积多个旧进程，curl 请求被分流到旧代码，出现"改了代码但没生效"的假象。
 本脚本会先按端口清理，再启动，并用 /api/health 确认新进程已就绪。
 
-用法：
-    python run.py serve                         # 默认 127.0.0.1:8760
-    python run.py serve --port 9000
-    python run.py serve --restart               # 先清理再启动
-    python run.py serve --host 0.0.0.0          # 监听所有网卡（无鉴权，勿暴露公网）
+用法（P3-S 修正：本模块未登记进 CLI 注册表，`run.py serve` / `fil serve`
+不存在；Web 的正式入口是 `fil-serve` / `uv run market-research`）：
+    python -m market_research.cli.serve          # 默认 127.0.0.1:8760
+    python -m market_research.cli.serve --port 9000
+    python -m market_research.cli.serve --restart   # 先清理再启动
+    python -m market_research.cli.serve --host 0.0.0.0   # 监听所有网卡（无鉴权，勿暴露公网）
 
-★ 本项目**没有登录/鉴权**：`--host 0.0.0.0` 只适合可信局域网。
+★ 本项目默认**没有登录/鉴权**：`--host 0.0.0.0` 只适合可信局域网。
 """
 from __future__ import annotations
 
@@ -23,6 +24,11 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:                                             # noqa: BLE001
+    pass
 
 from market_research.config import ROOT
 
@@ -65,13 +71,14 @@ def wait_healthy(url: str, timeout: float = 40.0) -> bool:
     return False
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None, *, prog=None):
+    """注册表约定签名（argv + prog，P3-S）；返回码：0 正常退出，1 启动失败。"""
+    ap = argparse.ArgumentParser(prog=prog)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8760)
     ap.add_argument("--restart", action="store_true",
                     help="先杀掉占用端口的旧进程再启动")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
 
     host = "127.0.0.1" if a.host in ("0.0.0.0", "host0.0.0.0") else a.host
     url = f"http://{host}:{a.port}"
@@ -93,16 +100,22 @@ def main():
     print(f"[serve] 启动: {' '.join(cmd)}")
     p = subprocess.Popen(cmd, cwd=str(ROOT))
 
+    rc = 0
     if wait_healthy(url + "/api/health"):
         print(f"\n  ✓ Market Research 已就绪 → {url}\n")
         print(f"    在浏览器打开该地址，输入 6 位基金代码（如 110022）即可。")
-        print(f"    停止服务：Ctrl+C 或运行  python webapp/serve.py --restart\n")
+        print(f"    停止服务：Ctrl+C 或运行  python -m market_research.cli.serve --restart\n")
     else:
+        # P3-S：就绪检查失败必须有非零退出码，CI / 脚本才能区分
+        # "服务没起来"与"正常停止"。
         print(f"[serve] 未在 40s 内就绪，请检查输出。")
+        rc = 1
     try:
         p.wait()
     except KeyboardInterrupt:
         print("\n[serve] 已停止")
+        rc = 0
+    return rc
 
 
 if __name__ == "__main__":

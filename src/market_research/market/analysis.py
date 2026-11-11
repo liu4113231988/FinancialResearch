@@ -1,5 +1,6 @@
 """股票、指数日线分析；与基金风格拟合独立，复用 DuckDB 和绩效指标。"""
 from __future__ import annotations
+from datetime import datetime, timedelta, timezone
 import re
 import numpy as np
 import pandas as pd
@@ -11,6 +12,14 @@ from market_research.validation.window import parse_window
 
 STOCKS = {"sh600519": "贵州茅台", "sz000001": "平安银行", "sz300750": "宁德时代", "sh601318": "中国平安"}
 INDICES = {k: v for k, v in C.NAME_OF.items() if re.fullmatch(r"(?:sh|sz)\d{6}", k)}
+
+# P3-J：市场口径的"今天"用北京时间（与同步调度一致）；宿主时区在非东八区
+# 部署时 pd.Timestamp.today() 会让分析窗口默认终点与同步口径错位一天。
+SHANGHAI = timezone(timedelta(hours=8))
+
+
+def _today() -> str:
+    return datetime.now(SHANGHAI).strftime("%Y-%m-%d")
 
 
 def normalize_code(kind, code):
@@ -155,7 +164,7 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
     # 会按 qfq 查指数缓存而注册键是空字符串，预热上下文永远取不到。
     adjust = normalize_adjust(kind, adjust)
     benchmark = normalize_code("index", benchmark)
-    end = end or pd.Timestamp.today().strftime("%Y-%m-%d")
+    end = end or _today()
     start = start or (pd.Timestamp(end) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
     start, end = parse_window(start, end, min_days=30)
     if job_id:

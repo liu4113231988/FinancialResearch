@@ -139,7 +139,10 @@ def config_info():
             "config_hash": config_hash(),
             "research": {"window": snapshot.get("window"),
                          "policy": snapshot.get("policy"),
-                         "rbsa": {key: snapshot["RBSA"].get(key) for key in
+                         # P2-42：config_snapshot() 失败时返回 {"error": ...}
+                         # 没有 RBSA 键 —— 下标访问会把配置错误放大成 KeyError
+                         # 500；.get 与空 dict 保持同一错误路径可见。
+                         "rbsa": {key: (snapshot.get("RBSA") or {}).get(key) for key in
                                   ("window", "refit", "rebal_mode",
                                    "auto_equity", "equity_method")}},
             "limits": {"max_jobs": settings.max_jobs,
