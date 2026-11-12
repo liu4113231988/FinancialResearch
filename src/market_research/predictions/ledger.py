@@ -219,13 +219,14 @@ def _market_snapshot(technical: dict) -> dict:
 def _market_rows(result: dict, now) -> List[dict]:
     technical = result.get("technical") or {}
     as_of = _iso(technical.get("as_of"))
-    if not is_live(as_of, now):
-        return []
     kind = str(result.get("kind") or "")
     code = str(result.get("code") or "")
     if kind not in ("stock", "index") or not code:
         return []
     meta = result.get("meta") or {}
+    timing = _market_timing(as_of, meta, now)
+    if timing is None:
+        return []
     provenance = meta.get("provenance") or {}
     snapshot = _market_snapshot(technical)
     regime = _regime(technical.get("context"))
@@ -249,7 +250,7 @@ def _market_rows(result: dict, now) -> List[dict]:
                       "baseline": forecast.get("baseline"),
                       "training_rows": forecast.get("training_rows")},
             model_version=version, data_stamp=stamp,
-            params={"adjust": meta.get("adjust"),
+            params={**timing, "adjust": meta.get("adjust"),
                     "thresholds": dict(THRESHOLDS),
                     "horizon_basis": forecast.get("horizon_basis") or "observed_bars",
                     "feature_set": "technical_v1"}))
@@ -267,13 +268,42 @@ def _market_rows(result: dict, now) -> List[dict]:
             rule_action=action, price_basis=str(meta.get("adjust") or ""),
             regime=regime, features=snapshot, model_version=version,
             data_stamp=stamp,
-            params={"adjust": meta.get("adjust"),
+            params={**timing, "adjust": meta.get("adjust"),
                     "horizon_semantics": "none",
                     "evaluation_sessions": RULE_EVAL_SESSIONS,
                     "rule": "score>=60 & RSI45-70 & close<=boll_upper; "
                             "score<=-20 or close<MA20 & MACD<0",
                     "note": "规则条件首次满足是状态事件，没有 5/20 日方向含义"}))
     return rows
+
+
+def _market_timing(as_of, meta, now):
+    from market_research.data.providers.calendar import bundled_calendar
+
+    signal = _date(as_of)
+    if signal is None:
+        return None
+    # 沪深京竞价收盘时间为北京时间 15:00。只采信收盘后发起的取数请求。
+    close = datetime(signal.year, signal.month, signal.day, 15, tzinfo=SHANGHAI)
+    if close > now:
+        return None
+    asset = ((meta.get("data_quality") or {}).get("sources") or {}).get("asset") or {}
+    if asset.get("stale") or asset.get("source_error") or _date(asset.get("observed_data_end")) != signal:
+        return None
+    try:
+        started, observed, generated = (datetime.fromisoformat(value) for value in (
+            asset.get("request_started_at"), asset.get("observed_at"), meta.get("analysis_generated_at")))
+        if not close <= started <= observed <= generated <= now:
+            return None
+        sessions, _ = bundled_calendar(signal, now.date())
+    except (TypeError, ValueError, OSError, ImportError):
+        return None
+    completed_through = now.date() - timedelta(days=int(now.hour < 15))
+    completed = [session.date() for session in sessions if signal <= session.date() <= completed_through]
+    if not completed or completed[-1] != signal:
+        return None
+    return {"analysis_generated_at": generated.isoformat(), "data_observed_at": observed.isoformat(),
+            "request_started_at": started.isoformat(), "session_close_at": close.isoformat()}
 
 
 def _fund_forecast_rows(result: dict, now) -> List[dict]:
@@ -370,6 +400,7 @@ def record_result(operation: str, params: dict, result: dict,
     if not isinstance(result, dict):
         return 0
     now = now or _now()
+    now = now.replace(tzinfo=SHANGHAI) if now.tzinfo is None else now.astimezone(SHANGHAI)
     if is_historical_window(params, now):
         return 0
     if operation == "market":

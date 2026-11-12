@@ -216,19 +216,40 @@ def holdings_payload(out: dict) -> dict:
     """真实持仓拟合的序列化结果（CLI / API / 报告共用）。
 
     保留全部披露约束：只用半年报/年报、Q2 滞后 62 天 / Q4 滞后 90 天、
-    共同行业归一、持仓基准要求 ≥60 个共同交易日。任何一项不满足都走
-    `ok=False` 并给出原因，不静默降级。
+    共同行业归一、持仓基准比较要求 ≥60 个共同交易日。
     """
     if not out or not out.get("ok"):
-        return {"ok": False, "code": (out or {}).get("code"),
-                "reason": (out or {}).get("reason", "持仓拟合失败"),
+        out = out or {}
+        reason = out.get("reason", "持仓拟合失败")
+        return {"ok": False, "code": out.get("code"), "reason": reason,
+                "meta": _jsafe(out.get("meta") or {}), "status": "failed",
+                "completeness": {"ok": False, "status": "failed", "missing": [
+                    {"section": "holdings", "item": "持仓拟合", "reason": reason}]},
                 "constraints": _HOLDING_CONSTRAINTS}
     cmp_ = out.get("compare") or {}
     stats = cmp_.get("stats") if isinstance(cmp_.get("stats"), pd.DataFrame) else None
     bench = out.get("benchmark") or {}
     diag = bench.get("diagnostics")
+    meta = out.get("meta") or {}
+    missing = []
+    if not cmp_.get("ok"):
+        missing.append({"section": "compare", "item": "收益比较",
+                        "reason": cmp_.get("reason") or "收益比较不可用"})
+    if not bench.get("available"):
+        missing.append({"section": "benchmark", "item": "持仓基准",
+                        "reason": bench.get("note") or "持仓基准不可用"})
+    if meta.get("nav_degraded"):
+        missing.append({"section": "nav", "item": "基金净值",
+                        "reason": meta.get("nav_degraded_reason") or "已降级为累计净值"})
+    for reason in (meta.get("data_quality") or {}).get("reasons") or []:
+        if all(item["reason"] != reason for item in missing):
+            missing.append({"section": "data_quality", "item": "数据质量", "reason": reason})
+    status = "partial" if missing else "ok"
     return {
         "ok": True,
+        "status": status,
+        "completeness": {"ok": True, "status": status, "missing": missing},
+        "meta": _jsafe(meta),
         "code": out["code"],
         "name": out.get("name"),
         "summary": {

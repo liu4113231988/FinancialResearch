@@ -115,7 +115,7 @@ class BacktestRequest(FundWindow):
 
 
 class HoldingsRequest(FundWindow):
-    """真实持仓拟合：只依赖基金代码，刷新开关控制是否重抓持仓/成分股。"""
+    """按请求窗口及仓位配置拟合；刷新开关控制是否重抓持仓/成分股。"""
     refresh: StrictBool = False
 
 

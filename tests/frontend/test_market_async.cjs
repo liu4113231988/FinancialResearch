@@ -79,7 +79,9 @@ function setup(handler) {
   [...timeout.timers.values()][0](); await waiting;
   assert.equal(timeout.d.getElementById('runBtn').disabled,false); timeout.close();
 
-  const fixture = {name:'Test',code:'sh600519',stats:{},meta:{},warnings:[],comparison:{ok:false},
+  const fixture = {name:'Test',code:'sh600519',kind:'stock',stats:{},meta:{},warnings:[],comparison:{ok:false},
+    status:'partial',completeness:{missing:[{item:'本资产',reason:'沿用缓存行情'}]},
+    quality:{actual_end:'2024-12-31',sources:{asset:{stale:true}}},
     series:{dates:[],close:[],candles:[],ma:{},drawdown:[],volatility:[]}};
   let finishRead;
   const switched=setup(url => {
@@ -91,6 +93,12 @@ function setup(handler) {
   switched.d.querySelector('[data-asset="index"]').click();
   switched.d.querySelector('[data-asset="stock"]').click();
   finishRead({status:'done'}); await work;
+  assert.match(switched.d.getElementById('marketResultStatus').textContent, /沿用缓存行情/);
+  let exported;
+  switched.w.downloadJson = (payload, filename) => {exported = {payload, filename};};
+  switched.d.getElementById('marketExportQuality').click();
+  assert.equal(exported.payload.quality.sources.asset.stale, true);
+  assert.equal(exported.filename, 'market_quality_sh600519_2024-12-31.json');
   assert.equal(switched.d.getElementById('marketName').textContent,'Test · SH600519');
   assert.equal(switched.d.getElementById('runBtn').disabled,false); switched.close();
 

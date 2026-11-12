@@ -31,7 +31,8 @@ def refit_single(**arguments):
     from market_research.funds.analysis import refit_single as calculate
     return calculate(**arguments)
 
-def holdings(code, refresh=False, job_id=None, checkpoint=None, **_):
+def holdings(code, refresh=False, job_id=None, checkpoint=None, *,
+             start=None, end=None, auto_equity=None):
     """真实持仓拟合：数据、RBSA、对齐与持仓基准都跑在任务队列里。"""
     from market_research.funds.holdings import fit_fund_holdings, load_industry_map
     from market_research.funds.payloads import holdings_payload
@@ -43,14 +44,15 @@ def holdings(code, refresh=False, job_id=None, checkpoint=None, **_):
             JOBS.update(job_id, stage="加载申万行业映射", progress=0.12)
         industry_map = load_industry_map(refresh=refresh)
         if industry_map.empty:
-            return {"ok": False, "code": code,
-                    "reason": "申万行业映射构造失败（无法取得成分股）"}
+            return holdings_payload({"ok": False, "code": code,
+                                     "reason": "申万行业映射构造失败（无法取得成分股）"})
         cp.save("industry_map", industry_map)
     if job_id:
         JOBS.update(job_id, stage="加载持仓与行情并拟合", progress=0.4)
     fitted = cp.load("fit")
     if fitted is None:
-        fitted = fit_fund_holdings(code, industry_map, refresh=refresh)
+        fitted = fit_fund_holdings(code, industry_map, refresh=refresh,
+                                   start=start, end=end, auto_equity=auto_equity)
         cp.save("fit", fitted)
     return holdings_payload(fitted)
 

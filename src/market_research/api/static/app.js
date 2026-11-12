@@ -5,6 +5,7 @@
 const S = {
   cat: null,          // 目录（模型清单、已知基金）
   result: null,       // 当前分析结果
+  holdings: null,     // 当前分析对应的持仓结果
   sel: null,          // 选中的模型 key
   best: null,         // 当前"最佳"模型 key
   params: {},         // 每个模型的超参覆盖
@@ -669,17 +670,22 @@ function exportResult() {
       from_cache: m.from_cache || false,
     },
     result: r,
+    ...(S.holdings ? {holdings: S.holdings} : {}),
   };
+  downloadJson(payload, `research_${r.code}_${String(m.end || 'latest').replace(/-/g, '')}.json`);
+  showAlert('已导出本次结果与数据口径（JSON）。');
+}
+
+function downloadJson(payload, filename) {
   const blob = new Blob([JSON.stringify(payload, null, 1)],
                         {type: 'application/json'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `research_${r.code}_${String(m.end || 'latest').replace(/-/g, '')}.json`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  showAlert('已导出本次结果与数据口径（JSON）。');
 }
 
 // ==================================================================== 初始化
@@ -883,8 +889,18 @@ function updateFundStatus() {
     || (Array.isArray(m.models) && JSON.stringify([...m.models].sort()) !== JSON.stringify(selectedModels().sort()))
     || (m.max_rebal != null && m.max_rebal !== selectedRebal())
     || (typeof m.auto_equity === 'boolean' && m.auto_equity !== selectedAuto());
-  $('fundStatus').hidden = !changed;
-  $('fundStatus').textContent = changed ? '分析设置已更改，点击「应用区间」或「开始分析」更新结果；当前图表仍对应上次分析。' : '';
+  const messages = [];
+  for (const [label, result] of [['分析结果', S.result], ['持仓拟合', S.holdings]]) {
+    const completeness = result?.completeness || {};
+    const status = result?.status || completeness.status;
+    if (status === 'partial' || status === 'failed') {
+      const missing = (completeness.missing || []).map(item => `${item.item || item.section}：${item.reason}`);
+      messages.push([label + (status === 'partial' ? '部分可用' : '不可用'), ...missing].join(' · '));
+    }
+  }
+  if (changed) messages.push('分析设置已更改，点击「应用区间」或「开始分析」更新结果；当前图表仍对应上次分析。');
+  $('fundStatus').hidden = !messages.length;
+  $('fundStatus').textContent = messages.join('。');
 }
 function updateRunHint() {
   const n = selectedModels().length;
@@ -900,6 +916,7 @@ function updateRunHint() {
 let pagePaused = false;
 
 let fundGeneration = 0;
+let holdingsGeneration = 0;
 let correlationGeneration = 0;
 let activeJob = null;          // 当前正在轮询的任务，供"取消"按钮使用
 let correlationJob = null;    // 相关性任务独立槽位，不能覆写 activeJob
@@ -1194,8 +1211,12 @@ function clearResultCharts() {
 function applyResult(res) {
   const previous = S.result;
   correlationGeneration++;
+  holdingsGeneration++;
+  S.holdings = null;
   S.btManual = false;
   $('btOut').hidden = true;
+  $('holdOut').hidden = true;
+  $('holdMsg').textContent = '';
   const visible = !window.MarketApp || MarketApp.kind === 'fund';
   clearResultCharts();
   // 先隐藏结果区：任何一处渲染抛错，用户看到的都是"错误提示 + 空状态"，
@@ -1230,6 +1251,7 @@ function applyResult(res) {
     syncBacktestDefaults();
   } catch (error) {
     S.result = previous || null;
+    updateFundStatus();
     clearResultCharts();
     $('main').hidden = true;
     $('empty').hidden = false;
@@ -2283,6 +2305,10 @@ async function runHoldings() {
   if (!S.result) { showAlert('请先分析一只基金'); return; }
   if (activeJob || $('holdRun').disabled) { showAlert('已有基金任务正在运行，请完成或取消后再试'); return; }
   const token = ++fundGeneration;
+  const holdingsToken = holdingsGeneration;
+  const result = S.result;
+  S.holdings = null;
+  updateFundStatus();
   correlationGeneration++;
   setFundBusy(true);
   showAlert(null);
@@ -2291,14 +2317,17 @@ async function runHoldings() {
   $('progressWrap').hidden = false;
   setProgress('提交持仓拟合任务…', 0.02, '');
   try {
+    const m = result.meta;
     const r = await api('/api/holdings', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: S.result.code, refresh: false })
+      body: JSON.stringify({ code: result.code, refresh: false, auto_equity: m.auto_equity,
+        start: ('window_requested' in m) ? m.window_requested : m.start,
+        end: ('window_requested_end' in m) ? m.window_requested_end : m.end })
     });
-    if (token !== fundGeneration) return;
-    await pollHoldings(r.job_id, token);
+    if (token !== fundGeneration || holdingsToken !== holdingsGeneration) return;
+    await pollHoldings(r.job_id, token, holdingsToken);
   } catch (e) {
-    if (token !== fundGeneration) return;
+    if (token !== fundGeneration || holdingsToken !== holdingsGeneration) return;
     $('progressWrap').hidden = true;
     showAlert('持仓拟合失败：' + e.message);
   } finally {
@@ -2309,17 +2338,18 @@ async function runHoldings() {
   }
 }
 
-async function pollHoldings(jid, token = fundGeneration) {
+async function pollHoldings(jid, token, holdingsToken) {
   const MAX_POLLS = 1500;
+  const current = () => token === fundGeneration && holdingsToken === holdingsGeneration;
   activeJob = jid;
   let attempts = 0;
-  while (token === fundGeneration) {
+  while (current()) {
     await new Promise(r => setTimeout(r, attempts > 200 ? 2000 : 800));
     while (typeof pagePaused !== 'undefined' && pagePaused) {
       await new Promise(r => setTimeout(r, 1000));
-      if (token !== fundGeneration) return;
+      if (!current()) return;
     }
-    if (token !== fundGeneration) return;
+    if (!current()) return;
     if (++attempts > MAX_POLLS) {
       $('progressWrap').hidden = true;
       showAlert('持仓拟合等待超时。任务可能仍在后台运行。');
@@ -2328,16 +2358,16 @@ async function pollHoldings(jid, token = fundGeneration) {
     let j;
     try { j = await api('/api/job/' + jid); }
     catch (e) {
-      if (token !== fundGeneration) return;
+      if (!current()) return;
       $('progressWrap').hidden = true;
       showAlert('持仓拟合查询失败：' + e.message);
       return;
     }
-    if (token !== fundGeneration) return;
+    if (!current()) return;
     setProgress(j.stage, j.progress, j.detail);
     if (j.status === 'done') {
       const r = await api('/api/result/' + jid);
-      if (token !== fundGeneration) return;
+      if (!current()) return;
       $('progressWrap').hidden = true;
       renderHoldings(r.result);
       return;
@@ -2369,13 +2399,17 @@ function fillHoldTable(el, rows, cols, pctCols = [], decCols = {}) {
 
 function renderHoldings(h) {
   const out = $('holdOut'), msg = $('holdMsg');
+  S.holdings = h;
+  updateFundStatus();
   if (!h || !h.ok) {
     out.hidden = true;
     msg.textContent = '未生成：' + ((h && h.reason) || '持仓数据不可用');
     return;
   }
   out.hidden = false;
-  msg.textContent = '';
+  const missing = h.completeness?.missing || [];
+  msg.textContent = h.status === 'partial'
+    ? '部分可用 · ' + missing.map(x => x.item + '：' + x.reason).join('；') : '';
   const s = h.summary || {};
   const cell = (...args) => escapeHtml(_cell(...args));
   $('holdSummary').innerHTML =
@@ -2389,18 +2423,24 @@ function renderHoldings(h) {
     `<div class="sb">未映射 ${cell(s.unmapped_mean, true, 0)}（不是现金）</div></div>`;
   const n = h.notes || {};
   const b = h.benchmark || {};
+  const m = h.meta || {};
+  const fitNote = m.start && m.end ? `拟合区间 ${m.start} 至 ${m.end} · ${m.model} · ` +
+    `${m.auto_equity ? '逐窗估计仓位' : '固定仓位 ' + _cell(m.equity_ratio, true, 0)} · ` +
+    `${m.window} 日训练窗口，每 ${m.refit} 个有效交易日重估 · ` +
+    `${m.nav_basis === 'cum' ? '累计净值' : '总回报净值'}` : '';
   const miss = b.missing_industries || [];
   const benchNote = ['[警示] 行业面板缺失 ' + miss.length + ' 个持仓行业' +
     (miss.length ? '（' + miss.join('、') + '）' : '') +
     '，其权重按 0 收益处理，不按现金计息。', b.residual_treatment]
     .filter(Boolean).join(' ');
-  $('holdNotes').textContent = [n.broad, n.coverage, n.unmapped_not_cash,
+  $('holdNotes').textContent = [fitNote, n.broad, n.coverage, n.unmapped_not_cash, b.note,
     n.benchmark_compare, n.benchmark_residual, miss.length ? benchNote : b.residual_treatment]
     .filter(Boolean).join(' ');
   fillHoldTable($('holdPeriods'), (h.periods || []).slice(-8),
     ['季末', '披露约', '共同行业数', '平均绝对偏差', '权重相关', '未映射权重', '持仓合计'],
     ['平均绝对偏差', '未映射权重', '持仓合计'], { '权重相关': 2 });
-  fillHoldTable($('holdCompare'), ((h.compare || {}).stats || []),
+  $('holdComparePanel').hidden = !h.compare?.ok;
+  fillHoldTable($('holdCompare'), h.compare?.ok ? h.compare.stats || [] : [],
     ['基准', '区间收益', '年化收益', '年化波动', '与基金相关', '信息比率IR'],
     ['区间收益', '年化收益', '年化波动', '与基金相关'], { '信息比率IR': 2 });
 }

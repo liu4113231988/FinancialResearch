@@ -22,7 +22,7 @@
 - **交易实证补充**：交易所公告核验、区分停牌与漏抓、真实订单及基金申赎/持有期费用模型。
 - **股票基本面与独立样本**：财报/估值/同业比较，以及方向估计与概率校准的未来独立样本有效性。
 - **长期模型档案**：[待评估提案](docs/模型档案与算法记录_重构方案.md) 未实现。
-- **未覆盖范围**：真实数据研究重放、真实浏览器/移动端、多进程与锁竞争压力、Docker/wheel 构建安装；2026-11-11 前历次全局审查只核对参数/任务入口、队列与 worker、调用链、缓存同步与前端脚本，2026-11-11 一轮新增了 RBSA/持仓/技术分析/资金账户/校准等算法层逻辑与边界核对（发现见新增小节），但仍**未逐行穷尽全部算法**。历次验证记录均标注未重跑，勿据历史测试记录推定已覆盖。
+- **未覆盖范围**：真实数据研究重放、完整浏览器/移动端回归、多进程与锁竞争压力、Docker/wheel 构建安装；2026-11-11 前历次全局审查只核对参数/任务入口、队列与 worker、调用链、缓存同步与前端脚本，2026-11-11 一轮新增了 RBSA/持仓/技术分析/资金账户/校准等算法层逻辑与边界核对，但仍**未逐行穷尽全部算法**。2026-11-12 补跑离线测试与隔离浏览器夹具检查，具体范围见下方同日小节；不据历史记录、合成行情或页面可打开推定真实数据与未来预测有效性已覆盖。
 
 ### 工程与生产化剩余
 
@@ -91,6 +91,79 @@
 - **P3-Q 剩余**：`market/capital.py:103-104` 残余仓位卖出额低于最低佣金时被 `insufficient_cash_for_sell_fee` 永久阻塞、闭合周期不计（费用触发的平仓死锁，区别于已登记的容量触发残留）。
 - **P3-R 剩余**：`rbsa.py:48-49` 的 `W+30` vs `modeling/engine.py:177-178` 的 `W+60` 两套门槛；`payloads.py:629-654`「仓位假设失配」以名义 0.9 诊断（`auto_equity=True` 实际逐窗自适应）；`pipeline.py:117` 波动目标变体 `fillna(1.0)` vs `backtest.py:177,203` 的 0.5；`config.py:251-252` `l1_ratio/alpha_grid` 死配置；`estimators.py:276,320,380,402` 四模型等权降级不传 status 不可观测。以上均会改变数值或诊断结论，须独立评估。
 - **P3-S 剩余**：`commands/holdings.py:135` 的 `✗`、`market_snapshot.py:118/121` 的 `…` 等在 GBK 重定向下仍可能 `UnicodeEncodeError`（`serve.py` 已加 reconfigure，其余入口未推广）。
+
+### 2026-11-12 股票、基金、指数拟合预测专项检查
+
+**结论**：三类资产的研究入口及主要计算链路已接通，可以作为内部研究原型运行；尚不能按“完整、可执行且已验证有效的预测/交易系统”验收。本轮只登记问题，未修改算法、默认研究口径、行情库、预测库或未来验证协议/证据。
+
+| 范围 | 当前能力与落地边界 |
+| --- | --- |
+| 基金 | 11 模型滚动样本外拟合、调参重学、风格/持仓比较、健康度回测、5/20 有效净值日方向概率。拟合是用同期指数收益重建基金收益，不是提前预测未知指数收益；健康度不是涨跌预测。申赎确认/持有期费用、时点净值及行业归属仍缺真实证据。 |
+| 股票 | 沪深京 A 股日线、技术条件、5/20 周期方向概率、候选比较、成交诊断及预测回验；离线有冻结训练、独立校准与资金账户。正常页面概率未单独校准，盘后发布约束、降级传播与结算口径仍有下列缺口。 |
+| 指数 | `sh000*` / `sz399*` 价格指数研究复用股票方向链路；行业指数还作为基金拟合因子。指数自身不可直接交易，实际 ETF 的跟踪偏差、费用与成交验证仍按既有六项未来验证执行，不用历史小样本代替。 |
+
+**本轮实际验证**（代码基线 `12d2224`，开始时工作区无修改）：
+
+- `uv run --locked python -m unittest discover -s tests -t . -p 'test_*.py'`：**575 项通过，87.915 秒**；`node tests/frontend/test_refit.js`、`node tests/frontend/test_ui_async.cjs`、`node tests/frontend/test_market_async.cjs` 均通过。现有用例通过不代表下列反例已被覆盖。
+- 11 模型调用冒烟：`idx=pd.bdate_range('2024-01-01', periods=400)`；`r=np.random.default_rng(42).normal(0,.01,(400,4))`；四指数价格 `exp(cumsum(r))`，基金 `exp(cumsum(r @ [.3,.3,.2,.1]))`；`ModelZoo({**C.RBSA, 'auto_equity':False}).run(panel, MODEL_ORDER, workers=1, max_rebal=1)`。11 个模型均无 `extra.error`、合成收益有限，**但每个仅 7 个 OOS 点**，只能证明调用可运行，不能证明拟合质量或预测有效性；门槛问题补入下方 P3-R。
+- 真实浏览器仅做**离线响应夹具**检查：隔离数据目录、关闭 worker，使用现有 `fund-style-fixture.json` / `context-fixture.json`，请求拦截后验证股票/指数结果、30 日区间校验、基金方向概率可用/部分不可用/不可用状态，以及持仓切换和部分失败反例；检查时视口宽 825px，无横向溢出，无控制台 error/warn。旧基金夹具不含方向字段，可用性渲染另注入 `p=.6`、`baseline=.5`、`n=30` 的明确合成夹具，**不作为模型表现证据**。未跑完整浏览器套件、手机尺寸、真实联网分析或部署构建。
+- 下列 Python 最小反例使用 `.venv/Scripts/python.exe`、内存合成输入及 `unittest.mock.patch`；供应商/存储调用均替换为内存返回，不写真实缓存或台账。并行审查未返回可用结果，以下只采纳主审直接复核的代码与实测证据。
+
+#### 新增未完成项（按影响优先处理）
+
+- **P1-22 股票原始价预测在结算时被改为前复权**：[`predictions/ledger.py:242-255`](src/market_research/predictions/ledger.py#L242) 正确冻结原始价 `price_basis=""`，但 [`predictions/judge.py:219-248`](src/market_research/predictions/judge.py#L219) 的 `record.get('price_basis') or 'qfq'` 将合法空串当缺失；联网/离线结算都改读 qfq，可改变跨除息期收益及对错标签。
+  - **复现**：记录 `{asset_kind:'stock', asset_code:'sh600519', as_of:'2025-01-02', price_basis:''}`，mock `sync.cached` 返回单日 close=100，调用 `_load_prices(record, date(2025,1,10), False)`，实际传给缓存的 basis 为 **`qfq`**。
+  - **验收**：区分“字段缺失”和合法空串；覆盖 raw/qfq/hfq 三种记录及 fetch 两分支，构造除息前后原始价与复权价方向不同的夹具，保证结算沿用冻结口径。既有受影响记录先识别/留痕，再决定重判，不能静默覆盖历史判定。
+
+- **P1-23 基金方向模型的日期轴被候选指数缺日改变**：[`data/panels.py:43-68`](src/market_research/data/panels.py#L43) 对齐时会删掉基金本来有净值的日期；[`funds/analysis.py:181-200`](src/market_research/funds/analysis.py#L181) 将这个面板中的基金列交给方向模型，[`funds/payloads.py:170-180`](src/market_research/funds/payloads.py#L170) 按剩余行计周期。台账却冻结 `observed_bars`，[`predictions/judge.py:205-240`](src/market_research/predictions/judge.py#L205) 按独立净值轴结算：训练/历史评估与回验不是同一个“5/20 有效净值日”。
+  - **复现**：300 个 `bdate_range('2024-01-01')` 日期，基金及指数 a=`100+arange(300)`，指数 b=`200+arange(300)`；b 的位置 `[100:108]` 设 NaN，默认 `max_ffill=5/min_coverage=.97` 保留该指数但删 3 行。以位置 102（2024-05-22）为起点，`horizon_data(...,5)` 的原始净值目标为 **2024-05-29**，对齐后目标变成 **2024-06-03**；同一基金得到不同标签期限。
+  - **验收**：方向模型独立使用原始净值日期轴，指数对齐只影响拟合；预测、历史评估与结算共享同一时钟定义。新增“指数缺日但基金不断档”回归，保证方向概率/目标日不被无关指数缺口改写。
+
+- **P1-24 PCR 内层验证预处理仍使用验证段信息**：[`modeling/estimators.py:338-349`](src/market_research/modeling/estimators.py#L338) 先用完整滚动窗口算 `mu/sd`，再切 80% 训练段选择 PCA 维度；PCA 虽只 fit 前段，输入缩放已依赖后 20%。这是**内层选参泄漏**，不是外层 OOS 使用未来标签，不能用已修复的 enet/lasso/ridge 折内标准化推定 PCR 也已覆盖。
+  - **复现**：`X=default_rng(42).normal(size=(300,4))*.01`，`y=X@[.3,.3,.2,.1]`；仅将 `X[240:,0]` 乘 100，y 不变。两次 `fit_window('pcr', ..., equity_ratio=.9)` 捕获首个 `PCA.fit` 输入，原始前 240 行完全相同，但 PCA 训练输入最大绝对差 **3.060200465060608**。
+  - **验收**：选择维度时只在内层训练段拟合缩放/PCA，再变换验证段；确定超参后才全窗口重训。回归断言改变验证段不改变训练预处理；修复会改变选参与数值，需版本化并重跑相关研究。
+
+- **P1-25 基金 OOS 候选集合受全区间未来覆盖率筛选影响**：[`data/panels.py:43-56`](src/market_research/data/panels.py#L43)、[`data/panels.py:442-465`](src/market_research/data/panels.py#L442) 在进入滚动拟合之前，按整个抓取/分析截止区间的覆盖率删列；后续才发生的缺数可决定早期窗口允许使用哪些指数。此项区别于 P1-11 的历史行业归属缺失，也区别于已修复的 `end` 之后净值未截断；当前全区间统计仍不是逐窗时点可得选池。
+  - **复现**：沿用 P1-23 的 300 行确定性面板，改为 b 的 `[200:]` 缺失；只分析前 200 行时列为 `[a,b,__FUND__]`，追加后 100 行、历史前缀不变时变为 `[a,__FUND__]`。滚动权重之前的特征集合已改变，不能仅凭重估锚点稳定宣称完整 OOS 链路前缀稳定。
+  - **验收**：研究路径按训练窗口决定可用因子，或预先冻结并保存候选池；全区间描述性覆盖筛选与因果 OOS 分开标注。测试仅改变未来缺失模式时，共同历史窗口的选池/权重/预测不变（不把有意的尾部重估限流淘汰混入测试）。涉及研究口径变更，须独立评估与重放。
+
+- **P1-26 切换基金后展示上一只基金的持仓结果**：[`api/static/app.js:1194-1230`](src/market_research/api/static/app.js#L1194) 的 `applyResult` 清理回测却未清理 `holdOut/holdMsg`；[`api/static/app.js:2370-2405`](src/market_research/api/static/app.js#L2370) 的持仓 DOM 不绑定基金代码或分析指纹。新的基金头部可与旧持仓数字并存，调参/切换窗口也有相同问题。
+  - **浏览器复现**：基金 A=110022，`renderHoldings` 输入 `ok=true,n_periods=3`，notes.coverage=`这是基金 A 的持仓`；再 `applyResult` 基金 B=000001。实测头部已为 B，但 `holdOut.hidden=false` 且仍显示 A 的文字。
+  - **验收**：新分析/基金/窗口/拟合配置生效时清空持仓结果与错误提示，或严格按同一指纹恢复；补 A→B、同基金换窗口、重学、失败结果及在途持仓响应的浏览器回归。
+
+- **P1-27 股票/指数缓存降级标记在结果中丢失**：[`market/analysis.py:98-107`](src/market_research/market/analysis.py#L98) 会返回带 `stale/source_error` 的旧行情；但 [`market/analysis.py:235-270`](src/market_research/market/analysis.py#L235)、[`market/analysis.py:298-302`](src/market_research/market/analysis.py#L298) 只输出区间/缺日等信息，没有传播回退原因或完整性状态，结果接口又默认 `status=ok`。日期无差距不等于本次数据源刷新成功。
+  - **复现**：80 个 `bdate_range('2025-01-01')`，close=`100+arange(80)`、open=close−.1/high=close+.5/low=close−.5/volume=1000；mock `load_bars` 返回 attrs=`{stale:True,source_error:'TimeoutError: offline audit',fetched_at:'2025-04-22T16:00:00'}`，`sync.cached=None`。调用 `analyze_market('stock','600519',start='2025-01-01',end='2025-04-22')`，gap=0，但结果无 stale、错误摘要、`status` 或 `meta.data_quality`。
+  - **验收**：资产及基准各自的回退/错误/抓取时间进入统一质量契约、页面及导出；股票和指数都补降级回归，并与 P2-31 的展示门禁衔接。不要仅凭自然日差距推断停牌或新鲜度。
+
+- **P1-28 持仓比较失败仍以完整成功显示，净值口径也未贯通**：[`funds/holdings.py:942-975`](src/market_research/funds/holdings.py#L942) 不按 `compare.ok` / 基准可用性调整顶层成功状态，也未把 panel 的 `nav_basis/nav_degraded/data_quality` 带出；[`funds/payloads.py:226-275`](src/market_research/funds/payloads.py#L226) 保留子块失败但顶层仍 `ok=True`。[`api/routes/tasks.py:33-37`](src/market_research/api/routes/tasks.py#L33) 默认报正常，页面不展示 `compare.reason` / `benchmark.note`。这不是 P1-21 的持仓年份缓存问题。
+  - **复现**：`holdings_payload({code:'110022',ok:True,compare:{ok:False,reason:'共同交易日不足60'},benchmark:{available:False}})`，结果顶层仍真；mock done job 交给结果路由后 `status='ok', completeness={}`。浏览器 `renderHoldings` 后持仓区可见、错误提示为空，比较失败原因和基准不可用说明均未显示；向序列化输入加入 cum/degraded/quality 字段也不会输出。
+  - **验收**：保留可用的持仓结构部分，但按子块生成 partial/failed 状态并显示原因；净值 total/cum、降级和源质量贯通服务/API/页面/报告。分别测试对齐成功但比较不足 60 日、全部行业行情缺失及 `allow_cum` 情形，不用空表冒充成功。
+
+- **P1-29 “实盘最新收盘”入账门禁只按 14 个自然日放行**：[`predictions/ledger.py:94-117`](src/market_research/predictions/ledger.py#L94)、[`predictions/ledger.py:219-223`](src/market_research/predictions/ledger.py#L219)、[`predictions/ledger.py:363-383`](src/market_research/predictions/ledger.py#L363) 虽拒绝显式历史 end，却不核验无 end 请求使用的缓存是否为最后完成会话、目标是否已到期或当日是否收盘。旧缓存可在事后被登记为前瞻记录；不可变首条机制还会阻止同日后续正确版本替换。
+  - **复现**：内存结果 stock/sh600519、`as_of='2025-01-02'`、5 日 probability=.6/ok=true、`params.end=None`，`now=2025-01-15 16:00+08:00`；mock `_insert` 只统计，仍准备插入 **1 条**。将 now 改为信号日 **10:00** 同样放行；后者证明入口无收盘守卫，不代表本轮已验证真实供应商盘中响应。
+  - **验收**：用资产发布时点与最后完成交易会话确认可入账性，排除已成熟或过期缓存，并记录分析生成/数据可得时间；基金需考虑净值披露滞后，周末长假不能简单改成固定天数阈值。覆盖显式历史、旧缓存无 end、盘中暂态、正常盘后和长假；旧记录审计后分组标注，不能直接充当未来验证证据。
+
+- **P2-43 持仓 API 接受但忽略分析窗口和仓位参数**：[`api/schemas.py:117-119`](src/market_research/api/schemas.py#L117) 继承 `FundWindow`，公开接受 start/end/auto_equity；[`services/analysis.py:34-55`](src/market_research/services/analysis.py#L34) 用 `**_` 丢弃，底层 [`funds/holdings.py:911-933`](src/market_research/funds/holdings.py#L911) 按默认窗口/配置重拟合。网页持仓按钮也未传当前窗口，不能把结果默认理解为与上方拟合相同设置。
+  - **复现**：`HoldingsRequest(code='110022',start='2020-01-01',end='2024-01-01',auto_equity=False)` 校验通过；mock 行业表及底层 fit 后调用服务，fit 实际只收到 code、industry_map 和 `refresh=False`。
+  - **验收**：若支持窗口/仓位则完整透传、写入结果并绑定 UI；若持仓固定采用独立窗口，则从请求契约拒绝无效参数，并显式展示实际窗口/模型/仓位/重估方式。不可继续“接受成功但不生效”。
+
+- **P2-44 单候选指数时 PCR 维度边界失败**：[`modeling/estimators.py:341-348`](src/market_research/modeling/estimators.py#L341) 的 `kmax` 与候选集合强制下限 2，与 `n_features=1` 冲突；候选池部分降级到单列后 PCR 不可运行。
+  - **复现**：沿用 P1-24 的 X/y，调用 `fit_window('pcr',X[:,:1],y,['a'],equity_ratio=.9)`，实际抛 `ValueError: Found array with 0 feature(s) (shape=(240, 0)) ... LinearRegression`；相同输入保留两列则可运行。
+  - **验收**：在模型适用性层明确拒绝并返回可读 unavailable，或实现有定义的一维退化；测试 0/1/2 列与短训练段，失败不进入最佳模型推荐（排名口径沿用 P2-31 的决策约束）。
+
+#### 与已有待办合并的补充（不另起重复编号）
+
+- **P3-R 样本门槛补充**：除既有 `W+30/W+60` 不一致，还需检查重估限流**之后**的实际 OOS 样本数。[`modeling/engine.py:135-136`](src/market_research/modeling/engine.py#L135) 保留尾部锚点，[:242](src/market_research/modeling/engine.py#L242) 才建立合成序列，[:318-321](src/market_research/modeling/engine.py#L318) 直接算指标；[`funds/analysis.py:71-83`](src/market_research/funds/analysis.py#L71) 只以 error/空 R² 判模型失败。本轮上述 400 行、`max_rebal=1` 冒烟的 11 模型都只有 **7 个 OOS 点**，仍输出指标。验收需公开有效 OOS 起止/n 与重估覆盖，单独定义足够样本门槛；不足时不作为正常排名/推荐，不能仅以输入总长度关闭。
+- **P2-31 结果契约补充**：已有基金页 meta badge 并不等于统一失败门禁；P1-27/P1-28 的市场/持仓链路甚至缺状态传播，应与顶部横幅、导出/报告同批贯通。失败模型是否强制退出 rank/best/insights 仍按原 `[产品]` 决策约束处理，本轮未改变排名。
+- P1-10/P1-11、P3-N/O/P/Q、六项未来验证、时点数据版本、基金申赎费用及模型档案仍保持未完成；本轮没有用离线测试、模拟成交或合成夹具替这些条目验收。建议先处理入账/结算与错误结果显示，再修复研究时点性与参数契约；P1-24/P1-25/P3-R 等涉及研究数值变更的项需单独升版本、重放后比较。
+
+### 2026-11-12 修复验证记录
+
+- **已实现**：P1-22 冻结原始价、前复权和后复权的结算口径。P1-23 用独立净值日期轴估计方向概率。P1-24/P2-44 在内层训练段拟合 PCR 预处理，并处理零列、单列、两列与短窗口。P1-26 使持仓展示跟随当前分析并拒绝旧请求响应。P1-27/P1-28 显示市场行情回退及持仓部分失败，保留净值口径与来源质量。P2-43 透传持仓窗口和仓位参数。P2-42 将无效同步时间归为服务端配置错误。P3-S 的注册表入口兼容 GBK 重定向。
+- **部分实现**：P1-29 的股票和指数入账要求供应商日历覆盖、信号日为最后完成会话、收盘后发起的请求返回对应日期的日线，并记录取数与分析时间。旧缓存须成功刷新才有时间证据。基金净值的可得时点及旧记录分组仍待处理。P2-31 的页面结果状态与导出已接通，失败模型排名规则仍待决策。
+- **回归**：设置 `PYTHONUTF8=1` 后运行 `.venv/Scripts/python.exe -m unittest discover -s tests -t . -p 'test_*.py'`，585 项通过。`node tests/frontend/test_refit.js`、`node tests/frontend/test_ui_async.cjs`、`node tests/frontend/test_market_async.cjs` 通过。合成夹具包括种子 42 的 300×4 PCR 输入及验证段扰动、300 个工作日净值与 8 日候选指数缺口、原始价和复权价跨事件方向相反、80 根日线的零日期差回退，以及长假和盘中入账。
+- **PCR 快照重放**：结果缓存版本 13→14。用本机归档 `fund_nav_110022_2016-01-01_total` 和 `index_universe_2016-01-01` 调 `align_prices`，截取 2019-01-01 起的 1,909 行和 43 个因子，`panel_sha256=8385ff8b263d2239ec6628c9f6a5c93d3f0919a2d0fde4feda48567954dac200`。同一面板上比较 Git HEAD 与修复版的 PCR，`auto_equity=False, workers=1, max_rebal=0`。共同样本外区间为 2020-01-14 至 2026-11-11（1,656 点），R² 从 0.721612 变为 0.723686，TE 从 0.117283 变为 0.116846。旧归档仅用于本次固定输入对照。其他历史报告须按新版本重跑后引用。
+- **台账只读审计**：本机 `market.duckdb` 的 `prediction_records` 中股票 `price_basis=''` 为 0 条，缺少收盘时间证据的旧股票待结算记录为 3 条。台账未重判或改写。未来验证执行台账仍按既有协议等待真实输入。
 
 ## 行动约束
 

@@ -195,6 +195,46 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   assert.equal(holdCalls.length, 0);
   assert.equal(holdContext.fundGeneration, 0);
   assert.match(holdAlerts[0], /已有基金任务/);
+  const resultNodes = new Map();
+  let releaseHoldResult;
+  const resultContext = {
+    S: {result: {code: '110022'}}, correlationGeneration: 0, fundGeneration: 0,
+    holdingsGeneration: 0,
+    activeJob: null, window: {scrollTo() {}}, setTimeout: resolve => resolve(),
+    $: id => {
+      if (!resultNodes.has(id)) resultNodes.set(id, {});
+      return resultNodes.get(id);
+    },
+    normalizeResult: value => {
+      if (!value) throw new Error('invalid result');
+      return {...value, meta: {}, correlation: {}, models: {}};
+    },
+    api: path => path.includes('/job/') ? Promise.resolve({status: 'done'})
+      : new Promise(resolve => {releaseHoldResult = resolve;}),
+    renderHoldings: () => assert.fail('obsolete holdings response rendered'),
+  };
+  for (const name of ['clearResultCharts', 'updateFundStatus', 'renderHead',
+    'renderWatchlist', 'renderInsights', 'renderValNote', 'renderDrift', 'renderModelStrip',
+    'renderRank', 'renderSelected', 'renderNav', 'renderFundForecast', 'renderCorr',
+    'syncBacktestDefaults', 'showAlert', 'setProgress']) resultContext[name] = () => {};
+  vm.createContext(resultContext);
+  vm.runInContext(source.slice(source.indexOf('function applyResult('),
+                               source.indexOf('function renderHead(')), resultContext);
+  vm.runInContext(source.slice(source.indexOf('async function pollHoldings('),
+                               source.indexOf('function _cell(')), resultContext);
+  for (const next of [{code: '000001'}, {code: '000001', start: '2020-01-01'},
+    {code: '000001', params: {ridge: {alpha: 1}}}, null]) {
+    resultContext.$('holdOut').hidden = false;
+    resultContext.$('holdMsg').textContent = 'previous holdings';
+    resultContext.applyResult(next);
+    assert.equal(resultContext.$('holdOut').hidden, true);
+    assert.equal(resultContext.$('holdMsg').textContent, '');
+  }
+  const holdPoll = resultContext.pollHoldings('old-holdings', 0, resultContext.holdingsGeneration);
+  await new Promise(resolve => setImmediate(resolve));
+  resultContext.applyResult(null);
+  releaseHoldResult({result: {ok: true}});
+  await holdPoll;
   // 旧回测 A 晚于新任务 B 返回时，A 的 finally 不得清掉 B 的 activeJob。
   let releaseOldPoll;
   const raceNodes = new Map();

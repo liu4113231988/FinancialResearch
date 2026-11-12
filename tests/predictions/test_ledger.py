@@ -22,6 +22,11 @@ def _market_result(as_of=AS_OF, signals=None, forecasts=None):
         "code": "sh600519",
         "name": "测试股票",
         "meta": {"adjust": "qfq",
+                 "analysis_generated_at": f"{as_of}T15:03:00+08:00",
+                 "data_quality": {"sources": {"asset": {
+                     "request_started_at": f"{as_of}T15:01:00+08:00",
+                     "observed_at": f"{as_of}T15:02:00+08:00",
+                     "observed_data_end": as_of}}},
                  "provenance": {"git_commit": "abc123", "code_version": "1",
                                 "data_stamp": "stamp"}},
         "technical": {
@@ -97,6 +102,9 @@ class LedgerRecordTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(dir=C.ROOT / "output")
         self.patch = patch.object(C, "DATA_DIR", Path(self.tmp.name))
         self.patch.start()
+        calendar = patch("market_research.data.providers.calendar.bundled_calendar", return_value=(SESSIONS, {}))
+        calendar.start()
+        self.addCleanup(calendar.stop)
 
     def tearDown(self):
         self.patch.stop()
@@ -125,6 +133,24 @@ class LedgerRecordTests(unittest.TestCase):
             self.assertEqual(recorded["thresholds"],
                              {"direction": 0.5, "entry": 0.6, "exit": 0.4})
             self.assertIn("horizon_basis", recorded)
+            self.assertEqual(recorded["data_observed_at"], f"{AS_OF}T15:02:00+08:00")
+
+    def test_market_registration_uses_completed_sessions_and_post_close_input(self):
+        result = _market_result()
+        asset = result["meta"]["data_quality"]["sources"]["asset"]
+        with patch.object(ledger, "_insert", side_effect=len):
+            self.assertEqual(ledger.record_result("market", {}, result, now=datetime(2026, 10, 30, 10)), 0)
+            self.assertEqual(ledger.record_result("market", {}, result, now=datetime(2026, 11, 2, 16)), 0)
+            self.assertEqual(ledger.record_result("market", {}, result, now=datetime(2026, 11, 8, 16)), 0)
+            self.assertEqual(ledger.record_result("market", {}, result, now=datetime(2026, 10, 30, 16)), 3)
+            with patch("market_research.data.providers.calendar.bundled_calendar",
+                       return_value=(pd.to_datetime([AS_OF, "2026-11-10"]), {})):
+                self.assertEqual(ledger.record_result("market", {}, result, now=datetime(2026, 11, 9, 16)), 3)
+            asset["request_started_at"] = f"{AS_OF}T10:00:00+08:00"
+            self.assertEqual(ledger.record_result("market", {}, result, now=datetime(2026, 10, 30, 16)), 0)
+            asset["request_started_at"] = f"{AS_OF}T15:01:00+08:00"
+            asset["observed_data_end"] = "2026-10-29"
+            self.assertEqual(ledger.record_result("market", {}, result, now=datetime(2026, 10, 30, 16)), 0)
 
     def test_feature_buckets_are_available_for_summary(self):
         result = _market_result(signals=[])
@@ -214,6 +240,30 @@ class JudgeTests(unittest.TestCase):
         verdict = judge.judge_record(self._record(), self._prices(), SESSIONS,
                                      date(2026, 11, 4))
         self.assertEqual(verdict["status"], "pending")
+
+    def test_stock_settlement_uses_frozen_price_basis(self):
+        adjusted = self._prices()
+        raw = adjusted.copy()
+        raw.loc[raw.index > pd.Timestamp(AS_OF)] -= 20
+        frames = {"": raw, "qfq": adjusted, "hfq": adjusted * 2}
+        today = date(2026, 11, 20)
+        for fetch in (False, True):
+            with patch("market_research.tasks.sync.cached",
+                       side_effect=lambda kind, code, basis, *a, **kw: frames[basis]), \
+                 patch("market_research.market.analysis.load_bars",
+                       side_effect=lambda kind, code, start, end, basis, **kw: frames[basis]):
+                for basis, label in (("", "incorrect"), ("qfq", "correct"),
+                                     ("hfq", "correct"), (None, "correct")):
+                    with self.subTest(fetch=fetch, basis=basis):
+                        record = self._record()
+                        if basis is None:
+                            record.pop("price_basis")
+                        else:
+                            record["price_basis"] = basis
+                        prices = judge._load_prices(record, today, fetch)
+                        self.assertIs(prices, frames["qfq" if basis is None else basis])
+                        verdict = judge.judge_record(record, prices, SESSIONS, today)
+                        self.assertEqual(verdict["label"], label)
 
     def test_grace_session_used_when_target_missing(self):
         prices = self._prices().drop(pd.Timestamp("2026-11-06"))
@@ -418,6 +468,9 @@ class SettleAndSummaryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(dir=C.ROOT / "output")
         self.patch = patch.object(C, "DATA_DIR", Path(self.tmp.name))
         self.patch.start()
+        calendar = patch("market_research.data.providers.calendar.bundled_calendar", return_value=(SESSIONS, {}))
+        calendar.start()
+        self.addCleanup(calendar.stop)
 
     def tearDown(self):
         self.patch.stop()

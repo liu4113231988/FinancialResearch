@@ -308,8 +308,38 @@ class HoldingsPayloadTest(unittest.TestCase):
         p = holdings_payload({"ok": False, "code": "110022",
                               "reason": "共同行业不足 60 个交易日"})
         self.assertFalse(p["ok"])
+        self.assertEqual(p["status"], "failed")
         self.assertEqual(p["reason"], "共同行业不足 60 个交易日")
         self.assertEqual(len(p["constraints"]), 4)
+
+    def test_partial_fit_preserves_holdings_and_reports_missing_sections(self):
+        out = _holdings_out()
+        out["compare"] = {"ok": False, "reason": "共同交易日不足60"}
+        out["benchmark"] = {"available": False, "note": "全部行业行情缺失"}
+        out["meta"] = {"nav_basis": "cum", "nav_degraded": True,
+                       "nav_degraded_reason": "总回报数据缺失",
+                       "data_quality": {"reasons": ["数据源回退"]}}
+        result = holdings_payload(out)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["meta"], out["meta"])
+        self.assertEqual(len(result["periods"]), 3)
+        self.assertEqual({item["reason"] for item in result["completeness"]["missing"]},
+                         {"共同交易日不足60", "全部行业行情缺失", "总回报数据缺失", "数据源回退"})
+
+    def test_holdings_service_passes_requested_fit_settings(self):
+        from market_research.api.schemas import HoldingsRequest
+        from market_research.funds import holdings as implementation
+        from market_research.services.analysis import holdings
+        request = HoldingsRequest(code="110022", start="2020-01-01",
+                                  end="2024-01-01", auto_equity=False)
+        industry = pd.Series({"600000": "801780"})
+        with patch.object(implementation, "load_industry_map", return_value=industry), \
+             patch.object(implementation, "fit_fund_holdings", return_value=_holdings_out()) as fit:
+            result = holdings(**request.model_dump())
+        self.assertTrue(result["ok"])
+        fit.assert_called_once_with("110022", industry, refresh=False,
+                                    start="2020-01-01", end="2024-01-01", auto_equity=False)
 
 
 class TimingComparisonTest(unittest.TestCase):

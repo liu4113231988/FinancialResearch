@@ -909,35 +909,45 @@ def compare_benchmarks(fund_nav: pd.Series, rbsa_syn_nav: pd.Series,
 
 
 def fit_fund_holdings(code: str, industry_map: pd.Series,
-                      refresh: bool = False) -> dict:
+                      refresh: bool = False, *, start=None, end=None,
+                      auto_equity=None) -> dict:
     """单只基金：数据 → RBSA → 真实持仓对齐 → 持仓基准。
 
     CLI、Web API 与报告共用这一条链路，避免三处各写一遍导致披露口径漂移。
     """
     import market_research.data.marketdata as D
+    from market_research.funds.analysis import nav_basis_meta
     from market_research.funds.rbsa import RBSA
 
     t0 = time.time()
-    panel = D.load_panel(code, verbose=False)
+    panel = D.load_panel(code, start=start, end=end, verbose=False)
+    cfg = {**C.RBSA}
+    if auto_equity is not None:
+        cfg["auto_equity"] = auto_equity
+    meta = {**nav_basis_meta(panel.attrs), "data_quality": panel.attrs.get("data_quality", {}),
+            "start": panel.index[0].date().isoformat(), "end": panel.index[-1].date().isoformat(),
+            "model": "enet_slsqp", "auto_equity": bool(cfg.get("auto_equity")),
+            "equity_ratio": cfg["equity_ratio"], "refit": cfg["refit"],
+            "rebal_mode": "fixed_interval", "window": cfg["window"]}
     hd = load_fund_holdings(code, refresh=refresh, verbose=False)
     if hd.empty:
-        return {"code": code, "ok": False, "reason": "未取到持仓明细"}
+        return {"code": code, "ok": False, "reason": "未取到持仓明细", "meta": meta}
     exp = semiannual_exposure(hd, industry_map)
     if exp.empty:
-        return {"code": code, "ok": False, "reason": "无完整（半年报/年报）持仓"}
+        return {"code": code, "ok": False, "reason": "无完整（半年报/年报）持仓", "meta": meta}
 
     # P3-R：短历史基金在此链路上应与其余失败同样优雅降级 ——
     # RBSA 样本不足抛 ValueError（rbsa.py 的 W+30 门槛），不捕获会让
     # CLI / Web / 报告直接异常，而不是 ok=False + reason。
     try:
-        fit = RBSA().fit_rolling(panel, verbose=False)
+        fit = RBSA(cfg).fit_rolling(panel, verbose=False)
     except ValueError as error:
-        return {"code": code, "ok": False,
+        return {"code": code, "ok": False, "meta": meta,
                 "reason": f"RBSA 样本不足：{error}"}
     cov = exposure_coverage(hd, industry_map)
     al = align_vs_rbsa(fit["weights"], exp, coverage=cov)
     if not al.get("ok"):
-        return {"code": code, "ok": False, "reason": al.get("reason", "对齐失败")}
+        return {"code": code, "ok": False, "reason": al.get("reason", "对齐失败"), "meta": meta}
 
     hr = holding_benchmark(exp, panel, coverage=cov)
     syn_nav = np.exp(fit["syn_ret"].cumsum())
@@ -949,6 +959,7 @@ def fit_fund_holdings(code: str, industry_map: pd.Series,
     return {
         "code": code,
         "ok": True,
+        "meta": meta,
         "name": C.EXTENDED_FUNDS.get(code, C.DEMO_FUNDS.get(code, code)),
         "n_periods": al["n_periods"],
         "mad_mean": al["mad_mean"],

@@ -1,6 +1,7 @@
 """统一研究与数据维护入口；命令延迟加载并显式接收参数。"""
 import argparse
 from importlib import import_module
+from io import TextIOWrapper
 from pathlib import Path
 import sys
 
@@ -8,6 +9,8 @@ from .registry import COMMANDS, COMMAND_SPECS, LEGACY_COMMANDS
 
 
 def execute(command: str, arguments: list[str], *, prog: str):
+    if isinstance(sys.stdout, TextIOWrapper):
+        sys.stdout.reconfigure(errors="backslashreplace")
     entry = import_module('market_research.' + COMMANDS[command]).main
     return entry(list(arguments), prog=prog)
 

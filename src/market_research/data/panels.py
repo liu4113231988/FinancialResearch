@@ -413,7 +413,7 @@ def load_panel(fund_code: str, start: Optional[str] = None,
                end: Optional[str] = None, refresh: bool = False,
                verbose: bool = True,
                nav_basis: str = NAV_BASIS_TOTAL,
-               allow_fetch: bool = True) -> pd.DataFrame:
+               allow_fetch: bool = True, *, include_forecast_nav: bool = False) -> pd.DataFrame:
     """
     返回对齐后的价格面板：列 = 候选指数 + __FUND__，**已裁剪到 [start, end]**。
 
@@ -504,6 +504,8 @@ def load_panel(fund_code: str, start: Optional[str] = None,
     out.attrs["nav_degraded_reason"] = nav_reason
     quality["warnings"] = list(warnings)
     out.attrs["data_quality"] = quality
+    if include_forecast_nav:
+        out.attrs["forecast_nav"] = nav.loc[nav.index >= pd.Timestamp(start)]
     if out.empty:
         raise ValueError(
             f"{fund_code} 在 {start or '全区间'} ~ {end or '最新'} 内没有可用数据"

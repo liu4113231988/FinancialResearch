@@ -1,5 +1,6 @@
 """DuckDB 迁移、事务与路由资源生命周期的离线回归。"""
 from pathlib import Path
+import os
 import tempfile
 import threading
 import unittest
@@ -36,6 +37,13 @@ class HealthTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["status"], "unhealthy")
         self.assertFalse(body["checks"]["storage"]["ok"])
+
+    def test_sync_schedule_configuration_error_is_server_side(self):
+        with patch.dict(os.environ, {"FIL_SYNC_TIME": "invalid"}):
+            response = self.client.get("/api/sync")
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["field"], "config")
+        self.assertIn("FIL_SYNC_TIME", response.json()["error"])
 
     def test_ready_is_degraded_when_sync_is_stale(self):
         with patch.object(self.meta, "_storage_check", return_value={"ok": True}), \

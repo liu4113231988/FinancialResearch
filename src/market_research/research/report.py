@@ -600,7 +600,18 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
         _per_tbl = _table(_per.tail(8), index=False) if len(_per) else ''
         _cmp_tbl = (_table(pd.DataFrame(_c.get("stats") or []), index=False)
                     if _c.get("stats") else '')
+        _cmp_section = (f'<p><b>持仓基准 vs 基金 / RBSA 合成基准</b>'
+                        f'（共同区间 {_c.get("n_days", 0)} 个交易日）：</p>{_cmp_tbl}'
+                        if _c.get("ok") else '')
         _b = _h.get("benchmark") or {}
+        _hm = _h.get("meta") or {}
+        _holding_basis = {"total": "总回报净值", "cum": "累计净值"}.get(_hm.get("nav_basis"))
+        _basis_note = f'<p>持仓拟合净值口径：{_holding_basis}。</p>' if _holding_basis else ''
+        _missing = (_h.get("completeness") or {}).get("missing") or []
+        _partial_note = (
+            '<p style="color:#92400e">部分可用：' + '；'.join(
+                _html.escape(f'{item["item"]}：{item["reason"]}') for item in _missing) + '。</p>'
+            if _missing else '')
         _diag = pd.DataFrame(_b.get("diagnostics") or [])
         _diag_tbl = _table(_diag.tail(8), index=False) if len(_diag) else ''
         _miss = _b.get("missing_industries") or []
@@ -624,9 +635,7 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
             f'{_safe(_s.get("corr_last"), ".2f")}，有效 {_s.get("corr_valid", 0)} 期）；'
             f'真实 PE/行业覆盖率均值 <b>{_safe(_s.get("coverage_mean"), ".0%")}</b>；'
             f'未映射权重均值 <b>{_safe(_s.get("unmapped_mean"), ".0%")}</b>。</p>'
-            f'{_per_tbl}'
-            f'<p><b>持仓基准 vs 基金 / RBSA 合成基准</b>'
-            f'（共同区间 {_c.get("n_days", 0)} 个交易日）：</p>{_cmp_tbl}'
+            f'{_basis_note}{_partial_note}{_per_tbl}{_cmp_section}'
             f'{_miss_note}{_res_note}'
             f'<p style="font-size:13px;color:#64748b">{_h.get("notes", {}).get("unmapped_not_cash", "")}'
             f'{_h.get("notes", {}).get("benchmark_compare", "")}'

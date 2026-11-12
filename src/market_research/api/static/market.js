@@ -298,9 +298,15 @@ window.MarketApp = (() => {
   function render(data) {
     el('marketEmpty').hidden = true; el('marketResult').hidden = false;
     const s = data.stats, m = data.meta;
+    el('marketExportQuality').disabled = !data.quality;
     const basis = m.adjust === 'qfq' ? '前复权' : m.adjust === 'hfq' ? '后复权' : '不复权';
     el('marketName').textContent = `${data.name} · ${data.code.toUpperCase()}`;
     el('marketMeta').textContent = `${m.start} — ${m.end} · ${m.n_days} 个交易日 · ${kind === 'stock' ? basis : '价格指数'} · ${m.source || '历史日线'}`;
+    const resultStatus = el('marketResultStatus');
+    const missing = data.completeness?.missing || [];
+    resultStatus.hidden = data.status !== 'partial';
+    resultStatus.textContent = resultStatus.hidden ? '' : '部分可用 · ' +
+      missing.map(item => item.item + '：' + item.reason).join('；');
     if (data.quality) {
       const q = data.quality;
       el('marketMeta').textContent += ` · 请求 ${q.requested_start} — ${q.requested_end}`;
@@ -340,6 +346,13 @@ window.MarketApp = (() => {
     el('marketFilters').onsubmit = event => {event.preventDefault(); submit(el('codeInput').value);};
     el('marketCancel').onclick = cancel;
     el('marketRefresh').onclick = () => result && submit(result.code, true);
+    el('marketExportQuality').onclick = () => {
+      if (!result?.quality) return;
+      const {kind, code, status, completeness, quality, meta} = result;
+      downloadJson({kind, code, status, completeness, quality, adjust: meta.adjust,
+        benchmark: meta.benchmark, provenance: meta.provenance},
+      `market_quality_${code}_${quality.actual_end}.json`);
+    };
     el('marketFilters').onchange = () => {if (result) status('区间或口径已更改，点击「应用区间」更新结果。');};
     let rzT = null;
     window.addEventListener('resize', () => {

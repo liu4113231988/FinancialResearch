@@ -358,6 +358,21 @@ class DataQualityTests(unittest.TestCase):
         self.assertNotEqual(quality["status"], "ok")
         self.assertTrue(any("000300" in w for w in out.attrs["warnings"]))
 
+    def test_fund_forecast_nav_keeps_dates_missing_from_index_panel(self):
+        idx = pd.bdate_range("2024-01-01", periods=300)
+        nav = pd.Series(100.0 + np.arange(len(idx)), index=idx)
+        px = pd.DataFrame({"a": nav, "b": nav + 100})
+        px.loc[idx[100:108], "b"] = np.nan
+        with patch.object(panels, "load_fund_nav_cached", return_value=nav), \
+             patch.object(panels, "load_index_universe", return_value=px):
+            out = panels.load_panel("110022", start="2024-01-01", end="2025-02-14",
+                                    verbose=False, include_forecast_nav=True)
+        signal = idx[102]
+        forecast_nav = out.attrs["forecast_nav"]
+        pd.testing.assert_series_equal(forecast_nav, nav.loc[:"2025-02-14"])
+        self.assertEqual(forecast_nav.index[forecast_nav.index.get_loc(signal) + 5], idx[107])
+        self.assertEqual(out.index[out.index.get_loc(signal) + 5], idx[110])
+
 
 class ReadOnlyNoWriteTests(unittest.TestCase):
     """108：allow_fetch=False 的请求线程不得产生任何 DuckDB 写副作用。"""

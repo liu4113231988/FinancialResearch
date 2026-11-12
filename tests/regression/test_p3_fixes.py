@@ -28,6 +28,41 @@ class LassoEmptySupportTests(unittest.TestCase):
         self.assertTrue(np.isfinite(values).all())
 
 
+class PcrWindowTests(unittest.TestCase):
+    def test_holdout_does_not_change_pca_training_input(self):
+        from market_research.modeling.estimators import PCA, fit_window
+        X = np.random.default_rng(42).normal(size=(300, 4)) * .01
+        y = X @ [.3, .3, .2, .1]
+        revised = X.copy()
+        revised[240:, 0] *= 100
+        original_fit = PCA.fit
+        inputs = []
+
+        def capture(pca, values):
+            inputs.append(values.copy())
+            return original_fit(pca, values)
+
+        with patch.object(PCA, "fit", capture):
+            for values in (X, revised):
+                fit_window("pcr", values, y, list("abcd"), equity_ratio=.9)
+        self.assertEqual(len(inputs), 4)
+        np.testing.assert_array_equal(inputs[0], inputs[2])
+        self.assertFalse(np.array_equal(inputs[1], inputs[3]))
+
+    def test_single_factor_and_short_training_windows(self):
+        from market_research.modeling.estimators import fit_window
+        X = np.array([[1., 0.], [2., 1.], [3., 2.]])
+        for width in (1, 2):
+            with self.subTest(width=width):
+                fit = fit_window("pcr", X[:, :width], X[:, 0], list("ab"[:width]))
+                self.assertEqual(fit.extra["n_components"], 1)
+                self.assertTrue(np.isfinite(fit.pred).all())
+        with self.assertRaisesRegex(ValueError, "PCR"):
+            fit_window("pcr", X[:, :0], X[:, 0], [])
+        with self.assertRaisesRegex(ValueError, "PCR"):
+            fit_window("pcr", X[:2], X[:2, 0], list("ab"))
+
+
 class NeweyWestDegenerateTests(unittest.TestCase):
     def test_constant_nonzero_series_has_no_false_significance(self):
         from market_research.research.robustness import _nw_mean_t

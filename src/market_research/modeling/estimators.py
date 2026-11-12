@@ -335,21 +335,27 @@ def _fit_pcr(X, y, cols, equity_ratio, prm):
     早期版本对每个候选 k 都重跑一遍 PCA+OLS，在 118 个滚动窗口上
     完全是浪费（PCA 本身已按方差降序，前 k 个主成分的解释力是单调的）。
     """
-    mu, sd = X.mean(0), X.std(0)
-    sd = np.where(sd == 0, 1.0, sd)
-    Xs = (X - mu) / sd
-    kmax = int(np.clip(int(prm.get("n_components", 12)), 2,
-                      min(X.shape[1] - 1, max(2, len(X) // 20))))
     cut = int(len(y) * 0.8)
-    cands = sorted({max(2, kmax // 3), max(2, kmax // 2), kmax})
+    if X.shape[1] == 0 or cut < 2:
+        raise ValueError("PCR 至少需要一个候选指数和两个内层训练样本")
+    limit = min(max(1, X.shape[1] - 1), max(2, len(X) // 20), cut)
+    kmin = min(2, limit)
+    kmax = int(np.clip(int(prm.get("n_components", 12)), kmin, limit))
+    cands = sorted({max(kmin, kmax // 3), max(kmin, kmax // 2), kmax})
+    train, _, validation, _ = _fold_zscore(X[:cut], y[:cut], X[cut:], y[cut:])
+    selection_pca = PCA(n_components=kmax, random_state=0).fit(train)
+    train_z = selection_pca.transform(train)
+    validation_z = selection_pca.transform(validation)
     best_k, best_e = cands[-1], np.inf
     for k in cands:
-        p2 = PCA(n_components=k, random_state=0).fit(Xs[:cut])
-        pr2 = LinearRegression().fit(p2.transform(Xs[:cut]), y[:cut])
-        e = float(np.mean((pr2.predict(p2.transform(Xs[cut:])) - y[cut:]) ** 2))
+        pr2 = LinearRegression().fit(train_z[:, :k], y[:cut])
+        e = float(np.mean((pr2.predict(validation_z[:, :k]) - y[cut:]) ** 2))
         if e < best_e:
             best_k, best_e = k, e
 
+    mu, sd = X.mean(0), X.std(0)
+    sd = np.where(sd == 0, 1.0, sd)
+    Xs = (X - mu) / sd
     p = PCA(n_components=best_k, random_state=0).fit(Xs)
     Z = p.transform(Xs)
     lr = LinearRegression().fit(Z, y)

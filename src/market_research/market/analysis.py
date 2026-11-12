@@ -114,6 +114,8 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
 
     def build():
         import akshare as ak
+        info = meta.setdefault("info", {})
+        info["request_started_at"] = datetime.now(SHANGHAI).isoformat()
         if kind == "stock":
             try:
                 raw = ak.stock_zh_a_hist(symbol=code[2:], period="daily", start_date=start.replace("-", ""), end_date=end.replace("-", ""), adjust=adjust, timeout=12)
@@ -131,7 +133,8 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
                         f"股票日线暂不可用，请检查代码或稍后重试"
                         f"（主源 {type(primary).__name__}: {primary_txt}; "
                         f"备源 {type(fallback).__name__}: {fallback_txt}）") from fallback
-            info = meta.setdefault("info", {})
+            info["observed_at"] = datetime.now(SHANGHAI).isoformat()
+            info["observed_data_end"] = result.index[-1].date().isoformat()
             info["source"] = "AKShare / 东方财富" if "日期" in raw.columns else "AKShare / 腾讯证券"
             info["name"] = STOCKS.get(code)
             if not info["name"]:
@@ -143,17 +146,20 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
                 except Exception:
                     pass
             return result
-        meta.setdefault("info", {})["source"] = "AKShare / 新浪指数"
-        return clean_bars(D._retry(ak.stock_zh_index_daily, tries=2, symbol=code), start, end)
+        info["source"] = "AKShare / 新浪指数"
+        result = clean_bars(D._retry(ak.stock_zh_index_daily, tries=2, symbol=code), start, end)
+        info["observed_at"] = datetime.now(SHANGHAI).isoformat()
+        info["observed_data_end"] = result.index[-1].date().isoformat()
+        return result
 
     if _fetch_only:
         frame = build()
         frame.attrs.update(meta.get("info", {}))
         return frame
     frame = D._cached(name, build, meta=meta, refresh=refresh)
+    frame.attrs = {**D.cache_info(name), **frame.attrs}
     if refresh and not frame.attrs.get("stale"):
         sync.overlay_refresh(kind, code, adjust, frame, end)
-    frame.attrs.update(D.cache_info(name))
     return frame
 
 
@@ -176,13 +182,18 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
         raise ValueError(f"区间仅有 {len(bars)} 根日线，至少需要 21 根；请扩大区间")
     warnings = []
     reference = None
+    reference_bars = None
+    reference_error = None
     if benchmark == code:
-        reference = bars.close
+        reference_bars = bars
     else:
         try:
-            reference = load_bars("index", benchmark, start, end, refresh=refresh).close
-        except Exception:
+            reference_bars = load_bars("index", benchmark, start, end, refresh=refresh)
+        except Exception as error:
+            reference_error = f"{type(error).__name__}: {str(error)[:200]}"
             warnings.append("基准指数暂不可用，已保留价格与风险分析；可点击刷新重试。")
+    if reference_bars is not None:
+        reference = reference_bars.close
     if job_id:
         JOBS.update(job_id, stage="计算收益、风险与基准比较", progress=0.8)
     technical = None
@@ -235,6 +246,32 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
     payload = market_payload(kind, code, bars, reference, benchmark, adjust, warnings, context.tail(1500))
     payload["quality"] = market_quality(bars, reference, start, end, calendar, calendar_info)
     quality = payload["quality"]
+    sources = {}
+    missing = []
+    for key, label, series in (("asset", "本资产", bars), ("benchmark", "基准指数", reference_bars)):
+        attrs = series.attrs if series is not None else {}
+        source_error = attrs.get("source_error") or (reference_error if key == "benchmark" else None)
+        stale = bool(attrs.get("stale"))
+        sources[key] = {"available": series is not None, "stale": stale,
+                        "source_error": source_error, "fetched_at": attrs.get("fetched_at"),
+                        "cached_at": attrs.get("cached_at"),
+                        "request_started_at": attrs.get("request_started_at"),
+                        "observed_at": attrs.get("observed_at"),
+                        "observed_data_end": attrs.get("observed_data_end")}
+        if stale or source_error or series is None:
+            reason = "沿用缓存行情" if series is not None else "行情不可用"
+            if source_error:
+                reason += f"（{source_error}）"
+            payload["warnings"].append(f"{label}{reason}")
+            missing.append({"section": key, "item": label, "reason": reason})
+    if not payload["comparison"]["ok"] and reference is not None:
+        missing.append({"section": "comparison", "item": "基准比较", "reason": "共同交易日不足 21 天"})
+    status = "partial" if missing else "ok"
+    payload.update(ok=True, status=status,
+                   completeness={"ok": True, "status": status, "missing": missing})
+    quality.update(status=status, stale=any(source["stale"] for source in sources.values()),
+                   sources=sources, reasons=[item["reason"] for item in missing])
+    payload["meta"]["data_quality"] = quality
     payload["warnings"].append(
         f"请求区间 {start} 至 {end}；实际行情 {quality['actual_start']} 至 {quality['actual_end']}。"
         "自然日差距可能包含休市、停牌或上市时间差异，不直接判为行情过期。")
@@ -246,7 +283,8 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
         payload['warnings'].append(f"实际区间内缺少 {quality['calendar_missing_count']} 个供应商交易日的行情；成交诊断保留不可成交会话，尚不能区分停牌或漏抓。")
     if technical is not None:
         payload["technical"] = _jsafe(technical)
-    return payload
+    payload["meta"]["analysis_generated_at"] = datetime.now(SHANGHAI).isoformat()
+    return _jsafe(payload)
 
 
 def market_quality(bars, reference, start, end, calendar=None, calendar_info=None):

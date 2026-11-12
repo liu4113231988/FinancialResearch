@@ -219,7 +219,9 @@ def _sessions_for(record: dict, prices, today: date) -> pd.DatetimeIndex:
 def _load_prices(record: dict, today: date, fetch: bool):
     kind = record.get("asset_kind")
     code = record.get("asset_code")
-    basis = record.get("price_basis") or ("qfq" if kind == "stock" else "")
+    basis = record.get("price_basis")
+    if basis is None:
+        basis = "qfq" if kind == "stock" else ""
     as_of = _date(record.get("as_of"))
     start = (as_of - timedelta(days=30)).isoformat()
     end = (today + timedelta(days=1)).isoformat()

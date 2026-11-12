@@ -179,8 +179,10 @@ def analyze(code: str, models: Optional[List[str]] = None,
     panel = cp.load("panel")
     if panel is None:
         panel = D.load_panel(code, start=(win_start or C.START_DATE),
-                             end=win_end, refresh=refresh, verbose=False)
+                             end=win_end, refresh=refresh, verbose=False,
+                             include_forecast_nav=True)
         cp.save("panel", panel)
+    forecast_nav = panel.attrs.pop("forecast_nav")
     nav = panel["__FUND__"]
     name = (C.DEMO_FUNDS.get(code) or C.EXTENDED_FUNDS.get(code) or
             _guess_name(code))
@@ -196,7 +198,7 @@ def analyze(code: str, models: Optional[List[str]] = None,
     prog("估计净值方向概率", 0.26)
     forecast = cp.load("forecast")
     if forecast is None:
-        forecast = fund_forecast_payload(nav)
+        forecast = fund_forecast_payload(forecast_nav)
         cp.save("forecast", forecast)
 
     # ---------- 2. 相关性

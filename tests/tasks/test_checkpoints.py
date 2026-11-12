@@ -150,6 +150,7 @@ class AnalyzeStageWiringTests(unittest.TestCase):
              'sh000300': np.linspace(1.0, 1.1, len(index))}, index=index)
         self.panel.attrs['data_quality'] = {'status': 'ok'}
         self.panel.attrs['nav_basis'] = 'total'
+        self.panel.attrs['forecast_nav'] = self.panel['__FUND__'].copy()
 
     def tearDown(self):
         self.temp.cleanup()

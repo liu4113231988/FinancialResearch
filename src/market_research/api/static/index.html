@@ -147,7 +147,14 @@
     <div class="universe-summary" id="universeSummary" aria-label="系统已添加资产">正在读取你的研究范围…</div>
   </section>
   <div id="marketResult" hidden>
-    <section class="market-result-head"><div><h2 id="marketName"></h2><p class="meta" id="marketMeta"></p></div><button class="btn ghost" type="button" id="marketRefresh">↻ 刷新行情</button></section>
+    <section class="market-result-head">
+      <div><h2 id="marketName"></h2><p class="meta" id="marketMeta"></p></div>
+      <div class="market-result-actions">
+        <button class="btn ghost" type="button" id="marketRefresh">↻ 刷新行情</button>
+        <button class="btn ghost" type="button" id="marketExportQuality">导出数据质量</button>
+      </div>
+    </section>
+    <div id="marketResultStatus" class="market-status" role="status" hidden></div>
     <div class="kpis" id="marketKpis"></div>
     <section id="stockTechnical" class="stock-technical" aria-labelledby="technicalTitle" hidden>
       <div class="technical-heading"><div><p class="eyebrow">TREND & RESEARCH SIGNALS</p><h3 id="technicalTitle">趋势与研究信号</h3></div><span class="meta" id="technicalAsOf"></span></div>
@@ -417,14 +424,14 @@
       只用完整持仓、披露滞后 Q2 +62 天 / Q4 +90 天、共同行业归一到 100%，
       持仓基准与基金/RBSA 要求 ≥60 个共同交易日。未映射权重是股票仓位，不是现金。
       <b>结果仅作研究参考，不构成投资建议。</b></p>
-    <p class="note" id="holdMsg"></p>
+    <p class="note" id="holdMsg" role="status"></p>
     <div id="holdOut" hidden>
       <div id="holdSummary" class="kpis small"></div>
       <p class="note" id="holdNotes"></p>
       <div class="panel"><h4>逐期对齐（最近 8 期）</h4>
         <div class="table-wrap"><table class="tbl" id="holdPeriods"></table></div>
       </div>
-      <div class="panel"><h4>持仓基准 vs 基金 / RBSA 合成基准</h4>
+      <div class="panel" id="holdComparePanel"><h4>持仓基准 vs 基金 / RBSA 合成基准</h4>
         <div class="table-wrap"><table class="tbl" id="holdCompare"></table></div>
       </div>
     </div>

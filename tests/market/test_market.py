@@ -65,6 +65,24 @@ class MarketTests(unittest.TestCase):
         self.assertEqual(quality["reference_missing_count"], 0)
         self.assertFalse(quality["calendar_verified"])
 
+    def test_asset_and_benchmark_fallback_survive_with_zero_end_gap(self):
+        frame = bars(80)
+        benchmark = frame.copy()
+        frame.attrs.update(stale=True, source_error="TimeoutError: asset", fetched_at="2024-04-19T16:00:00")
+        benchmark.attrs.update(stale=True, source_error="TimeoutError: benchmark", fetched_at="2024-04-19T17:00:00")
+        for kind, code in (("stock", "600519"), ("index", "sh000001")):
+            with self.subTest(kind=kind), \
+                 patch("market_research.market.analysis.load_bars", side_effect=[frame, benchmark]), \
+                 patch("market_research.tasks.sync.cached", return_value=None):
+                result = analyze_market(kind, code, "2024-01-01", "2024-04-19")
+                self.assertEqual(result["status"], "partial")
+                self.assertEqual(result["quality"]["end_gap_calendar_days"], 0)
+                self.assertTrue(result["comparison"]["ok"])
+                sources = result["meta"]["data_quality"]["sources"]
+                self.assertTrue(sources["asset"]["stale"])
+                self.assertEqual(sources["asset"]["fetched_at"], frame.attrs["fetched_at"])
+                self.assertEqual(sources["benchmark"]["source_error"], "TimeoutError: benchmark")
+
     def test_quality_counts_only_missing_dates_inside_actual_coverage(self):
         frame = bars(30)
         reference = frame.close.copy()

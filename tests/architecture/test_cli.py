@@ -34,6 +34,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(given,['experiments','110022','--window-years','2'])
         self.assertIs(sys.argv,original)
 
+    def test_redirected_gbk_output_escapes_unencodable_symbols(self):
+        with io.TextIOWrapper(io.BytesIO(), encoding="gbk") as stream, \
+             contextlib.redirect_stdout(stream), \
+             patch.object(cli, "import_module", return_value=SimpleNamespace(
+                 main=lambda *args, **kwargs: print("✗ 行业映射失败"))):
+            cli.execute("holdings", [], prog="fil holdings")
+            stream.flush()
+            self.assertIn("\\u2717 行业映射失败", stream.buffer.getvalue().decode("gbk"))
+
     def test_root_script_preserves_implicit_analysis_and_accepts_commands(self):
         with patch.object(cli,'execute',return_value=0) as run:
             cli.root_main(['110022','--refresh'])
