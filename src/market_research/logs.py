@@ -42,13 +42,6 @@ def retention_days() -> int:
     return _int_env("FIL_LOG_RETENTION_DAYS", 7)
 
 
-def api_response_max_bytes() -> int:
-    name = "FIL_API_RESPONSE_LOG_MAX_BYTES"
-    if os.environ.get(name, "").strip() == "0":
-        return 0
-    return _int_env(name, 65_536)
-
-
 def level() -> int:
     name = os.environ.get("FIL_LOG_LEVEL", "INFO").strip().upper()
     return getattr(logging, name, logging.INFO)
