@@ -1,6 +1,7 @@
 """FastAPI composition root. Start with uv run market-research --port 8877."""
 from contextlib import asynccontextmanager
 import argparse
+from fnmatch import fnmatchcase
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 import market_research.config as C
 from market_research import logs
@@ -33,6 +35,7 @@ from market_research.api.version import (API_PREFIX, API_VERSION, SERVICE_VERSIO
                                          legacy_sunset)
 
 LOG=logging.getLogger(__name__)
+RESPONSE_LOG=logging.getLogger('market_research.api.response')
 STATIC=Path(str(files('market_research.api')/'static'))
 
 
@@ -90,10 +93,39 @@ class VersionHeader:
         await self.app(scope,receive,wrapped)
 
 
+class ApiResponseLog:
+    """Opt-in logging for final JSON API responses."""
+
+    def __init__(self):
+        setting = os.environ.get('FIL_API_RESPONSE_LOG', '').strip()
+        self.all_paths = setting.lower() == 'all'
+        paths = (part.strip() for part in setting.split(','))
+        self.patterns = tuple(path for path in paths if path.startswith(API_PREFIX + '/'))
+        self.limit = logs.api_response_max_bytes()
+
+    async def write(self, scope, status, body):
+        if not (self.all_paths or self.patterns) or not RESPONSE_LOG.isEnabledFor(logging.INFO):
+            return
+        path = scope['path']
+        if not path.startswith(API_PREFIX + '/') or not body:
+            return
+        if not self.all_paths and not any(fnmatchcase(path, pattern) for pattern in self.patterns):
+            return
+        truncated = 0 < self.limit < len(body)
+        text = (body[:self.limit] if truncated else body).decode('utf-8', errors='ignore')
+        text = text.replace('\r', r'\r').replace('\n', r'\n')
+        await run_in_threadpool(
+            RESPONSE_LOG.info, '%s %r status=%d bytes=%d body=%s%s',
+            scope['method'], path, status, len(body), text,
+            ' [truncated]' if truncated else '',
+        )
+
+
 class MetaEnvelope:
     """给所有 API JSON 响应补齐 meta 信封，包括异常和中间件错误（P2-36）。"""
-    def __init__(self,app):
+    def __init__(self,app,response_log):
         self.app=app
+        self.response_log=response_log
 
     async def __call__(self,scope,receive,send):
         if scope['type']!='http' or not scope.get('path','').startswith(API_PREFIX):
@@ -132,6 +164,7 @@ class MetaEnvelope:
                     sent_body=True
             else:
                 await send(message)
+        await self.response_log.write(scope,start['status'],body)
 
 
 _CACHEABLE_SUFFIXES=('.ico','.svg','.png','.webmanifest')
@@ -182,7 +215,8 @@ def create_app():
     if origins:
         app.add_middleware(CORSMiddleware,allow_origins=origins,allow_methods=['GET','POST'],allow_headers=['Content-Type','Authorization','X-API-Key'])
     # 最后注册成为最外层，确保所有 API JSON 结果（含认证/校验/限流错误）都有信封。
-    app.add_middleware(MetaEnvelope)
+    response_log=ApiResponseLog()
+    app.add_middleware(MetaEnvelope,response_log=response_log)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request:Request,error:RequestValidationError):
@@ -215,7 +249,10 @@ def create_app():
     @app.exception_handler(Exception)
     async def unexpected(request:Request,error:Exception):
         LOG.error('请求处理失败 %s',request.url.path,exc_info=error)
-        return JSONResponse({'ok':False,'error':'服务处理失败，请查看运行日志后重试'},status_code=500)
+        response=JSONResponse({'ok':False,'error':'服务处理失败，请查看运行日志后重试'},status_code=500)
+        # ServerErrorMiddleware sends this response outside the user middleware.
+        await response_log.write(request.scope,response.status_code,response.body)
+        return response
 
     # 浏览器与 iOS 会直接请求根路径图标；显式路由保证类型与缓存头，
     # 也避免静态目录之外的默认图标请求落到 SPA 兜底。
@@ -263,7 +300,13 @@ def main():
     parser.add_argument('--debug',action='store_true')
     args=parser.parse_args()
     import uvicorn
-    uvicorn.run(app,host=args.host,port=args.port,log_level='debug' if args.debug else 'info')
+    console=logging.StreamHandler()
+    RESPONSE_LOG.addHandler(console)
+    try:
+        uvicorn.run(app,host=args.host,port=args.port,log_level='debug' if args.debug else 'info')
+    finally:
+        RESPONSE_LOG.removeHandler(console)
+        console.close()
 
 
 if __name__=='__main__':

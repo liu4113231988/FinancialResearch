@@ -220,6 +220,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_sync_task.ps
 | FIL_LOG_MAX_BYTES / FIL_LOG_BACKUPS | 5000000 / 3 | 单个日志大小上限与保留份数 |
 | FIL_LOG_LEVEL | INFO | 应用日志级别（`DEBUG/INFO/WARNING/ERROR`） |
 | FIL_LOG_RETENTION_DAYS | 7 | `job-{id}.log` 等任务日志按天清理 |
+| FIL_API_RESPONSE_LOG | off | `off` 关闭，`all` 记录所有 API 的 JSON 响应，或填写逗号分隔的路径及通配模式 |
+| FIL_API_RESPONSE_LOG_MAX_BYTES | 65536 | 单个响应体最多记录的字节数，超出时注明截断，`0` 记录完整响应体 |
 | FIL_CHECKPOINT_DIR / FIL_CHECKPOINT_TTL_DAYS | FIL_DATA_DIR/checkpoints / 2 | 阶段检查点目录与保留天数 |
 
 任务通过 `POST /api/v1/analyze`、`/api/v1/refit`、`/api/v1/backtest`、`POST /api/v1/holdings` 或 `/api/v1/market/analyze` 提交，再查询 `/api/v1/job/{jid}` 与 `/api/v1/result/{jid}`。旧 `/api/*` 路径保留兼容（与 v1 由同一实现提供，两套路径都出现在 `/openapi.json`），推荐新调用使用 `/api/v1`。所有响应带 `X-API-Version: 1` 头；关键响应有固定契约：任务状态 `JobResponse`、结果信封 `ResultResponse`、探针 `HealthResponse`/`ReadyResponse`，由 Pydantic 在返回时校验并过滤未声明字段。完成的基金计算可能直接命中结果缓存；以实际返回字段为准。取消为 `POST /api/v1/job/{jid}/cancel`，进入错误终态并由 worker 终止对应进程；切换页面入口不会自动取消后台任务。`/api/v1/holdings` 与 CLI `holdings` 共用 `fit_fund_holdings` 口径，返回逐期行业暴露、持仓基准对比与 `benchmark` 诊断（缺失行业、已映射/未映射/现金权重、`residual_treatment`）。
@@ -239,6 +241,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_sync_task.ps
 同步接口为 `GET /api/v1/sync`、`POST /api/v1/sync/assets`（`kind/code/basis`）、`POST /api/v1/sync/retry`（`asset_key`）。股票 basis 为 `qfq`、空字符串或 `hfq`，指数为空，基金为 `total` 或 `cum`。
 
 应用日志按 `FIL_LOG_MAX_BYTES`/`FIL_LOG_BACKUPS` 轮转、按 `FIL_LOG_LEVEL` 过滤，目录由 `FIL_LOG_DIR` 指定（默认 `FIL_DATA_DIR`）：API 写 `api.log`，worker 监督进程写 `worker.log`、子进程输出写 `worker-process.log`，同步写 `sync.log`/`sync-process.log`，单任务写 `job-{id}.log`。任务日志超过 `FIL_LOG_RETENTION_DAYS` 天后自动清理。为兼容 Windows 下目录操作，应用日志采用“追加后立即关闭句柄”的方式轮转；子进程 stdout 重定向文件在进程存活期间不能重命名，其轮转在下次启动时生效（与审计日志做法一致）。
+
+响应日志在服务启动时读取配置，按请求路径匹配，忽略查询参数。可以配置 `/api/v1/health,/api/v1/result/*`，同时匹配旧版路径时另加 `/api/result/*`。日志包含 HTTP 方法、路径、状态码、响应体原始字节数和 JSON 响应体，并覆盖 API 的 JSON 错误响应。使用 `market-research` 或 `fil-serve` 启动时，日志写入 `api.log` 和服务终端，日志级别为 INFO。响应体可能包含研究结果或其他业务数据，按日志目录的访问范围选择接口和保留策略。
+
+PowerShell 示例
+
+```powershell
+$env:FIL_API_RESPONSE_LOG = '/api/v1/health,/api/v1/result/*'
+uv run market-research
+```
 
 ## 代码与文档导航
 
