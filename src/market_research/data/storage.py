@@ -98,18 +98,20 @@ def metadata(name):
     return json.loads(row[0]) if row else None
 
 
-def read(name):
+def read(name, *, with_metadata=False):
+    fields = "schema_json, metadata" if with_metadata else "schema_json"
     with connection() as db:
-        row = db.execute("SELECT schema_json FROM datasets WHERE name=?", [name]).fetchone()
+        row = db.execute(f"SELECT {fields} FROM datasets WHERE name=?", [name]).fetchone()
         if row is None:
-            return None
+            return (None, None) if with_metadata else None
         frame = db.execute("SELECT date, asset, value FROM prices WHERE dataset=? ORDER BY date", [name]).df()
     schema = json.loads(row[0])
     result = frame.pivot(index="date", columns="asset", values="value").reindex(columns=schema["columns"])
     result.columns.name = None
     result.index.name = schema["index_name"]
     result.index = result.index.as_unit(schema["index_unit"])
-    return result.astype(schema["dtypes"])
+    result = result.astype(schema["dtypes"])
+    return (result, json.loads(row[1])) if with_metadata else result
 
 
 def write(name, frame, meta):

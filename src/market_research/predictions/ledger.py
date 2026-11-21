@@ -53,16 +53,12 @@ GROUP_FIELDS = ("source", "horizon", "asset_kind", "regime",
 def _schema(db) -> None:
     db.execute((files("market_research.data") / "migrations/004_predictions.sql")
                .read_text(encoding="utf-8"))
-    # 宽限顺延样本要冻结实际结算会话数；迁移 SQL 不改，幂等补列兼容旧库。
-    try:
-        columns = {row[1] for row in db.execute(
-            "PRAGMA table_info('prediction_records')").fetchall()}
-        if "actual_sessions" not in columns:
-            db.execute("ALTER TABLE prediction_records "
-                       "ADD COLUMN actual_sessions INTEGER")
-    except Exception:                                      # noqa: BLE001
-        # 并发补列时后到者可能看到“列已存在”；读路径不依赖它，忽略即可。
-        pass
+    # 幂等补列保留旧台账的原判定与未知证据状态。
+    columns = {row[1] for row in db.execute(
+        "PRAGMA table_info('prediction_records')").fetchall()}
+    for column, sqltype in (("actual_sessions", "INTEGER"), ("settlement_evidence", "VARCHAR")):
+        if column not in columns:
+            db.execute(f"ALTER TABLE prediction_records ADD COLUMN IF NOT EXISTS {column} {sqltype}")
 
 
 def _date(value) -> date | None:
@@ -506,14 +502,17 @@ def _records() -> List[dict]:
 
 def update_record(record_id: str, **fields) -> None:
     allowed = {"status", "target_date", "judge_date", "label",
-               "realized_return", "judged_at", "reason", "actual_sessions"}
+               "realized_return", "judged_at", "reason", "actual_sessions",
+               "settlement_evidence"}
     values = {key: value for key, value in fields.items() if key in allowed}
     if not values:
         return
+    if "settlement_evidence" in values:
+        values["settlement_evidence"] = json.dumps(values["settlement_evidence"], ensure_ascii=False)
     assignments = ",".join(f"{key}=?" for key in values)
     with storage.connection() as db:
         _schema(db)
-        db.execute(f"UPDATE prediction_records SET {assignments} WHERE id=?",
+        db.execute(f"UPDATE prediction_records SET {assignments} WHERE id=? AND status='pending'",
                    [*values.values(), record_id])
 
 

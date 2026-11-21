@@ -8,18 +8,13 @@ from datetime import date
 from market_research.predictions import ledger
 
 
-def _today(value):
-    if not value:
-        return None
-    return date.fromisoformat(value)
-
-
 def main(argv=None, *, prog="predictions"):
     parser = argparse.ArgumentParser(prog=prog)
     actions = parser.add_subparsers(dest="action", required=True)
 
     settle = actions.add_parser("settle", help="结算已到期预测")
-    settle.add_argument("--today", default=None, help="按指定日期结算（YYYY-MM-DD）")
+    settle.add_argument("--today", type=date.fromisoformat,
+                        help="按北京时间指定日期截断当前行情做诊断（YYYY-MM-DD），不写回预测")
     settle.add_argument("--limit", type=int, default=500)
     settle.add_argument("--fetch", action="store_true",
                         help="本地缓存缺失时允许联网补充行情")
@@ -34,7 +29,7 @@ def main(argv=None, *, prog="predictions"):
     args = parser.parse_args(argv)
     if args.action == "settle":
         from market_research.predictions.judge import settle
-        result = settle(limit=args.limit, today=_today(args.today),
+        result = settle(limit=args.limit, today=args.today,
                         fetch=args.fetch)
     elif args.action == "migrate":
         result = ledger.migrate_legacy(apply=args.apply)

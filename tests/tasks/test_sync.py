@@ -123,6 +123,19 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(meta["through"], "2026-10-31")
         self.assertEqual(meta["info"]["data_end"], "2026-10-31")
 
+    def test_overlay_cannot_certify_retained_quote_with_new_observation(self):
+        name = sync.history_name({"asset_key": "stock:sh600519:"})
+        storage.write(name, self.frame, {"through": "2026-10-30"})
+        incoming = self.frame.iloc[[0, -1]].copy()
+        incoming.attrs.update(observed_data_start="2026-10-20",
+                              observed_data_end="2026-10-30",
+                              request_started_at="2026-10-30T15:00:00+08:00",
+                              observed_at="2026-10-30T15:01:00+08:00")
+        self.assertTrue(sync.overlay_refresh("stock", "sh600519", "", incoming, "2026-10-30"))
+        actual = sync.cached("stock", "sh600519", "", "2026-10-20", "2026-10-30", fresh=False)
+        self.assertEqual(len(actual), 3)
+        self.assertEqual(actual.attrs["observed_data_start"], "2026-10-30")
+
     def test_adjusted_partial_refresh_cannot_mix_adjustment_bases(self):
         name = sync.history_name({"asset_key": "stock:sh600519:qfq"})
         storage.write(name, self.frame, {"through": "2026-10-30"})

@@ -134,6 +134,7 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
                         f"（主源 {type(primary).__name__}: {primary_txt}; "
                         f"备源 {type(fallback).__name__}: {fallback_txt}）") from fallback
             info["observed_at"] = datetime.now(SHANGHAI).isoformat()
+            info["observed_data_start"] = result.index[0].date().isoformat()
             info["observed_data_end"] = result.index[-1].date().isoformat()
             info["source"] = "AKShare / 东方财富" if "日期" in raw.columns else "AKShare / 腾讯证券"
             info["name"] = STOCKS.get(code)
@@ -149,6 +150,7 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
         info["source"] = "AKShare / 新浪指数"
         result = clean_bars(D._retry(ak.stock_zh_index_daily, tries=2, symbol=code), start, end)
         info["observed_at"] = datetime.now(SHANGHAI).isoformat()
+        info["observed_data_start"] = result.index[0].date().isoformat()
         info["observed_data_end"] = result.index[-1].date().isoformat()
         return result
 
@@ -157,7 +159,11 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
         frame.attrs.update(meta.get("info", {}))
         return frame
     frame = D._cached(name, build, meta=meta, refresh=refresh)
-    frame.attrs = {**D.cache_info(name), **frame.attrs}
+    if refresh and not frame.attrs.get("stale"):
+        info = D._with_info(meta, frame)["info"] if meta.get("info") else {}
+    else:
+        info = D.cache_info(name)
+    frame.attrs = {**info, **frame.attrs}
     if refresh and not frame.attrs.get("stale"):
         sync.overlay_refresh(kind, code, adjust, frame, end)
     return frame

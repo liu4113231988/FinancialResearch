@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +24,19 @@ def _legacy_row(code, as_of, horizon, action='buy'):
         "features": None, "model_version": "v0", "params": None,
         "data_stamp": None,
     }
+
+
+class SettleCommandTests(unittest.TestCase):
+    def test_today_reports_historical_cutoff_as_diagnostic(self):
+        output = io.StringIO()
+        now = datetime(2025, 1, 10, 16, tzinfo=ledger.SHANGHAI)
+        with redirect_stdout(output), patch.object(ledger, "_now", return_value=now), \
+                patch.object(ledger, "pending_records", return_value=[]):
+            self.assertEqual(commands.main(["settle", "--today", "2025-01-09"]), 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["diagnostic_only"])
+        self.assertEqual(result["cutoff_date"], "2025-01-09")
+        self.assertEqual(result["checked_at"], now.isoformat())
 
 
 class MigrateCommandTests(unittest.TestCase):

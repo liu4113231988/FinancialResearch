@@ -1,19 +1,33 @@
 """预测台账与结算口径的单元测试。"""
+import io
 import json
 import tempfile
 import unittest
-from datetime import date, datetime
+from contextlib import redirect_stdout
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 
 import market_research.config as C
-from market_research.predictions import judge, ledger
+from market_research.predictions import commands, judge, ledger
 
 
 AS_OF = "2026-10-30"
 SESSIONS = pd.bdate_range("2026-10-01", "2026-12-31")
+
+
+def _settlement_time(day):
+    return datetime.combine(day, time(16), ledger.SHANGHAI)
+
+
+def _observed(prices, end="2026-11-11", checked=None):
+    prices.attrs.update(
+        observed_data_start=str(prices.index[0].date()), observed_data_end=end,
+        request_started_at=f"{checked or end}T15:00:00+08:00",
+        observed_at=f"{checked or end}T15:01:00+08:00")
+    return prices
 
 
 def _market_result(as_of=AS_OF, signals=None, forecasts=None):
@@ -91,10 +105,10 @@ def _fund_backtest_result():
 def _rising_bars():
     """从 100 起每个交易日 +1；保留日内高低价，避免被当成一字板。"""
     values = [100 + i for i in range(len(SESSIONS))]
-    return pd.DataFrame({"open": values,
+    return _observed(pd.DataFrame({"open": values,
                          "high": [value + 1 for value in values],
                          "low": [value - 1 for value in values],
-                         "close": values}, index=SESSIONS)
+                         "close": values}, index=SESSIONS), end="2026-11-30")
 
 
 class LedgerRecordTests(unittest.TestCase):
@@ -222,24 +236,143 @@ class JudgeTests(unittest.TestCase):
         # 目标日收盘高于信号日收盘
         position = SESSIONS.get_indexer([pd.Timestamp("2026-11-06")])[0]
         values[position] = values[base] + 6
-        return pd.DataFrame({"open": values,
+        return _observed(pd.DataFrame({"open": values,
                              "high": [value + 1 for value in values],
                              "low": [value - 1 for value in values],
-                             "close": values}, index=SESSIONS)
+                             "close": values}, index=SESSIONS))
+
+    def _judge(self, record, prices, sessions, today):
+        return judge.judge_record(record, prices, sessions, today,
+                                  now=_settlement_time(today))
 
     def test_direction_up_and_down(self):
         prices = self._prices()
-        up = judge.judge_record(self._record("up"), prices, SESSIONS,
+        up = self._judge(self._record("up"), prices, SESSIONS,
                                 date(2026, 11, 20))
         self.assertEqual(up["label"], "correct")
-        down = judge.judge_record(self._record("down"), prices, SESSIONS,
+        down = self._judge(self._record("down"), prices, SESSIONS,
                                   date(2026, 11, 20))
         self.assertEqual(down["label"], "incorrect")
 
     def test_pending_before_target(self):
-        verdict = judge.judge_record(self._record(), self._prices(), SESSIONS,
+        verdict = self._judge(self._record(), self._prices(), SESSIONS,
                                      date(2026, 11, 4))
         self.assertEqual(verdict["status"], "pending")
+
+    def test_settle_cannot_use_tomorrows_grace_quote(self):
+        axis = pd.bdate_range("2025-01-02", periods=10)
+        target, next_session = axis[5:7]
+        bars = pd.DataFrame({"open": 100., "high": 102., "low": 99.,
+                             "close": 101., "volume": 1000.}, index=axis)
+        bars.loc[axis[0], "close"] = 100.
+        bars = bars.drop(target)
+        _observed(bars, str(next_session.date()))
+        record = {**self._record(), "as_of": "2025-01-02", "price_basis": ""}
+        with patch.object(ledger, "pending_records", return_value=[record]), \
+                patch.object(ledger, "update_record") as update, \
+                patch("market_research.tasks.sync.cached", return_value=bars), \
+                patch("market_research.data.providers.calendar.bundled_calendar",
+                      return_value=(axis, {})):
+            counts = judge.settle(now=_settlement_time(target.date()))
+            self.assertEqual(counts["pending"], 1)
+            update.assert_not_called()
+            counts = judge.settle(now=_settlement_time(next_session.date()))
+            self.assertEqual(counts["correct"], 1)
+            self.assertEqual(update.call_args.kwargs["judge_date"],
+                             next_session.date().isoformat())
+            self.assertAlmostEqual(update.call_args.kwargs["realized_return"], .01)
+            counts = judge.settle(today=next_session.date(),
+                                  now=_settlement_time(axis[-1].date()))
+            self.assertEqual(counts["correct"], 1)
+            self.assertTrue(counts["diagnostic_only"])
+            self.assertEqual(update.call_count, 1)
+        self.assertEqual(self._judge(record, bars, axis, target.date())["status"],
+                         "pending")
+
+    def test_calendar_outage_keeps_missing_quotes_pending(self):
+        prices = self._prices().loc[:"2026-11-05"]
+        record = self._record()
+        with patch.object(ledger, "pending_records", return_value=[record]), \
+                patch.object(ledger, "update_record") as update, \
+                patch("market_research.tasks.sync.cached", return_value=prices), \
+                patch("market_research.data.providers.calendar.bundled_calendar",
+                      side_effect=ValueError("未覆盖判定日期")):
+            counts = judge.settle(now=_settlement_time(date(2026, 11, 20)))
+        self.assertEqual(counts["pending"], 1)
+        update.assert_not_called()
+
+    def test_default_settlement_uses_shanghai_date(self):
+        utc = datetime(2026, 11, 5, 17, tzinfo=timezone.utc)
+        with patch.object(ledger, "_now", return_value=utc), \
+                patch.object(ledger, "pending_records", return_value=[]):
+            counts = judge.settle()
+        self.assertEqual(counts["cutoff_date"], "2026-11-06")
+        self.assertEqual(counts["checked_at"], "2026-11-06T01:00:00+08:00")
+
+    def test_settle_waits_for_post_close_snapshot(self):
+        target = SESSIONS[SESSIONS.get_loc(AS_OF) + 5]
+        bars = self._prices().loc[:target].copy()
+        bars.attrs.update(request_started_at=f"{target.date()}T09:59:00+08:00",
+                          observed_at=f"{target.date()}T10:00:00+08:00",
+                          observed_data_end=str(target.date()))
+        record = self._record()
+        with patch.object(ledger, "pending_records", return_value=[record]), \
+                patch.object(ledger, "update_record") as update, \
+                patch.object(judge, "_load_prices", return_value=bars), \
+                patch.object(judge, "_sessions", return_value=SESSIONS):
+            for hour in (10, 16):
+                now = datetime.combine(target.date(), time(hour), ledger.SHANGHAI)
+                counts = judge.settle(now=now)
+                self.assertEqual(counts["pending"], 1)
+                self.assertEqual(counts["awaiting_close_evidence"], 1)
+                update.assert_not_called()
+            output = io.StringIO()
+            with patch.object(ledger, "_now", return_value=now), redirect_stdout(output):
+                self.assertEqual(commands.main(["settle"]), 0)
+            self.assertEqual(json.loads(output.getvalue())["awaiting_close_evidence"], 1)
+            update.assert_not_called()
+            bars.attrs.update(request_started_at=f"{target.date()}T15:00:00+08:00",
+                              observed_at=f"{target.date()}T15:00:00+08:00")
+            self.assertEqual(judge.settle(now=now)["correct"], 1)
+            self.assertEqual(update.call_args.kwargs["judge_date"], str(target.date()))
+
+    def test_market_requires_coverage_and_ordered_source_timestamps(self):
+        bars = self._prices().loc[:"2026-11-06"].copy()
+        observed = _observed(bars, "2026-11-06").attrs.copy()
+        record = {**self._record(kind="index"),
+                  "params": {"horizon_basis": "observed_bars"}}
+        now = datetime(2026, 11, 7, 1, tzinfo=timezone.utc)
+        with patch.object(judge, "_sessions", return_value=SESSIONS):
+            for change in (
+                {"request_started_at": "2026-11-06T14:59:00+08:00"},
+                {"observed_at": "2026-11-06T15:01:00"},
+                {"observed_at": "2026-11-07T09:01:00+08:00"},
+                {"observed_at": "2026-11-06T14:59:00+08:00"},
+                {"observed_data_end": "2026-11-05"},
+                {"observed_at": None, "fetched_at": observed["observed_at"]},
+            ):
+                with self.subTest(change=change):
+                    bars.attrs = {**observed, **change}
+                    self.assertEqual(judge.judge_record(record, bars, bars.index, now=now)["status"],
+                                     "pending")
+            bars.attrs = observed
+            self.assertEqual(judge.judge_record(record, bars, bars.index, now=now)["label"],
+                             "correct")
+        with patch.object(judge, "_sessions", return_value=pd.DatetimeIndex([])):
+            self.assertEqual(judge.judge_record(record, bars, bars.index, now=now)["status"],
+                             "pending")
+
+        holiday_axis = pd.to_datetime(["2025-01-20", "2025-01-21", "2025-01-22",
+                                       "2025-01-23", "2025-01-24", "2025-01-27",
+                                       "2025-02-05"])
+        bars = _observed(pd.Series(range(100, 107), index=holiday_axis), "2025-02-05")
+        bars.attrs.update(request_started_at="2025-02-05T09:59:00+08:00",
+                          observed_at="2025-02-05T10:00:00+08:00")
+        with patch.object(judge, "_sessions", return_value=holiday_axis):
+            verdict = judge.judge_record({**record, "as_of": "2025-01-20"},
+                                         bars, holiday_axis,
+                                         now=datetime(2025, 2, 5, 10, tzinfo=ledger.SHANGHAI))
+        self.assertEqual(verdict["judge_date"], "2025-01-27")
 
     def test_stock_settlement_uses_frozen_price_basis(self):
         adjusted = self._prices()
@@ -261,13 +394,15 @@ class JudgeTests(unittest.TestCase):
                         else:
                             record["price_basis"] = basis
                         prices = judge._load_prices(record, today, fetch)
-                        self.assertIs(prices, frames["qfq" if basis is None else basis])
-                        verdict = judge.judge_record(record, prices, SESSIONS, today)
+                        expected = frames["qfq" if basis is None else basis]
+                        pd.testing.assert_frame_equal(prices, expected.loc[:pd.Timestamp(today)])
+                        self.assertLessEqual(prices.index.max().date(), today)
+                        verdict = self._judge(record, prices, SESSIONS, today)
                         self.assertEqual(verdict["label"], label)
 
     def test_grace_session_used_when_target_missing(self):
         prices = self._prices().drop(pd.Timestamp("2026-11-06"))
-        verdict = judge.judge_record(self._record(), prices, SESSIONS,
+        verdict = self._judge(self._record(), prices, SESSIONS,
                                      date(2026, 11, 20))
         self.assertEqual(verdict["label"], "correct")
         self.assertEqual(verdict["reason"], "grace_session")
@@ -278,7 +413,13 @@ class JudgeTests(unittest.TestCase):
         prices = pd.Series([100.0 + i for i in range(len(axis))], index=axis)
         record = self._record()
         record["params"] = json.dumps({"horizon_basis": "observed_bars"})
-        verdict = judge.judge_record(record, prices, axis, date(2026, 11, 20))
+        today = date(2026, 11, 20)
+        with patch.object(judge, "_sessions", return_value=SESSIONS):
+            self.assertEqual(self._judge(record, prices, axis, today)["status"],
+                             "pending")
+            prices.attrs["source_checked_through"] = today.isoformat()
+            _observed(prices, end="2026-11-05", checked="2026-11-20")
+            verdict = self._judge(record, prices, axis, today)
         self.assertEqual(verdict["status"], "settled")
         self.assertEqual(verdict["label"], "blocked")
         self.assertEqual(verdict["reason"], "no_feed")
@@ -288,31 +429,50 @@ class JudgeTests(unittest.TestCase):
         prices = pd.Series([100.0 + i for i in range(len(axis))], index=axis)
         record = self._record()
         record["params"] = json.dumps({"horizon_basis": "observed_bars"})
-        verdict = judge.judge_record(record, prices, axis, date(2026, 11, 9))
+        verdict = self._judge(record, prices, axis, date(2026, 11, 9))
         self.assertEqual(verdict["status"], "pending")
 
     def test_missing_signal_close_stays_pending_within_grace(self):
         # 同步滞后导致信号日收盘还没入库时，宽限期内不能永久定案。
         prices = self._prices().drop(pd.Timestamp(AS_OF))
-        verdict = judge.judge_record(self._record(), prices, SESSIONS,
+        verdict = self._judge(self._record(), prices, SESSIONS,
                                      date(2026, 11, 9))
         self.assertEqual(verdict["status"], "pending")
-        verdict = judge.judge_record(self._record(), prices, SESSIONS,
+        verdict = self._judge(self._record(), prices, SESSIONS,
                                      date(2026, 11, 20))
         self.assertEqual(verdict["label"], "insufficient")
 
     def test_missing_session_blocked_for_stock(self):
         prices = self._prices().drop(pd.to_datetime(
             ["2026-11-06", "2026-11-09", "2026-11-10"]))
-        verdict = judge.judge_record(self._record(), prices, SESSIONS,
+        verdict = self._judge(self._record(), prices, SESSIONS,
                                      date(2026, 11, 20))
         self.assertEqual(verdict["label"], "blocked")
         self.assertEqual(verdict["reason"], "missing_session")
 
+    def test_missing_quote_needs_complete_grace_and_successful_source_check(self):
+        # Two real grace sessions after a holiday, with no usable target quote.
+        axis = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06",
+                               "2025-01-07", "2025-01-08", "2025-01-09",
+                               "2025-01-13", "2025-01-14"])
+        record = {**self._record(), "as_of": "2025-01-02"}
+        prices = pd.Series([100., float("nan")], index=axis[[0, 5]])
+        prices.attrs["source_checked_through"] = "2025-01-14"
+        today = date(2025, 1, 15)
+        _observed(prices, end="2025-01-02", checked="2025-01-14")
+        for sessions, cutoff in ((axis[:-1], today), (axis, axis[-1].date())):
+            self.assertEqual(self._judge(record, prices, sessions, cutoff)["status"],
+                             "pending")
+        prices.attrs["source_error"] = "刷新失败"
+        self.assertEqual(self._judge(record, prices, axis, today)["status"], "pending")
+        prices.attrs.pop("source_error")
+        self.assertEqual(self._judge(record, prices, axis, today)["reason"],
+                         "missing_session")
+
     def test_missing_nav_insufficient_for_fund(self):
         prices = self._prices().drop(pd.to_datetime(
             ["2026-11-06", "2026-11-09", "2026-11-10"]))
-        verdict = judge.judge_record(self._record(kind="fund"), prices, SESSIONS,
+        verdict = self._judge(self._record(kind="fund"), prices, SESSIONS,
                                      date(2026, 11, 20))
         self.assertEqual(verdict["label"], "insufficient")
 
@@ -321,18 +481,18 @@ class JudgeTests(unittest.TestCase):
         target = pd.Timestamp("2026-11-06")
         value = float(prices.loc[target, "close"])
         prices.loc[target, ["open", "high", "low", "close"]] = value
-        verdict = judge.judge_record(self._record(), prices, SESSIONS,
+        verdict = self._judge(self._record(), prices, SESSIONS,
                                      date(2026, 11, 20))
         self.assertEqual(verdict["label"], "blocked")
         self.assertEqual(verdict["reason"], "limit_one_price")
 
     def test_flat_close_is_neutral_for_both_directions(self):
-        prices = pd.Series(1.0, index=SESSIONS)
+        prices = _observed(pd.Series(1.0, index=SESSIONS))
         for direction in ("up", "down"):
             record = self._record(direction)
             record["source"] = "direction"
             record["probability"] = 0.55
-            verdict = judge.judge_record(record, prices, SESSIONS,
+            verdict = self._judge(record, prices, SESSIONS,
                                          date(2026, 11, 20))
             self.assertEqual(verdict["label"], "neutral")
             self.assertEqual(verdict["realized_return"], 0.0)
@@ -341,7 +501,7 @@ class JudgeTests(unittest.TestCase):
         record = self._record("up")
         record["source"] = "rule"
         record["horizon"] = ledger.RULE_HORIZON
-        verdict = judge.judge_record(record, _rising_bars(), SESSIONS,
+        verdict = self._judge(record, self._prices(), SESSIONS,
                                      date(2026, 11, 20))
         self.assertEqual(verdict["label"], "observed")
         self.assertGreater(verdict["realized_return"], 0)
@@ -414,15 +574,22 @@ class ConsistencyTests(unittest.TestCase):
         with patch.object(judge, "_sessions", side_effect=AssertionError(
                 "有效日线口径不得回退到交易日历")):
             sessions = judge._sessions_for(record, prices, date(2026, 12, 10))
-        pd.testing.assert_index_equal(sessions, judge._normalize(axis))
+        pd.testing.assert_index_equal(sessions, axis[axis <= "2026-12-10"])
 
     def test_fund_settlement_uses_recorded_nav_basis(self):
-        record = {"asset_kind": "fund", "asset_code": "110022",
-                  "price_basis": "cum", "as_of": AS_OF}
-        with patch("market_research.data.panels.load_fund_nav_cached",
-                   return_value=pd.Series(dtype=float)) as loader:
-            judge._load_prices(record, date(2026, 12, 10), fetch=False)
-        self.assertEqual(loader.call_args.kwargs["basis"], "cum")
+        today = date(2026, 12, 10)
+        nav = pd.Series(1., index=SESSIONS)
+        for basis in ("cum", "total"):
+            for fetch in (False, True):
+                record = {"asset_kind": "fund", "asset_code": "110022",
+                          "price_basis": basis, "as_of": AS_OF}
+                with self.subTest(basis=basis, fetch=fetch), \
+                     patch("market_research.data.panels.load_fund_nav_cached",
+                           return_value=nav) as loader:
+                    prices = judge._load_prices(record, today, fetch)
+                    self.assertLessEqual(prices.index.max().date(), today)
+                    self.assertEqual(loader.call_args.kwargs["basis"], basis)
+                    self.assertEqual(loader.call_args.kwargs["allow_fetch"], fetch)
 
     def test_settlement_reads_history_without_requiring_today_sync(self):
         # 结算只需要历史收盘；若沿用“同步到今天”的新鲜度门槛，记录会被
@@ -434,6 +601,19 @@ class ConsistencyTests(unittest.TestCase):
                    return_value=frame) as cached:
             judge._load_prices(record, date(2026, 12, 10), fetch=False)
         self.assertFalse(cached.call_args.kwargs["fresh"])
+
+    def test_index_prices_obey_cutoff_on_fetch_and_cache(self):
+        today = date(2026, 11, 6)
+        record = {"asset_kind": "index", "asset_code": "sh000300",
+                  "price_basis": "", "as_of": AS_OF}
+        frame = _rising_bars()
+        with patch("market_research.tasks.sync.cached", return_value=frame) as cached, \
+             patch("market_research.market.analysis.load_bars", return_value=frame) as loader:
+            for fetch in (False, True):
+                prices = judge._load_prices(record, today, fetch)
+                self.assertLessEqual(prices.index.max().date(), today)
+        self.assertEqual(cached.call_args.args[-1], today.isoformat())
+        self.assertEqual(loader.call_args.args[-2], today.isoformat())
 
     def test_fund_settlement_runs_through_real_loader(self):
         # G-01 回归：基金分支必须用真实签名调用 load_fund_nav_cached，且只用
@@ -456,7 +636,7 @@ class ConsistencyTests(unittest.TestCase):
             self.assertLessEqual(prices.index.max(), pd.Timestamp(today))
             with patch.object(ledger, "pending_records", return_value=[record]), \
                     patch.object(ledger, "update_record") as update:
-                counts = judge.settle(today=today)
+                counts = judge.settle(now=_settlement_time(today))
         self.assertEqual(counts["unavailable"], 0)
         self.assertEqual(counts["correct"], 1)
         self.assertEqual(update.call_args.kwargs["judge_date"], "2026-10-27")
@@ -481,7 +661,7 @@ class SettleAndSummaryTests(unittest.TestCase):
         bars = _rising_bars()
         with patch.object(judge, "_load_prices", return_value=bars), \
                 patch.object(judge, "_sessions", return_value=SESSIONS):
-            counts = judge.settle(today=date(2026, 12, 10))
+            counts = judge.settle(now=_settlement_time(date(2026, 12, 10)))
         self.assertEqual(counts["checked"], 3)
         self.assertEqual(counts["pending"], 0)
         # 上涨行情：5 日方向概率（up）判对、20 日（down）判错；
@@ -497,6 +677,16 @@ class SettleAndSummaryTests(unittest.TestCase):
         self.assertEqual(overall["rule_events"], 1)
         self.assertGreater(overall["rule_return_mean"], 0)
         self.assertIsNotNone(overall["brier"])
+        row = ledger._records()[0]
+        evidence = json.loads(row["settlement_evidence"])
+        self.assertEqual(evidence["rule_version"], judge.SETTLEMENT_RULE_VERSION)
+        self.assertEqual(evidence["observed_at"], bars.attrs["observed_at"])
+        self.assertEqual(evidence["input_through"], row["judge_date"])
+        self.assertRegex(evidence["input_sha256"], r"^[0-9a-f]{64}$")
+        ledger.update_record(row["id"], label="insufficient", settlement_evidence={})
+        stored = {item["id"]: item for item in ledger._records()}[row["id"]]
+        self.assertEqual(stored["settlement_evidence"], row["settlement_evidence"])
+        self.assertEqual(stored["label"], row["label"])
 
     def test_actual_sessions_column_persists_on_old_databases(self):
         ledger.record_result("market", {}, _market_result(),
@@ -507,13 +697,14 @@ class SettleAndSummaryTests(unittest.TestCase):
         stored = [item for item in ledger._records()
                   if item["id"] == row["id"]][0]
         self.assertEqual(stored["actual_sessions"], 6)
+        self.assertIsNone(stored["settlement_evidence"])
 
     def test_settle_keeps_pending_when_prices_unavailable(self):
         ledger.record_result("market", {}, _market_result(),
                              now=datetime(2026, 11, 2))
         with patch.object(judge, "_load_prices",
                           side_effect=ValueError("本地行情缓存未同步")):
-            counts = judge.settle(today=date(2026, 12, 10))
+            counts = judge.settle(now=_settlement_time(date(2026, 12, 10)))
         self.assertEqual(counts["unavailable"], 3)
         self.assertEqual(counts["insufficient"], 0)
         self.assertIn("ValueError", counts["unavailable_reasons"][0])
@@ -558,7 +749,7 @@ class CumOfflineSettlementTests(unittest.TestCase):
                              frame.loc[pd.Timestamp("2026-10-20"), "cum"])
             with patch.object(ledger, "pending_records", return_value=[record]), \
                     patch.object(ledger, "update_record") as update:
-                counts = judge.settle(today=date(2026, 11, 8))
+                counts = judge.settle(now=_settlement_time(date(2026, 11, 8)))
         self.assertEqual(counts["unavailable"], 0)
         self.assertEqual(counts["correct"], 1)
         self.assertGreater(update.call_args.kwargs["realized_return"], 0)
