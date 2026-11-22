@@ -9,8 +9,9 @@ from .registry import COMMANDS, COMMAND_SPECS, LEGACY_COMMANDS
 
 
 def execute(command: str, arguments: list[str], *, prog: str):
-    if isinstance(sys.stdout, TextIOWrapper):
-        sys.stdout.reconfigure(errors="backslashreplace")
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, TextIOWrapper):
+            stream.reconfigure(errors="backslashreplace")
     entry = import_module('market_research.' + COMMANDS[command]).main
     return entry(list(arguments), prog=prog)
 

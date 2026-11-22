@@ -132,7 +132,7 @@ def main(argv=None, *, prog=None):
 
     industry_map = H.load_industry_map(refresh=args.refresh)
     if industry_map.empty:
-        print("[holdings] ✗ 行业映射构造失败（无法取得申万成分股）")
+        print("[holdings] [失败] 行业映射构造失败（无法取得申万成分股）")
         return 1
 
     out_dir = C.RES_DIR
