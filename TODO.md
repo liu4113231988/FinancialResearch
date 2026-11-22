@@ -230,6 +230,8 @@
 
 **实施记录（2026-11-17，工作区改动）**：缓存报价与来源元数据在同一锁内读取，合并保留的旧行不会继承新观察时间。股票和指数的新行情判定写入 `settlement_evidence`，包含输入 SHA-256、覆盖区间、请求时点、观察时点及规则版本。旧台账的证据留空。隔离 `FIL_DATA_DIR` 后运行 `.venv/Scripts/python.exe -m unittest discover -s tests -t . -p 'test_*.py'`，594 项通过（95.031 秒），三套前端脚本通过。使用合成夹具验证，未实测供应商盘中刷新或盘后发布时间。
 
+**补充修复（2026-11-22，工作区改动）**：`--fetch` 成功只认证供应商实际返回的 `observed_data_start/observed_data_end`，请求上界不再冒充来源覆盖，避免静默短历史把缺报价误终判。缺报价终判的 `input_sha256` 扩展至判定日实际扫描末行，同时保留 `decision_through` 表示规则窗口上界。新增短历史与哈希覆盖回归。
+
 #### A3 / P1-29 剩余：基金入账可得性及历史污染隔离
 
 **落点**：[`predictions/ledger.py:309`](src/market_research/predictions/ledger.py#L309)、[`services/analysis.py:271`](src/market_research/services/analysis.py#L271)、[`data/panels.py:442`](src/market_research/data/panels.py#L442)；保留已修的独立净值轴，不复用股票15点规则来假装基金净值已经发布。

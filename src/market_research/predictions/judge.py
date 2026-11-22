@@ -88,17 +88,27 @@ def _market_snapshot(attrs, now):
     return None
 
 
-def _settlement_evidence(prices, snapshot, as_of, through):
+def _evidence_through(prices, through, today: date) -> date:
+    last = _date(prices.index.max()) if len(prices) else None
+    if last is None:
+        return through
+    return min(max(last, through), today)
+
+
+def _settlement_evidence(prices, snapshot, as_of, through, *,
+                         evidence_through: date | None = None):
     if snapshot is None:
         return {}
     start, end, started, observed = snapshot
-    rows = prices.loc[str(as_of):str(through)]
+    evidence_through = evidence_through or through
+    rows = prices.loc[str(as_of):str(evidence_through)]
     content = pd.util.hash_pandas_object(rows, index=True).values.tobytes()
     columns = list(rows.columns) if isinstance(rows, pd.DataFrame) else [rows.name]
     digest = hashlib.sha256(json.dumps(columns).encode() + content).hexdigest()
     return {"settlement_evidence": {
         "rule_version": SETTLEMENT_RULE_VERSION, "input_sha256": digest,
-        "input_from": str(as_of), "input_through": str(through),
+        "input_from": str(as_of), "input_through": str(evidence_through),
+        "decision_through": str(through),
         "request_started_at": started.isoformat(), "observed_at": observed.isoformat(),
         "observed_data_start": start.isoformat(), "observed_data_end": end.isoformat(),
         "source": prices.attrs.get("source"),
@@ -169,10 +179,13 @@ def judge_record(record: dict, prices, sessions, today: date | None = None, *,
                     and _grace_expired(nominal[grace_position], close, attrs, today)
                     and (not market or _absence_verified(
                         snapshot, attrs, nominal[horizon], nominal[grace_position]))):
+                decision_through = nominal[grace_position].date()
                 return {"status": "settled", "label": "blocked",
                         "target_date": nominal[horizon].date().isoformat(),
                         "reason": "no_feed", **_settlement_evidence(
-                            prices, snapshot, as_of, nominal[grace_position].date())}
+                            prices, snapshot, as_of, decision_through,
+                            evidence_through=_evidence_through(
+                                prices, decision_through, today))}
         return {"status": "pending"}
     target = sessions[target_position]
     pending = {"status": "pending", "target_date": target.date().isoformat()}
@@ -194,8 +207,12 @@ def judge_record(record: dict, prices, sessions, today: date | None = None, *,
             label, reason = "insufficient", "净值缺失超过宽限期"
         else:
             label, reason = "blocked", "missing_session"
+        decision_through = window[-1].date()
         return {**pending, "status": "settled", "label": label, "reason": reason,
-                **_settlement_evidence(prices, snapshot, as_of, window[-1].date())}
+                **_settlement_evidence(
+                    prices, snapshot, as_of, decision_through,
+                    evidence_through=_evidence_through(
+                        prices, decision_through, today))}
 
     judge_date = candidates[0]
     if market:
@@ -309,8 +326,13 @@ def _load_prices(record: dict, today: date, fetch: bool):
             raise ValueError("本地行情缓存未覆盖判定区间，请先同步或使用 --fetch")
     prices = _through(prices, today)
     if fetch and not prices.empty and not (prices.attrs.get("stale") or prices.attrs.get("source_error")):
-        prices.attrs["source_checked_from"] = start
-        prices.attrs["source_checked_through"] = end
+        # 只能认证供应商实际返回的数据区间；请求上界不代表来源已覆盖到该日。
+        observed_start = _date(prices.attrs.get("observed_data_start"))
+        observed_end = _date(prices.attrs.get("observed_data_end"))
+        if observed_start is not None:
+            prices.attrs["source_checked_from"] = observed_start.isoformat()
+        if observed_end is not None:
+            prices.attrs["source_checked_through"] = observed_end.isoformat()
     return prices
 
 

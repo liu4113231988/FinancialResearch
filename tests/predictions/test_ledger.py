@@ -1,4 +1,5 @@
 """预测台账与结算口径的单元测试。"""
+import hashlib
 import io
 import json
 import tempfile
@@ -431,6 +432,54 @@ class JudgeTests(unittest.TestCase):
         record["params"] = json.dumps({"horizon_basis": "observed_bars"})
         verdict = self._judge(record, prices, axis, date(2026, 11, 9))
         self.assertEqual(verdict["status"], "pending")
+
+    def test_fetch_source_checked_bounds_use_returned_observations(self):
+        bars = self._prices().loc[:pd.Timestamp("2026-11-05")].copy()
+        bars.attrs.update(observed_data_start=str(bars.index[0].date()),
+                          observed_data_end="2026-11-05")
+        with patch("market_research.market.analysis.load_bars", return_value=bars):
+            prices = judge._load_prices(self._record(), date(2026, 11, 20), True)
+        self.assertEqual(prices.attrs["source_checked_from"], str(bars.index[0].date()))
+        self.assertEqual(prices.attrs["source_checked_through"], "2026-11-05")
+
+    def test_fetch_short_history_does_not_certify_missing_quotes(self):
+        bars = self._prices().loc[:pd.Timestamp("2026-11-05")].copy()
+        bars.attrs.update(observed_data_start=str(bars.index[0].date()),
+                          observed_data_end="2026-11-05",
+                          request_started_at="2026-11-20T15:00:00+08:00",
+                          observed_at="2026-11-20T15:01:00+08:00")
+        with patch.object(ledger, "pending_records",
+                          return_value=[self._record()]), \
+                patch.object(ledger, "update_record") as update, \
+                patch("market_research.market.analysis.load_bars",
+                      return_value=bars), \
+                patch.object(judge, "_sessions", return_value=SESSIONS):
+            counts = judge.settle(now=_settlement_time(date(2026, 11, 20)),
+                                  fetch=True)
+        self.assertEqual(counts["pending"], 1)
+        update.assert_not_called()
+
+    def test_missing_session_evidence_hashes_all_scanned_quotes(self):
+        axis = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06",
+                               "2025-01-07", "2025-01-08", "2025-01-09",
+                               "2025-01-13", "2025-01-14", "2025-01-15"])
+        target, grace_end, scanned = axis[5], axis[7], axis[-1]
+        prices = pd.Series([100.0, 102.0], index=[axis[0], scanned])
+        _observed(prices, end=str(scanned.date()), checked=str(scanned.date()))
+        prices.attrs["request_started_at"] = f"{scanned.date()}T15:00:00+08:00"
+        record = {**self._record(), "as_of": str(axis[0].date())}
+        verdict = judge.judge_record(
+            record, prices, axis, date(2025, 1, 16),
+            now=datetime(2025, 1, 16, 16, tzinfo=ledger.SHANGHAI))
+        self.assertEqual(verdict["label"], "blocked")
+        self.assertEqual(verdict["reason"], "missing_session")
+        evidence = verdict["settlement_evidence"]
+        self.assertEqual(evidence["decision_through"], str(grace_end.date()))
+        self.assertEqual(evidence["input_through"], str(scanned.date()))
+        rows = prices.loc[str(axis[0].date()):str(scanned.date())]
+        content = pd.util.hash_pandas_object(rows, index=True).values.tobytes()
+        digest = hashlib.sha256(json.dumps([rows.name]).encode() + content).hexdigest()
+        self.assertEqual(evidence["input_sha256"], digest)
 
     def test_missing_signal_close_stays_pending_within_grace(self):
         # 同步滞后导致信号日收盘还没入库时，宽限期内不能永久定案。
