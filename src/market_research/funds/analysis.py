@@ -54,7 +54,12 @@ def nav_basis_meta(attrs: dict) -> dict:
     return {"data_basis": data_basis,
             "nav_basis": nav_basis,
             "nav_degraded": nav_degraded,
-            "nav_degraded_reason": nav_reason or None}
+            "nav_degraded_reason": nav_reason or None,
+            "nav_observed_at": attrs.get("nav_observed_at"),
+            "nav_observed_data_end": attrs.get("nav_observed_data_end"),
+            # 供应商公告时间不可得；观察时间只表示本地至迟已取得，不冒充公告。
+            "nav_announcement_at": None,
+            "nav_availability_note": "公告时间未知；观察时间为本地至迟取得时间"}
 
 
 def result_completeness(*, payload: dict, correlation: dict, forecast: dict,

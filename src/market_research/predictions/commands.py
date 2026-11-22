@@ -26,6 +26,8 @@ def main(argv=None, *, prog="predictions"):
     migrate.add_argument("--apply", action="store_true",
                          help="实际写库（默认只预览）；会删除同组重复行，建议先备份 market.duckdb")
 
+    actions.add_parser("audit-fund", help="只读审计基金历史记录的净值可得性证据")
+
     args = parser.parse_args(argv)
     if args.action == "settle":
         from market_research.predictions.judge import settle
@@ -33,6 +35,8 @@ def main(argv=None, *, prog="predictions"):
                         fetch=args.fetch)
     elif args.action == "migrate":
         result = ledger.migrate_legacy(apply=args.apply)
+    elif args.action == "audit-fund":
+        result = ledger.fund_audit()
     else:
         result = ledger.summary(group_by=args.group_by)
     print(json.dumps(result, ensure_ascii=False, indent=2))

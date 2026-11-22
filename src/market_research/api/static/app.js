@@ -668,6 +668,7 @@ function exportResult() {
       auto_equity: m.auto_equity, equity_ratio: m.equity_ratio,
       n_days: m.n_days,
       from_cache: m.from_cache || false,
+      registration: m.registration || null,
     },
     result: r,
     ...(S.holdings ? {holdings: S.holdings} : {}),
@@ -1275,6 +1276,16 @@ function renderHead() {
     (m.window_years ? ` · 分析窗口 ${m.window_years} 年` : '') +
     (m.from_cache ? ' · 缓存' : '') +
     (m.data_basis ? ' · ' + m.data_basis : '');
+  const registration = m.registration || {};
+  if (registration.status) {
+    const badge = document.createElement('span');
+    badge.className = registration.status === 'recorded' ? 'meta-note' : 'meta-warn';
+    badge.textContent = registration.status === 'recorded'
+      ? ` · 本次入账 ${registration.recorded} 条`
+      : ` · 本次未入账（${registration.reason || registration.status}）`;
+    badge.title = registration.detail || '';
+    $('fundMeta').appendChild(badge);
+  }
   // 价格覆盖降级透传：后端 align_prices 剔除/截断过数据时，别让用户以为
   // 用的是完整候选池。用 textContent/title，不拼 innerHTML。
   const dataWarns = m.data_warnings || [];

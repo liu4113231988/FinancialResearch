@@ -4,6 +4,7 @@ import json
 import logging
 import pickle
 import time
+from datetime import datetime, timedelta, timezone
 
 import market_research.audit as audit
 import market_research.config as C
@@ -171,7 +172,13 @@ def submit(operation, params):
             try:
                 with path.open("rb") as file:
                     payload=pickle.load(file)
-                payload.setdefault("meta",{})["from_cache"]=True
+                meta = payload.setdefault("meta", {})
+                meta["from_cache"] = True
+                # 缓存里冻结的是计算结果，不得重放旧入账标记；本次命中不重新记账。
+                meta["registration"] = {
+                    "status": "not_recorded", "recorded": 0,
+                    "reason": "cache_hit",
+                    "detail": "结果缓存命中，本次未重新入账"}
                 # 清理按 mtime 判"长期未用"，命中只读不会更新 mtime，
                 # 热点缓存每天被读也会在 TTL 后被误删。命中即续期。
                 try:
@@ -243,6 +250,8 @@ def _stamp(result, data_stamp=None):
             meta = {}
             result["meta"] = meta
         meta["provenance"] = result_provenance(data_stamp)
+        meta["analysis_generated_at"] = datetime.now(
+            timezone(timedelta(hours=8))).isoformat()
     return result
 
 
@@ -269,12 +278,18 @@ def _dispatch(operation, params, jid):
 
 
 def _record_predictions(operation, params, result):
-    """把实盘最新收盘的预测写入台账；失败不影响分析结果。"""
+    """把实盘最新收盘的预测写入台账；状态随结果返回，失败不影响分析。"""
     try:
-        from market_research.predictions.ledger import record_result
-        record_result(operation, params, result)
-    except Exception:
+        from market_research.predictions.ledger import record_result_ex
+        outcome = record_result_ex(operation, params, result)
+    except Exception as exc:                               # noqa: BLE001
         LOG.warning("预测台账写入失败，不影响分析结果", exc_info=True)
+        outcome = {"status": "not_recorded", "recorded": 0,
+                   "reason": "write_failed",
+                   "detail": f"{type(exc).__name__}: {str(exc)[:160]}"}
+    if isinstance(result, dict):
+        result.setdefault("meta", {})["registration"] = outcome
+    return outcome
 
 
 def _register_result_nav_basis(params, result):

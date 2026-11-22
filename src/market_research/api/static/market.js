@@ -313,6 +313,12 @@ window.MarketApp = (() => {
       if (q.fetched_at) el('marketMeta').textContent += ` · 抓取于 ${q.fetched_at}`;
       if (q.calendar_verified) el('marketMeta').textContent += ' · 已对照供应商日历';
     }
+    const registration = m.registration || {};
+    if (registration.status) {
+      el('marketMeta').textContent += registration.status === 'recorded'
+        ? ` · 本次入账 ${registration.recorded} 条`
+        : ` · 本次未入账（${registration.reason || registration.status}）`;
+    }
     el('marketKpis').replaceChildren(...[
       [kind === 'stock' ? '最新收盘价' : '最新收盘点位', num(s.latest), `最近交易日 ${pct(s.change)}`],
       ['区间收益', pct(s.total_return), `年化 ${pct(s.ann_return)}`], ['最大回撤', pct(s.max_drawdown), '区间峰值至谷值'],

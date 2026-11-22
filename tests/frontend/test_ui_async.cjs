@@ -120,6 +120,8 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   assert.match(source, /fil_watchlist/);
   assert.match(source, /fil_last_run/);
   assert.match(source, /data_provenance/);
+  assert.match(source, /registration: m\.registration/);
+  assert.match(source, /本次未入账/);
   assert.match(source, /\$\('btnWatch'\)\.onclick = toggleWatchlist/);
   assert.match(source, /\$\('watchSel'\)\.onchange/);
   assert.match(source, /\$\('btnExport'\)\.onclick = exportResult/);

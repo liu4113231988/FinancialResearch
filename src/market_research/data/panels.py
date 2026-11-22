@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import market_research.config as C
 from market_research.data import storage
-from market_research.data.cache import _cached, _cache_info_write, _with_info
+from market_research.data.cache import _cached, _cache_info_write, _with_info, cache_info
 from market_research.data.providers.funds import NAV_BASIS_CUM, NAV_BASIS_TOTAL, fetch_fund_nav, fetch_fund_total_return
 from market_research.data.providers.indices import fetch_universe
 from market_research.data.providers.valuation import fetch_pe_panel, fetch_dividend_panel
@@ -18,15 +18,23 @@ LOG = logging.getLogger(__name__)
 
 def _nav_basis_attrs(series: pd.Series, basis: str, degraded: bool = False,
                      reason: str = "", extra: Optional[dict] = None) -> pd.Series:
-    """把实际净值口径挂在 Series 上，供 meta/CLI/报告统一读取。"""
+    """把实际净值口径与可得性证据挂在 Series 上，供 meta/CLI/报告统一读取。"""
+    extra = extra or {}
     series.attrs["nav_basis"] = basis
     series.attrs["nav_degraded"] = bool(degraded)
     series.attrs["nav_degraded_reason"] = reason if degraded else ""
     # P2-27：缓存回退时 _cached 会挂 stale/source_error，不能在这里丢掉
     for key in ("stale", "source_error", "cached_at"):
-        value = (extra or {}).get(key)
+        value = extra.get(key)
         if value not in (None, ""):
             series.attrs[key] = value
+    # 观察时间只是“本地至迟取得时间”，不冒充供应商公告时间。
+    observed = extra.get("observed_at") or extra.get("fetched_at")
+    data_end = extra.get("observed_data_end") or extra.get("data_end")
+    if observed not in (None, ""):
+        series.attrs["nav_observed_at"] = observed
+    if data_end not in (None, ""):
+        series.attrs["nav_observed_data_end"] = str(data_end)[:10]
     return series
 
 def align_prices(px: pd.DataFrame, nav: pd.Series, max_ffill: int = 5,
@@ -335,7 +343,7 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
             raise RuntimeError("完整净值刷新后未能读取同步历史")
         result = history.iloc[:, 0].copy()
         result.name = f"fund_{fund_code}"
-        result = _nav_basis_attrs(result, basis)
+        result = _nav_basis_attrs(result, basis, extra=dict(history.attrs))
         if error is not None:
             result.attrs.update(stale=True, source_error=error,
                                 cached_at=history.attrs.get("fetched_at"))
@@ -383,7 +391,12 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
             "或设置 FIL_NAV_DEGRADED_POLICY=allow_cum 以降级展示并标注。") from e
     s = df.iloc[:, 0] if isinstance(df, pd.DataFrame) else df
     s.name = f"fund_{fund_code}"
-    return _nav_basis_attrs(s, basis, extra=dict(getattr(df, "attrs", {})))
+    info = cache_info(cache_name)
+    extra = dict(getattr(df, "attrs", {}))
+    for key in ("fetched_at", "data_end"):
+        if key not in extra and info.get(key):
+            extra[key] = info[key]
+    return _nav_basis_attrs(s, basis, extra=extra)
 
 
 def fetch_start_for(start: Optional[str] = None) -> str:
@@ -502,6 +515,9 @@ def load_panel(fund_code: str, start: Optional[str] = None,
     out.attrs["nav_basis"] = actual_basis
     out.attrs["nav_degraded"] = nav_degraded
     out.attrs["nav_degraded_reason"] = nav_reason
+    for key in ("nav_observed_at", "nav_observed_data_end"):
+        if nav.attrs.get(key):
+            out.attrs[key] = nav.attrs[key]
     quality["warnings"] = list(warnings)
     out.attrs["data_quality"] = quality
     if include_forecast_nav:

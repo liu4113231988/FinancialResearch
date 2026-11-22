@@ -11,8 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import time
-from datetime import date, datetime, timedelta, timezone
+import time as _time_module
+from datetime import date, datetime, time, timedelta, timezone
 from importlib.resources import files
 from typing import Any, Dict, Iterable, List
 
@@ -132,7 +132,7 @@ def _make(*, asset_kind, asset_code, asset_name, as_of, source, direction,
           params=None, data_stamp=None) -> dict:
     return {
         "id": _identity(asset_kind, asset_code, as_of, source, horizon),
-        "created_at": time.time(),
+        "created_at": _time_module.time(),
         "as_of": as_of,
         "asset_kind": asset_kind,
         "asset_code": asset_code,
@@ -302,11 +302,91 @@ def _market_timing(as_of, meta, now):
             "request_started_at": started.isoformat(), "session_close_at": close.isoformat()}
 
 
+def _instant(value):
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed.replace(tzinfo=SHANGHAI) if parsed.tzinfo is None else parsed.astimezone(SHANGHAI)
+
+
+def _session_date(value) -> date | None:
+    if hasattr(value, "date"):
+        return value.date()
+    return _date(value)
+
+
+def _fund_availability_reason(result: dict, now) -> str | None:
+    """基金净值是否为当时最后完成会话的证据门禁；公告时间不可得时记未知。"""
+    meta = result.get("meta") or {}
+    quality = meta.get("data_quality") or {}
+    if quality.get("stale") or quality.get("source_error"):
+        return "refresh_failed"
+    observed = _instant(meta.get("nav_observed_at"))
+    generated = _instant(meta.get("analysis_generated_at")
+                         or (meta.get("provenance") or {}).get("generated_at"))
+    data_end = _date(meta.get("nav_observed_data_end"))
+    forecast = result.get("forecast") or {}
+    current = result.get("current") or {}
+    as_of = _date(forecast.get("as_of") or current.get("date") or meta.get("end"))
+    if None in (observed, generated, data_end, as_of):
+        return "availability_unknown"
+    if not (as_of <= data_end <= observed.date()
+            and observed <= generated <= now
+            and generated.date() <= now.date()):
+        return "availability_unknown"
+    if data_end != as_of:
+        return "stale_nav"
+    try:
+        from market_research.data.providers.calendar import bundled_calendar
+        sessions, _ = bundled_calendar(as_of, observed.date() + timedelta(days=1))
+        completed_through = observed.date() - timedelta(days=int(observed.hour < 15))
+        completed = [day for day in (_session_date(item) for item in sessions)
+                     if day is not None and as_of <= day <= completed_through]
+        if not completed or max(completed) != as_of:
+            return "stale_nav"
+    except Exception:                                      # noqa: BLE001
+        return "availability_unknown"
+    return None
+
+
+def _fund_matured(row: dict, now) -> bool:
+    """记录生成时预测目标已到期则不得补记；规则事件用独立的评估会话数。"""
+    as_of = _date(row.get("as_of"))
+    if as_of is None:
+        return True
+    horizon = row.get("horizon") or 0
+    sessions_needed = (RULE_EVAL_SESSIONS if int(horizon) == RULE_HORIZON
+                       else int(horizon))
+    try:
+        from market_research.data.providers.calendar import bundled_calendar
+        sessions, _ = bundled_calendar(as_of, now.date() + timedelta(days=40))
+        forward = [day for day in (_session_date(item) for item in sessions)
+                   if day is not None and day > as_of]
+    except Exception:                                      # noqa: BLE001
+        return False
+    if len(forward) < sessions_needed:
+        return False
+    target_close = datetime.combine(forward[sessions_needed - 1], time(15),
+                                    tzinfo=SHANGHAI)
+    return now >= target_close
+
+
+def _fund_evidence(meta: dict, provenance: dict) -> dict:
+    return {"nav_observed_at": meta.get("nav_observed_at"),
+            "nav_observed_data_end": meta.get("nav_observed_data_end"),
+            "nav_announcement_at": meta.get("nav_announcement_at"),
+            "analysis_generated_at": meta.get("analysis_generated_at")
+            or provenance.get("generated_at"),
+            "data_stamp": provenance.get("data_stamp")}
+
+
 def _fund_forecast_rows(result: dict, now) -> List[dict]:
     forecast = result.get("forecast") or {}
     as_of = _iso(forecast.get("as_of"))
-    if not is_live(as_of, now):
-        return []
+    # 可得性由 `_fund_availability_reason` 与成熟期门禁负责，不再用14自然日阈值代替。
     code = str(result.get("code") or "")
     if not code:
         return []
@@ -335,6 +415,7 @@ def _fund_forecast_rows(result: dict, now) -> List[dict]:
             model_version=_model_version(provenance),
             data_stamp=provenance.get("data_stamp"),
             params={"nav_basis": meta.get("nav_basis"),
+                    **_fund_evidence(meta, provenance),
                     "thresholds": dict(THRESHOLDS),
                     "horizon_basis": "observed_bars",
                     "feature_set": "fund_nav_direction_v1"}))
@@ -345,8 +426,6 @@ def _fund_rule_rows(result: dict, now) -> List[dict]:
     meta = result.get("meta") or {}
     current = result.get("current") or {}
     as_of = _iso(current.get("date") or meta.get("end"))
-    if not is_live(as_of, now):
-        return []
     code = str(meta.get("code") or "")
     if not code:
         return []
@@ -379,6 +458,7 @@ def _fund_rule_rows(result: dict, now) -> List[dict]:
         features=features, model_version=_model_version(provenance),
         data_stamp=provenance.get("data_stamp"),
         params={"model": meta.get("model"),
+                **_fund_evidence(meta, provenance),
                 "thresholds": meta.get("thresholds"),
                 "horizon_semantics": "none",
                 "evaluation_sessions": RULE_EVAL_SESSIONS,
@@ -386,28 +466,94 @@ def _fund_rule_rows(result: dict, now) -> List[dict]:
                 "note": "健康分是拟合可信度风控，不是市场方向预测"})]
 
 
-def record_result(operation: str, params: dict, result: dict,
-                  *, now=None) -> int:
-    """把一次服务层分析结果写入台账；返回新增条数。
+def _outcome(status="not_recorded", recorded=0, reason=None, **extra) -> dict:
+    return {"status": status, "recorded": int(recorded),
+            "direction": 0, "rule": 0, "reason": reason, **extra}
 
-    仅接受 analyze（基金方向概率）、backtest（基金规则信号）和 market
-    （股票/指数）三种操作；历史区间与离线研究不会走到这里。
-    """
+
+def record_result_ex(operation: str, params: dict, result: dict,
+                     *, now=None) -> dict:
+    """写入台账并返回本次入账状态，拒绝原因不再压缩成 0。"""
     if not isinstance(result, dict):
-        return 0
+        return _outcome(reason="invalid_result")
     now = now or _now()
     now = now.replace(tzinfo=SHANGHAI) if now.tzinfo is None else now.astimezone(SHANGHAI)
     if is_historical_window(params, now):
-        return 0
+        return _outcome(reason="historical_window")
     if operation == "market":
         rows = _market_rows(result, now)
-    elif operation == "analyze":
-        rows = _fund_forecast_rows(result, now)
-    elif operation == "backtest":
-        rows = _fund_rule_rows(result, now)
+    elif operation in ("analyze", "backtest"):
+        reason = _fund_availability_reason(result, now)
+        if reason is not None:
+            return _outcome(reason=reason)
+        rows = (_fund_forecast_rows(result, now) if operation == "analyze"
+                else _fund_rule_rows(result, now))
     else:
-        return 0
-    return _insert(rows)
+        return _outcome(reason="unsupported_operation")
+    if not rows:
+        return _outcome(reason="no_eligible_rows")
+    matured = [row for row in rows if operation != "market" and _fund_matured(row, now)]
+    if matured:
+        rows = [row for row in rows if row not in matured]
+        if not rows:
+            return _outcome(reason="matured", matured=len(matured))
+    direction = sum(1 for row in rows if row.get("source") == "direction")
+    rule = sum(1 for row in rows if row.get("source") == "rule")
+    outcome = _outcome(direction=direction, rule=rule)
+    if matured:
+        outcome["matured"] = len(matured)
+    try:
+        inserted = _insert(rows)
+    except Exception as exc:                               # noqa: BLE001
+        outcome.update(reason="write_failed",
+                       detail=f"{type(exc).__name__}: {str(exc)[:160]}")
+        return outcome
+    outcome["recorded"] = inserted
+    outcome["duplicate"] = len(rows) - inserted
+    if inserted == len(rows):
+        outcome["status"] = "recorded"
+    elif inserted:
+        outcome.update(status="partial", reason="duplicate")
+    else:
+        outcome.update(reason="duplicate")
+    return outcome
+
+
+def record_result(operation: str, params: dict, result: dict,
+                  *, now=None) -> int:
+    """兼容旧调用：返回本次新增条数；完整状态用 `record_result_ex`。"""
+    return record_result_ex(operation, params, result, now=now)["recorded"]
+
+
+def fund_audit() -> dict:
+    """只读审计基金历史记录的净值可得性证据，不改写旧记录。"""
+    groups: dict[tuple, int] = {}
+    verified = pending = 0
+    for row in _records():
+        if row.get("asset_kind") != "fund":
+            continue
+        params = row.get("params")
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except (TypeError, ValueError):
+                params = {}
+        params = params if isinstance(params, dict) else {}
+        evidence = ("nav_observed_at", "nav_observed_data_end",
+                    "analysis_generated_at", "data_stamp")
+        complete = all(params.get(key) not in (None, "") for key in evidence)
+        status = "verified" if complete else "pending_evidence"
+        verified += int(complete)
+        pending += int(not complete)
+        key = (row.get("asset_code"), row.get("model_version"),
+               row.get("price_basis"), status)
+        groups[key] = groups.get(key, 0) + 1
+    return {"total": verified + pending, "verified": verified,
+            "pending_evidence": pending,
+            "groups": [{"asset_code": key[0], "model_version": key[1],
+                        "price_basis": key[2], "evidence_status": key[3],
+                        "count": count}
+                       for key, count in sorted(groups.items(), key=str)]}
 
 
 def pending_records(limit: int = 500) -> List[dict]:

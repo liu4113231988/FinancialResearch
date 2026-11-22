@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const {JSDOM} = require('jsdom');
 const source = fs.readFileSync('src/market_research/api/static/market.js', 'utf8');
 const app = fs.readFileSync('src/market_research/api/static/app.js', 'utf8');
+assert.match(source, /本次未入账/);
+assert.match(app, /registration: m\.registration/);
 const tick = () => new Promise(setImmediate);
 function setup(handler) {
   const dom = new JSDOM(fs.readFileSync('src/market_research/api/static/index.html', 'utf8'), {runScripts:'outside-only', url:'http://localhost'});
