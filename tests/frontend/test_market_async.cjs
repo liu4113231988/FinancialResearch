@@ -29,7 +29,7 @@ function setup(handler) {
   let resolvePost, count=0; const calls=[];
   const h=setup((url, opts) => {
     calls.push(url);
-    if(url==='/api/market/analyze') {count++;return new Promise(r=>resolvePost=r);}
+    if(url==='/api/v1/market/analyze') {count++;return new Promise(r=>resolvePost=r);}
     if(url.endsWith('/cancel')) return Promise.resolve({});
     return new Promise(()=>{});
   });
@@ -38,7 +38,7 @@ function setup(handler) {
   assert.equal(h.d.getElementById('marketCancel').hidden,false);
   h.d.getElementById('marketCancel').click();
   resolvePost({job_id:'pending'}); await first;
-  assert(calls.includes('/api/job/pending/cancel'));
+  assert(calls.includes('/api/v1/job/pending/cancel'));
   assert.equal(h.d.getElementById('runBtn').disabled,false);
   const watchOptions = () => [...h.d.getElementById('watchSel').options].map(o => o.textContent);
   h.d.querySelector('[data-asset="fund"]').click();
@@ -55,7 +55,7 @@ function setup(handler) {
 
   let reads=0;
   const retry=setup(url => {
-    if(url==='/api/market/analyze') return Promise.resolve({job_id:'retry'});
+    if(url==='/api/v1/market/analyze') return Promise.resolve({job_id:'retry'});
     reads++; if(reads<3) return Promise.reject(Error('temporary offline'));
     return Promise.resolve({status:'error',error:'terminal'});
   });
@@ -64,7 +64,7 @@ function setup(handler) {
 
   let polls=0;
   const limit=setup(url => {
-    if(url==='/api/market/analyze') return Promise.resolve({job_id:'long'});
+    if(url==='/api/v1/market/analyze') return Promise.resolve({job_id:'long'});
     if(url.endsWith('/cancel')) return Promise.resolve({});
     polls++;return Promise.resolve({status:'running'});
   });
@@ -87,8 +87,8 @@ function setup(handler) {
     series:{dates:[],close:[],candles:[],ma:{},drawdown:[],volatility:[]}};
   let finishRead;
   const switched=setup(url => {
-    if(url==='/api/market/analyze') return Promise.resolve({job_id:'switched'});
-    if(url.startsWith('/api/result/')) return Promise.resolve({result:fixture});
+    if(url==='/api/v1/market/analyze') return Promise.resolve({job_id:'switched'});
+    if(url.startsWith('/api/v1/result/')) return Promise.resolve({result:fixture});
     return new Promise(r=>finishRead=r);
   });
   const work=switched.w.MarketApp.submit('600519'); await tick();
@@ -106,7 +106,7 @@ function setup(handler) {
 
   let lateRead, submissions=0;
   const cancelled=setup(url => {
-    if(url==='/api/market/analyze') return ++submissions===1 ? Promise.resolve({job_id:'old'}) : new Promise(()=>{});
+    if(url==='/api/v1/market/analyze') return ++submissions===1 ? Promise.resolve({job_id:'old'}) : new Promise(()=>{});
     if(url.endsWith('/cancel')) return Promise.resolve({});
     return new Promise(r=>lateRead=r);
   });

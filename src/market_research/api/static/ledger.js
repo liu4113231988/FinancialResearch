@@ -1,5 +1,6 @@
 /* Prediction ledger: read-only backtest summary, independent of the research workspace. */
 'use strict';
+const API = '/api/v1';
 (() => {
   const $ = id => document.getElementById(id);
   const dialog = $('predictionLedger');
@@ -64,7 +65,7 @@
     try {
       const group = $('ledgerGroupBy').value;
       const query = group ? '?group_by=' + encodeURIComponent(group) : '';
-      const data = await api('/api/predictions/summary' + query);
+      const data = await api(API + '/predictions/summary' + query);
       const stats = data.overall || {};
       overview(stats);
       renderRows(stats, data.groups);

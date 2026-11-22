@@ -1,5 +1,6 @@
 /* 股票与指数工作区：入口切换、请求状态和市场图表。 */
 'use strict';
+const API = '/api/v1';
 window.MarketApp = (() => {
   const el = id => document.getElementById(id);
   const views = { stock: {}, index: {}, fund: {} };
@@ -98,7 +99,7 @@ window.MarketApp = (() => {
     task.cancelRequested = true;
     if (!task.id) { status('正在等待任务编号，收到后将取消…'); return; }
     try {
-      await request('/api/job/' + task.id + '/cancel', {method: 'POST'});
+      await request(API + '/job/' + task.id + '/cancel', {method: 'POST'});
       if (activeTask !== task) return;
       activeTask = null; setBusy(false); status('任务已取消。');
     } catch (error) {
@@ -121,7 +122,7 @@ window.MarketApp = (() => {
     activeTask = task; setBusy(true);
     status(`正在读取 ${code} 的日线行情…`);
     try {
-      const submission = await request('/api/market/analyze', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      const submission = await request(API + '/market/analyze', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
       task.id = submission.job_id;
       if (task.cancelRequested) await cancel();
       for (let polls = 0; polls < 1200 && activeTask === task; polls++) {
@@ -132,12 +133,12 @@ window.MarketApp = (() => {
           if (activeTask !== task) return;
         }
         if (activeTask !== task) return;
-        const job = await request('/api/job/' + task.id, {}, true);
+        const job = await request(API + '/job/' + task.id, {}, true);
         if (activeTask !== task) return;
         if (job.status === 'error') { activeTask = null; throw new Error(job.error); }
         if (kind === body.kind) status(`${code} · ${job.stage} · ${Math.round((job.progress || 0) * 100)}%`);
         if (job.status === 'done') {
-          const response = await request('/api/result/' + task.id, {}, true);
+          const response = await request(API + '/result/' + task.id, {}, true);
           if (activeTask !== task) return;
           activeTask = null;
           if (kind !== body.kind) { views[body.kind].result = response.result; return; }

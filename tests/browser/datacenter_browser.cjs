@@ -50,9 +50,9 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await capture('polish-empty-search');
     await set('assetSearch',''); await evaluate("document.querySelector('#assetSearch').dispatchEvent(new Event('input'))");
     // UI-only states and mutation interception, never add test symbols to production.
-    await evaluate(`(async()=>{window.__dcFetch=window.fetch;window.__dcSnapshot=await(await fetch('/api/sync')).json();window.__dcMode='partial';window.__dcRequests=[];
+    await evaluate(`(async()=>{window.__dcFetch=window.fetch;window.__dcSnapshot=await(await fetch('/api/v1/sync')).json();window.__dcMode='partial';window.__dcRequests=[];
       window.fetch=async(url,options)=>{
-        if(url==='/api/sync'){
+        if(url==='/api/v1/sync'){
           await new Promise(r=>setTimeout(r,500));
           if(window.__dcMode==='error')return {ok:false,json:async()=>({error:'测试：行情服务暂不可用'})};
           const s=structuredClone(window.__dcSnapshot);
@@ -60,7 +60,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
           else{s.assets=s.assets.slice(0,4);s.assets[0].state='error';s.assets[0].error='测试：上游连接超时，上一份行情已保留。';s.assets[1].state='running';}
           return {ok:true,json:async()=>s};
         }
-        if(url==='/api/sync/retry'||url==='/api/sync/assets'){window.__dcRequests.push({url,body:JSON.parse(options.body)});return {ok:true,json:async()=>({ok:true,queued:true})};}
+        if(url==='/api/v1/sync/retry'||url==='/api/v1/sync/assets'){window.__dcRequests.push({url,body:JSON.parse(options.body)});return {ok:true,json:async()=>({ok:true,queued:true})};}
         return window.__dcFetch(url,options);
       };})()`);
     await click('#refreshSync'); await capture('polish-loading');
@@ -68,7 +68,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await capture('polish-partial');
     await click('#syncAssetRows .sync-row-action');
     await until("window.__dcRequests.length===1 && !document.querySelector('#refreshSync').disabled");
-    assert.equal(await evaluate("window.__dcRequests[0].url"),'/api/sync/retry');
+    assert.equal(await evaluate("window.__dcRequests[0].url"),'/api/v1/sync/retry');
     await set('addAssetCode','600519'); await click('#addAssetButton');
     await until("window.__dcRequests.length===2 && !document.querySelector('#addAssetButton').disabled");
     assert.equal(await evaluate("window.__dcRequests[1].body.basis"),'qfq');
@@ -82,7 +82,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await capture('polish-empty-data');
     // A mutation during an older status request must trigger a trailing refresh.
     await evaluate(`window.__dcMode='partial';window.__dcReads=0;window.__dcWrappedFetch=window.fetch;
-      window.fetch=async(url,options)=>{if(url==='/api/sync')window.__dcReads++;return window.__dcWrappedFetch(url,options);}`);
+      window.fetch=async(url,options)=>{if(url==='/api/v1/sync')window.__dcReads++;return window.__dcWrappedFetch(url,options);}`);
     await click('#refreshSync');
     await set('addAssetCode','600519'); await click('#addAssetButton');
     await until("window.__dcReads>=2 && !document.querySelector('#refreshSync').disabled");

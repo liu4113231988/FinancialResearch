@@ -382,6 +382,10 @@ def settle(limit: int = 500, today: date | None = None, fetch: bool = False, *,
                 counts["awaiting_close_evidence"] += 1
             continue
         if not diagnostic_only:
-            ledger.update_record(record["id"], judged_at=checked_at.timestamp(), **verdict)
+            updated = ledger.update_record(
+                record["id"], judged_at=checked_at.timestamp(), **verdict)
+            if not updated:
+                # 并发结算时另一进程已写回；本次不重复计数。
+                continue
         counts[verdict.get("label")] = counts.get(verdict.get("label"), 0) + 1
     return counts

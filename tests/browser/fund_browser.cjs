@@ -52,7 +52,7 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.equal(await evaluate("windowStart(3,'2024-02-29')"),'2021-02-28');
     await capture('fund-desktop-empty');
     await evaluate(`window.__fundFixture=${JSON.stringify(fixture)};window.__fundRequests=[];window.__fundFetch=window.fetch;
-      window.fetch=async(url,options)=>{if(url==='/api/analyze'){window.__fundRequests.push(JSON.parse(options.body));return {ok:true,json:async()=>({cached:true,result:structuredClone(window.__fundFixture)})};}return window.__fundFetch(url,options);};`);
+      window.fetch=async(url,options)=>{if(url==='/api/v1/analyze'){window.__fundRequests.push(JSON.parse(options.body));return {ok:true,json:async()=>({cached:true,result:structuredClone(window.__fundFixture)})};}return window.__fundFetch(url,options);};`);
     await evaluate("document.querySelector('#codeInput').value=window.__fundFixture.code;document.querySelector('#fundStart').value='2025-01-01';document.querySelector('#fundEnd').value='2026-01-01';document.querySelector('#fundStart').dispatchEvent(new Event('change',{bubbles:true}))");
     await click('#fundApply'); await until("!document.querySelector('#alert').hidden");
     assert.equal(await evaluate('window.__fundRequests.length'),0);

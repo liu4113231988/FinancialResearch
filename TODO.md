@@ -84,9 +84,11 @@
 
 #### 剩余未完成项
 
-- **P2-42 剩余**：`FIL_SYNC_TIME` 非法值经 `GET /api/sync`（`routes/sync.py:11`）抛 `ValueError` 仍被全局处理器标成 400 `field=params` —— 服务端配置错误需单独分类；其余子项已修。
-- **P3-H 补充** `[产品]`：前端 `static/app.js:939,1000,1019,1068,1079`、`market.js`、`data-center.js`、`ledger.js` 全部硬编码 `/api/*` 旧路径；`api/version.py:21-28` 的 2027-04-01 legacy 自动下线若按期触发，SPA 当天全量 404。auto 下线必须与前端自身迁移同批决策，不能只等外部客户端。
-- **P3-M 剩余**：不可回收的僵尸子进程永久占用并发名额、队列停摆（`worker.py:20-43,147-158`），只能重启 supervisor。
+- **P2-42**：`FIL_SYNC_TIME` 非法值已由 `routes/sync.py` 单独分类为 500 `field=config`，并由 `tests/api/test_routes.py::test_sync_schedule_configuration_error_is_server_side` 覆盖；此前计划基线未同步更新。
+- **P3-H 前端迁移**：`app.js`、`market.js`、`data-center.js`、`ledger.js` 已统一通过 `API='/api/v1'` 请求，不再硬编码旧 `/api/*`；后端 legacy 路径仍按 `api/version.py` 计划值保留至 2027-04-01，仅影响外部客户端 `[产品]`。
+- **P3-M**：`worker._reap_children` 对连续多轮无法回收的子进程强制释放本地并发名额并转入失败/重试，避免 supervisor 停摆；真实僵尸进程恢复仍待部署环境观察。
+
+**实施记录（2026-11-22，工作区改动）**：`update_record` 返回实际更新行数，并发结算不再重复计数；`_reap_children` 连续三轮无法 `wait()` 时释放本地名额并按超时/崩溃分类；四份 SPA 脚本统一用 `API='/api/v1'`，浏览器与前端测试夹具同步迁移。610 项 unittest 与三套前端脚本通过；未跑浏览器交互或部署环境僵尸进程实机复现。
 - **P3-N**（行为层，会改变资金曲线，未动）：`market/capital.py:71` 无 `units==0` 门控 vs `market/execution.py:99` 仅空仓首买；`capital.py:143-145` `_retry_note` 文案与 orders=targets.shift(1) 实现不符；`compare_probability_execution` 两种账户实际评估不同策略。
 - **P3-O**（口径）：离线 `(future > 0)`（`market/technical.py:90`）把平盘计入下跌类，台账 `neutral` 不入分母（`predictions/judge.py:173-176`）；跨口径比较 accuracy/Brier 有偏。
 - **P3-P**：`market/technical.py:130-137,202-208` 少样本仍输出数值（仅 `ok=False` 标记），未像 `market_validation.py` 留空。
@@ -178,7 +180,8 @@
 **该计划初次编写时仅为计划**：未修改业务代码、研究配置、行情/预测数据库或冻结协议。下方勾选状态与实施记录是后续按计划执行的结果；涉及 `[产品]` / `[研究口径]` / `[法务]` / `[运维]` 的决策，由项目负责人或相应责任方确认，不把本次文档更新视为批量迁移、重判、部署或启用新默认值的授权。
 
 - 复审基线：`9f75233`，开始时工作区无修改。2026-11-16 实跑 `PYTHONUTF8=1 uv run --locked python -m unittest discover -s tests -t . -p 'test_*.py'`，**585 项通过，94.259 秒**；三套前端脚本 `test_refit.js`、`test_ui_async.cjs`、`test_market_async.cjs` 通过。
-- 已修并保留回归：P1-22 原始价结算、P1-23 独立基金净值预测轴、P1-24/P2-44 PCR 折内预处理与维度边界、P1-26 持仓旧结果、P1-27/P1-28 数据降级及持仓部分失败、P2-43 持仓参数、P1-29 基金入账及历史记录审计、P1-30/P1-31 结算时点与收盘证据。**不重新实现或重复立项**。
+- 当前基线（2026-11-22）：**610 项通过，149.558 秒**；三套前端脚本通过。`FIL_SYNC_TIME` 配置错误已实测为 500 `field=config`，此前“剩余”描述是文档未同步。
+- 已修并保留回归：P1-22 原始价结算、P1-23 独立基金净值预测轴、P1-24/P2-44 PCR 折内预处理与维度边界、P1-26 持仓旧结果、P1-27/P1-28 数据降级及持仓部分失败、P2-43 持仓参数、P1-29 基金入账及历史记录审计、P1-30/P1-31 结算时点与收盘证据、P2-42 配置错误分类、P3-H 前端 `/api/v1` 迁移、P3-M 不可回收子进程释放本地名额。**不重新实现或重复立项**。
 - 仍需完成：P1-25 全区间选池、P3-R 实际 OOS 门槛、P3-O 评分口径、P3-P 少样本展示、P2-31 失效模型推荐门禁。
 - 正面检查：种子 99、800 个工作日、`close=100*exp(cumsum(N(.0002,.012)))`，OHLC 分别为 close×(.999,1.01,.99,1)；只将位置 651 之后的 OHLC 乘 1.5，5/20 日模型此前的概率均不变。该检查仅证明固定日期/候选定义下的前缀稳定性，不证明预测优势。
 - 本轮未跑浏览器交互、真实行情研究重放或部署。当前本地结果目录未找到可核验的历史研究报告；已有文档中的 17/48 候选改善、40/60 校准拟合成功等仅是历史记录，不作为当前版本验收。

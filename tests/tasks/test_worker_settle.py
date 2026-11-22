@@ -1,5 +1,6 @@
 """worker 内置台账结算调度：开关、节流与失败隔离的离线回归。"""
 import os
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,41 @@ class SettleIntervalTests(unittest.TestCase):
             self.assertEqual(worker._settle_interval_seconds(), 3600.)
         with patch.dict(os.environ, {'FIL_PREDICTION_SETTLE_MINUTES': '15'}, clear=False):
             self.assertEqual(worker._settle_interval_seconds(), 900.)
+
+
+class ChildReapTests(unittest.TestCase):
+    def test_unreapable_child_releases_local_slot(self):
+        child = MagicMock()
+        child.poll.return_value = None
+        children = {'job-1': (child, {'token': 't', 'started': time.time()})}
+        attempts = {}
+        with patch.object(worker.JOBS, 'public',
+                          return_value={'status': 'error'}), \
+                patch.object(worker, '_stop_child', return_value=False), \
+                patch.object(worker.JOBS, 'retry_crashed') as retry, \
+                patch.object(worker, 'LOG'):
+            for _ in range(worker._UNREAPABLE_ATTEMPTS):
+                worker._reap_children(children, attempts)
+        self.assertEqual(children, {})
+        self.assertEqual(attempts, {})
+        retry.assert_called_once_with(
+            'job-1', 't', '计算进程无法回收，释放本地名额')
+
+    def test_timed_out_unreapable_child_is_failed(self):
+        child = MagicMock()
+        child.poll.return_value = None
+        children = {'job-2': (child, {'token': 't2',
+                                      'started': time.time() - 10000})}
+        attempts = {}
+        with patch.object(worker.JOBS, 'public',
+                          return_value={'status': 'running'}), \
+                patch.object(worker, '_stop_child', return_value=False), \
+                patch.object(worker.JOBS, 'fail') as fail, \
+                patch.object(worker, 'LOG'):
+            for _ in range(worker._UNREAPABLE_ATTEMPTS):
+                worker._reap_children(children, attempts)
+        self.assertEqual(children, {})
+        fail.assert_called_once_with('job-2', '计算超时，进程无法回收', token='t2')
 
 
 class SettleScheduleTests(unittest.TestCase):

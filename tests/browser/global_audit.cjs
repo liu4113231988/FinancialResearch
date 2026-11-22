@@ -38,14 +38,14 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
       window.__originalFetch=fetch;window.__calls=[];window.__holdBacktest=false;
       window.fetch=async(url,options)=>{
         const reply=data=>({ok:true,status:200,json:async()=>data});
-        if(url.startsWith('/api/name/'))return reply({found:true});
-        if(url==='/api/market/analyze'){window.__calls.push(JSON.parse(options.body));return reply({job_id:'market-audit'});}
-        if(url==='/api/job/market-audit')return reply({status:'done'});
-        if(url==='/api/result/market-audit')return reply({result:structuredClone(window.__stock)});
-        if(url==='/api/analyze')return reply({cached:true,result:structuredClone(window.__fund)});
-        if(url==='/api/backtest'){window.__btBody=JSON.parse(options.body);return reply({job_id:'backtest-audit'});}
-        if(url==='/api/job/backtest-audit')return new Promise(resolve=>window.__releaseBacktest=()=>resolve(reply({status:'done'})));
-        if(url==='/api/result/backtest-audit'){window.__staleBacktestApplied=true;throw Error('Stale result must not be read');}
+        if(url.startsWith('/api/v1/name/'))return reply({found:true});
+        if(url==='/api/v1/market/analyze'){window.__calls.push(JSON.parse(options.body));return reply({job_id:'market-audit'});}
+        if(url==='/api/v1/job/market-audit')return reply({status:'done'});
+        if(url==='/api/v1/result/market-audit')return reply({result:structuredClone(window.__stock)});
+        if(url==='/api/v1/analyze')return reply({cached:true,result:structuredClone(window.__fund)});
+        if(url==='/api/v1/backtest'){window.__btBody=JSON.parse(options.body);return reply({job_id:'backtest-audit'});}
+        if(url==='/api/v1/job/backtest-audit')return new Promise(resolve=>window.__releaseBacktest=()=>resolve(reply({status:'done'})));
+        if(url==='/api/v1/result/backtest-audit'){window.__staleBacktestApplied=true;throw Error('Stale result must not be read');}
         return window.__originalFetch(url,options);
       }`);
     // Market date minimum is enforced before submission; chart switch survives repeated active navigation.

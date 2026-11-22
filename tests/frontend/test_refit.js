@@ -7,6 +7,7 @@ const functionText = source.slice(source.indexOf('async function applyParams()')
 let submitted;
 let applied;
 const context = {
+  API: '/api/v1',
   fundGeneration: 0,
   correlationGeneration: 0,
   setFundBusy() {},

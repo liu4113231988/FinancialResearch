@@ -13,8 +13,8 @@ const context = {URLSearchParams, setTimeout: fn => fn(),
   setProgress() {throw Error('Stale fund progress applied');},
 };
 vm.createContext(context);
-vm.runInContext(source.slice(source.indexOf('let fundGeneration ='), source.indexOf('// ==================================================================== 运行分析')), context);
-vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.indexOf('function applyResult(res)')), context);
+vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('let fundGeneration ='), source.indexOf('// ==================================================================== 运行分析')), context);
+vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('async function poll(jid'), source.indexOf('function applyResult(res)')), context);
 (async () => {
   const first = context.updateCorrelation(60);
   const second = context.updateCorrelation(120);
@@ -41,14 +41,14 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
     renderBacktest() {throw Error('Stale backtest result');},
   };
   vm.createContext(btContext);
-  vm.runInContext(source.slice(source.indexOf('async function pollBacktest('), source.indexOf('function renderBacktest(')), btContext);
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('async function pollBacktest('), source.indexOf('function renderBacktest(')), btContext);
   const btFirst = btContext.pollBacktest('first'); await Promise.resolve();
   btContext.fundGeneration++;
   btPending[0].resolve({status:'error',error:'obsolete'}); await btFirst;
   assert.equal(btPending.length,1);
   const btSecond = btContext.pollBacktest('second'); await Promise.resolve();
   btPending[1].resolve({status:'done'}); await new Promise(setImmediate);
-  assert.equal(btPending[2].url,'/api/result/second');
+  assert.equal(btPending[2].url,'/api/v1/result/second');
   btContext.fundGeneration++;
   btPending[2].resolve({result:{}}); await btSecond;
   // 取消按钮：必须真的打到后端，并且递增代次让在途轮询退出。
@@ -60,11 +60,11 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
     invalidateFund() {invalidated++;}, $: () => ({}), showAlert() {},
   };
   vm.createContext(cancelContext);
-  vm.runInContext(source.slice(source.indexOf('async function cancelActiveJob('),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('async function cancelActiveJob('),
                                source.indexOf('function applyResult(res)')),
                   cancelContext);
   await cancelContext.cancelActiveJob();
-  assert.deepEqual(cancelled, [['/api/job/job-7/cancel', 'POST']]);
+  assert.deepEqual(cancelled, [['/api/v1/job/job-7/cancel', 'POST']]);
   assert.equal(invalidated, 1);
   assert.equal(cancelContext.activeJob, null);
   // 无模型可渲染时不得静默 return：详情区必须换成说明，而不是留着上一次的数字。
@@ -77,7 +77,7 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
     },
   };
   vm.createContext(selContext);
-  vm.runInContext(source.slice(source.indexOf('function renderSelected'),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('function renderSelected'),
                                source.indexOf('function chart(id, opt)')), selContext);
   selContext.renderSelected();
   assert.equal(selNodes.get('selName').textContent, '无模型详情');
@@ -97,17 +97,17 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
     showAlert(message) {corrAlerts.push(message);},
   };
   vm.createContext(corrContext);
-  vm.runInContext(source.slice(source.indexOf('let fundGeneration ='), source.indexOf('// ==================================================================== 运行分析')), corrContext);
-  vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.indexOf('function applyResult(res)')), corrContext);
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('let fundGeneration ='), source.indexOf('// ==================================================================== 运行分析')), corrContext);
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('async function poll(jid'), source.indexOf('function applyResult(res)')), corrContext);
   const corrJob = corrContext.updateCorrelation(150);
   await Promise.resolve();
   pending[4].resolve({ok:true, job_id:'corr9'});
   await new Promise(setImmediate);
-  assert.equal(pending[5].url, '/api/job/corr9');
+  assert.equal(pending[5].url, '/api/v1/job/corr9');
   assert.ok(corrAlerts.some(m => m && m.includes('后台重算')));
   pending[5].resolve({status:'done'});
   await new Promise(setImmediate);
-  assert.equal(pending[6].url, '/api/result/corr9');
+  assert.equal(pending[6].url, '/api/v1/result/corr9');
   pending[6].resolve({result:{correlation:'queued'}});
   await corrJob;
   assert.equal(corrContext.S.result.correlation, 'queued');
@@ -133,7 +133,7 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   // 119：缺字段结果先规范化；渲染失败必须隐藏结果区，不留混合页。
   const normCtx = {};
   vm.createContext(normCtx);
-  vm.runInContext(source.slice(source.indexOf('function normalizeResult('),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('function normalizeResult('),
                                source.indexOf('function clearResultCharts(')), normCtx);
   // vm 是独立 realm，其数组原型与主 realm 不同，deepEqual 的期望值也要在同一 realm 生成
   const empty = vm.runInContext('[]', normCtx);
@@ -153,7 +153,7 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   // 120：错误码提示必须给出可操作的下一步，而不是一律显示后端 message。
   const errCtx = {};
   vm.createContext(errCtx);
-  vm.runInContext(source.slice(source.indexOf('function apiErrorText('),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('function apiErrorText('),
                                source.indexOf('function showAlert(msg)')), errCtx);
   assert.match(errCtx.apiErrorText(429, 'busy', '12'), /队列忙/);
   assert.match(errCtx.apiErrorText(429, 'busy', '12'), /12 秒/);
@@ -191,7 +191,7 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
     showAlert: message => holdAlerts.push(message),
   };
   vm.createContext(holdContext);
-  vm.runInContext(source.slice(source.indexOf('async function runHoldings('),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('async function runHoldings('),
                                source.indexOf('async function pollHoldings(')), holdContext);
   await holdContext.runHoldings();
   assert.equal(holdCalls.length, 0);
@@ -220,9 +220,9 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
     'renderRank', 'renderSelected', 'renderNav', 'renderFundForecast', 'renderCorr',
     'syncBacktestDefaults', 'showAlert', 'setProgress']) resultContext[name] = () => {};
   vm.createContext(resultContext);
-  vm.runInContext(source.slice(source.indexOf('function applyResult('),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('function applyResult('),
                                source.indexOf('function renderHead(')), resultContext);
-  vm.runInContext(source.slice(source.indexOf('async function pollHoldings('),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('async function pollHoldings('),
                                source.indexOf('function _cell(')), resultContext);
   for (const next of [{code: '000001'}, {code: '000001', start: '2020-01-01'},
     {code: '000001', params: {ridge: {alpha: 1}}}, null]) {
@@ -254,7 +254,7 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
     showAlert(message) {if (message) throw new Error(message);},
   };
   vm.createContext(raceContext);
-  vm.runInContext(source.slice(source.indexOf('async function runBacktest('),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('async function runBacktest('),
                                source.indexOf('async function pollBacktest(')), raceContext);
   const oldRun = raceContext.runBacktest();
   await new Promise(setImmediate);
@@ -282,15 +282,15 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
     },
     api: (url) => {
       submitCalls.push(url);
-      if (url === '/api/analyze')
+      if (url === '/api/v1/analyze')
         return new Promise(resolve => {resolveAnalyze = resolve;});
       return Promise.resolve({});
     },
   };
   vm.createContext(submitContext);
-  vm.runInContext(source.slice(source.indexOf('let fundGeneration'),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('let fundGeneration'),
                                source.indexOf('function setProgress')), submitContext);
-  vm.runInContext(source.slice(source.indexOf('async function cancelActiveJob'),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('async function cancelActiveJob'),
                                source.indexOf('function applyResult(')), submitContext);
   const submitting = submitContext.run('110022');
   await new Promise(setImmediate);
@@ -298,7 +298,7 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   resolveAnalyze({job_id: 'late-job'});
   await new Promise(setImmediate); await new Promise(setImmediate);
   await submitting;
-  assert.ok(submitCalls.includes('/api/job/late-job/cancel'));
+  assert.ok(submitCalls.includes('/api/v1/job/late-job/cancel'));
   assert.ok(submitAlerts.some(m => typeof m === 'string' && m.includes('自动取消')));
 
   // 相关性窗口必须钳制到 [30,500]，非法值回退 120。
@@ -314,7 +314,7 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
     api: async url => {clampUrls.push(url); return {correlation: {}};},
   };
   vm.createContext(clampContext);
-  vm.runInContext(source.slice(source.indexOf('let fundGeneration'),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('let fundGeneration'),
                                source.indexOf('function setProgress')), clampContext);
   await clampContext.updateCorrelation(1);
   await clampContext.updateCorrelation(9999);
@@ -342,14 +342,14 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
     },
   };
   vm.createContext(retryContext);
-  vm.runInContext(source.slice(source.indexOf('let fundGeneration'),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('let fundGeneration'),
                                source.indexOf('function setProgress')), retryContext);
-  vm.runInContext(source.slice(source.indexOf('async function poll(jid'),
+  vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('async function poll(jid'),
                                source.indexOf('function applyResult(')), retryContext);
   vm.runInContext('activeJob = "analysis-job"; correlationJob = null; correlationGeneration = 0;',
                   retryContext);
   await retryContext.pollCorrelation('corr-job', 120, retryTarget, 0);
-  assert.equal(retryCalls.filter(url => url.startsWith('/api/job/')).length, 2);
+  assert.equal(retryCalls.filter(url => url.startsWith('/api/v1/job/')).length, 2);
   assert.equal(retryContext.S.result.correlation.ok, true);
   assert.equal(vm.runInContext('activeJob', retryContext), 'analysis-job');
   assert.equal(vm.runInContext('correlationJob', retryContext), null);

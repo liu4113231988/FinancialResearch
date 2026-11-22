@@ -481,6 +481,17 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual(self._judge(record, bars, axis, target.date())["status"],
                          "pending")
 
+    def test_concurrent_settlement_does_not_double_count(self):
+        prices = self._prices()
+        with patch.object(ledger, "pending_records",
+                          return_value=[self._record()]), \
+                patch.object(ledger, "update_record", return_value=0), \
+                patch.object(judge, "_load_prices", return_value=prices), \
+                patch.object(judge, "_sessions", return_value=SESSIONS):
+            counts = judge.settle(now=_settlement_time(date(2026, 11, 20)))
+        self.assertEqual(counts["checked"], 1)
+        self.assertEqual(counts["correct"], 0)
+
     def test_calendar_outage_keeps_missing_quotes_pending(self):
         prices = self._prices().loc[:"2026-11-05"]
         record = self._record()

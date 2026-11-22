@@ -58,14 +58,14 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await capture('desktop-index');
     // Controlled UI-only fixtures exercise partial/error/loading and stale-result handling.
     await evaluate(`window.__originalFetch=window.fetch; window.__testPartial=false; window.fetch=async (url, options) => {
-      if (url === '/api/market/analyze') return {ok:true,status:200,json:async()=>({job_id:'ui-state'})};
-      if (url === '/api/job/ui-state') {await new Promise(r=>setTimeout(r,1200)); return {ok:true,status:200,json:async()=>({status:'done'})};}
-      if (url === '/api/result/ui-state') {return {ok:true,status:200,json:async()=>({result:window.__testResult})};}
+      if (url === '/api/v1/market/analyze') return {ok:true,status:200,json:async()=>({job_id:'ui-state'})};
+      if (url === '/api/v1/job/ui-state') {await new Promise(r=>setTimeout(r,1200)); return {ok:true,status:200,json:async()=>({status:'done'})};}
+      if (url === '/api/v1/result/ui-state') {return {ok:true,status:200,json:async()=>({result:window.__testResult})};}
       return window.__originalFetch(url,options);
     }`);
     // Get a real market payload from the running service through the completed result DOM is unnecessary;
     // invoke the real API once and store its result, then alter only comparison availability.
-    const fixture = await evaluate(`(async()=>{const r=await window.__originalFetch('/api/market/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'stock',code:'600519',start:'2025-01-01',end:'2026-10-30'})});const j=await r.json();for(let i=0;i<100;i++){await new Promise(r=>setTimeout(r,200));const s=await (await window.__originalFetch('/api/job/'+j.job_id)).json();if(s.status==='done')return (await(await window.__originalFetch('/api/result/'+j.job_id)).json()).result;}throw Error('fixture job timeout');})()`);
+    const fixture = await evaluate(`(async()=>{const r=await window.__originalFetch('/api/v1/market/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'stock',code:'600519',start:'2025-01-01',end:'2026-10-30'})});const j=await r.json();for(let i=0;i<100;i++){await new Promise(r=>setTimeout(r,200));const s=await (await window.__originalFetch('/api/v1/job/'+j.job_id)).json();if(s.status==='done')return (await(await window.__originalFetch('/api/v1/result/'+j.job_id)).json()).result;}throw Error('fixture job timeout');})()`);
     await evaluate(`window.__testResult=${JSON.stringify(fixture)};window.__testResult.comparison={ok:false,name:'沪深300'};window.__testResult.warnings=['基准指数暂不可用，已保留价格与风险分析；可点击刷新重试。'];`);
     await click('[data-asset="stock"]');
     await click('#runBtn'); await delay(150); await capture('desktop-loading');

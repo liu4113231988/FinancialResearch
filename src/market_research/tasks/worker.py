@@ -15,6 +15,7 @@ from market_research.settings import Settings
 from market_research.tasks.store import bind_attempt
 
 LOG=logging.getLogger(__name__)
+_UNREAPABLE_ATTEMPTS = 3
 
 
 def _stop_child(child, label, *, tree: bool = True, timeout: float = 10) -> bool:
@@ -41,6 +42,42 @@ def _stop_child(child, label, *, tree: bool = True, timeout: float = 10) -> bool
     except Exception:                                         # noqa: BLE001
         LOG.warning("等待子进程 %s 失败，本轮跳过回收", label, exc_info=True)
         return False
+
+
+def _reap_children(children, stop_attempts):
+    """回收子进程；连续无法回收时释放本地名额，避免队列永久停摆。"""
+    for jid, (child, job) in list(children.items()):
+        state = JOBS.public(jid)
+        timed_out = time.time()-job['started']>Settings.load().job_timeout
+        handled = False
+        if child.poll() is None and (timed_out or not state or state['status']=='error'):
+            if _stop_child(child, jid):
+                stop_attempts.pop(jid, None)
+                if timed_out:
+                    JOBS.fail(jid,'计算超时，进程已终止',token=job['token'])
+                    handled = True
+            else:
+                attempts = stop_attempts.get(jid, 0)+1
+                stop_attempts[jid] = attempts
+                if attempts < _UNREAPABLE_ATTEMPTS:
+                    continue
+                LOG.error('子进程 %s 连续 %d 轮无法回收，强制释放本地并发名额',
+                          jid, attempts)
+                stop_attempts.pop(jid, None)
+                if timed_out:
+                    JOBS.fail(jid,'计算超时，进程无法回收',token=job['token'])
+                else:
+                    JOBS.retry_crashed(jid,job['token'],'计算进程无法回收，释放本地名额')
+                del children[jid]
+                continue
+        if handled:
+            continue
+        if child.poll() is not None:
+            if os.name!='nt':
+                terminate_tree(child)
+            JOBS.retry_crashed(jid,job['token'],f'计算进程退出（{child.returncode}），将按策略重试')
+            del children[jid]
+            stop_attempts.pop(jid, None)
 
 
 def _prune_stale_windows():
@@ -137,6 +174,7 @@ def supervise(once=False):
         stop_path=C.DATA_DIR/'worker.stop'
         stop_path.unlink(missing_ok=True)
         children={}
+        stop_attempts={}
         sync_child=None
         next_sync=0
         settle_child=None
@@ -144,18 +182,7 @@ def supervise(once=False):
         next_settle=time.time()+_settle_interval_seconds()
         try:
             while not stop_path.exists():
-                for jid,(child,job) in list(children.items()):
-                    state=JOBS.public(jid)
-                    timed_out=time.time()-job['started']>Settings.load().job_timeout
-                    if child.poll() is None and (timed_out or not state or state['status']=='error'):
-                        _stop_child(child,jid)
-                        if timed_out:
-                            JOBS.fail(jid,'计算超时，进程已终止',token=job['token'])
-                    if child.poll() is not None:
-                        if os.name!='nt':
-                            terminate_tree(child)
-                        JOBS.retry_crashed(jid,job['token'],f'计算进程退出（{child.returncode}），将按策略重试')
-                        del children[jid]
+                _reap_children(children, stop_attempts)
                 while len(children)<Settings.load().max_jobs:
                     # P2-39：排除本机仍有存活子进程的 jid —— recover 在锁饿死宽限
                     # 之外把任务转回 queued 时，本 supervisor 不重复领取自己还在

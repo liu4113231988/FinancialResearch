@@ -53,13 +53,13 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await evaluate("document.querySelector('#stockIndicatorCharts').scrollIntoView({block:'start'})");await delay(250);await capture('technical-mobile-indicators');
     // Keep actual bars, replace only technical block with actual short-history output.
     await evaluate(`window.__techFetch=fetch;window.__techResult=null;`);
-    const payload=await evaluate(`(async()=>{const j=await(await fetch('/api/market/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'stock',code:'600519',start:'2025-01-01',end:'2026-10-30'})})).json();for(let n=0;n<100;n++){await new Promise(r=>setTimeout(r,250));const s=await(await fetch('/api/job/'+j.job_id)).json();if(s.status==='done')return(await(await fetch('/api/result/'+j.job_id)).json()).result;}throw Error('No fixture');})()`);
+    const payload=await evaluate(`(async()=>{const j=await(await fetch('/api/v1/market/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'stock',code:'600519',start:'2025-01-01',end:'2026-10-30'})})).json();for(let n=0;n<100;n++){await new Promise(r=>setTimeout(r,250));const s=await(await fetch('/api/v1/job/'+j.job_id)).json();if(s.status==='done')return(await(await fetch('/api/v1/result/'+j.job_id)).json()).result;}throw Error('No fixture');})()`);
     const short=JSON.parse(fs.readFileSync('output/ui-evidence/technical-short.json','utf8'));
     payload.technical=short;
     await evaluate(`window.__techResult=${JSON.stringify(payload)};window.fetch=async(url,options)=>{
-      if(url==='/api/market/analyze')return{ok:true,json:async()=>({job_id:'technical-short'})};
-      if(url==='/api/job/technical-short')return{ok:true,json:async()=>({status:'done'})};
-      if(url==='/api/result/technical-short')return{ok:true,json:async()=>({result:window.__techResult})};
+      if(url==='/api/v1/market/analyze')return{ok:true,json:async()=>({job_id:'technical-short'})};
+      if(url==='/api/v1/job/technical-short')return{ok:true,json:async()=>({status:'done'})};
+      if(url==='/api/v1/result/technical-short')return{ok:true,json:async()=>({result:window.__techResult})};
       return window.__techFetch(url,options);
     }`);
     await click('#runBtn'); await until("document.querySelector('#technicalAction').textContent==='等待样本'");

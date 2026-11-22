@@ -658,8 +658,10 @@ def update_record(record_id: str, **fields) -> None:
     assignments = ",".join(f"{key}=?" for key in values)
     with storage.connection() as db:
         _schema(db)
-        db.execute(f"UPDATE prediction_records SET {assignments} WHERE id=? AND status='pending'",
-                   [*values.values(), record_id])
+        result = db.execute(
+            f"UPDATE prediction_records SET {assignments} WHERE id=? AND status='pending'",
+            [*values.values(), record_id])
+        return int(getattr(result, "rowcount", 0) or 0)
 
 
 def migrate_legacy(apply: bool = False) -> dict:

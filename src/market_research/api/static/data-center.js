@@ -1,5 +1,6 @@
 /* Persistent asset synchronization, independent of the research workspace. */
 'use strict';
+const API = '/api/v1';
 (() => {
   const $ = id => document.getElementById(id);
   const dialog = $('dataCenter');
@@ -39,7 +40,7 @@
       button.setAttribute('aria-label', `${button.textContent} ${names.get(a.code) || a.code} ${basis(a)}`);
       button.onclick = async () => {
         button.disabled = true;
-        try {const response = await api('/api/sync/retry', {asset_key:a.asset_key}); feedback(response.queued ? `${a.code} 已排队，将在当前同步批次后处理。` : '该资产正在同步。'); await refresh();}
+        try {const response = await api(API + '/sync/retry', {asset_key:a.asset_key}); feedback(response.queued ? `${a.code} 已排队，将在当前同步批次后处理。` : '该资产正在同步。'); await refresh();}
         catch(error) {feedback(error.message, true); button.disabled = false;}
       };
       actions.append(button); tr.append(asset,status,time,count,actions); return tr;
@@ -72,7 +73,7 @@
   async function refresh() {
     if (busy) {refreshAgain = true; return;}
     busy = true; $('refreshSync').disabled = true; $('refreshSync').textContent = '读取中…';
-    try {snapshot = await api('/api/sync'); render(); if (readError && $('syncFeedback').textContent === readError) feedback(''); readError = '';}
+    try {snapshot = await api(API + '/sync'); render(); if (readError && $('syncFeedback').textContent === readError) feedback(''); readError = '';}
     catch(error) {$('syncIndicator').textContent = '同步状态不可用 · 数据中心'; readError = '无法读取同步状态：' + error.message; feedback(readError, true); if (!snapshot) {$('syncEmpty').hidden = false; $('syncEmpty').textContent = '同步状态读取失败，请点击刷新状态重试。';}}
     finally {busy = false; $('refreshSync').disabled = false; $('refreshSync').textContent = '刷新状态'; if (refreshAgain) {refreshAgain = false; refresh();}}
   }
@@ -95,12 +96,12 @@
   $('syncLastPage').onclick = () => {page = Number.MAX_SAFE_INTEGER; renderRows();};
   $('addAssetForm').onsubmit = async event => {
     event.preventDefault(); const button = $('addAssetButton'); button.disabled = true;
-    try {const code=$('addAssetCode').value.trim(), kind=$('addAssetKind').value; await api('/api/sync/assets',{kind,code,basis:kind==='index'?'':$('addAssetBasis').value}); feedback(`${code} 已加入研究范围；新增口径会自动补齐历史。`); $('assetSearch').value=''; $('assetState').value=''; $('assetKind').value=kind; page=1; await refresh();}
+    try {const code=$('addAssetCode').value.trim(), kind=$('addAssetKind').value; await api(API + '/sync/assets',{kind,code,basis:kind==='index'?'':$('addAssetBasis').value}); feedback(`${code} 已加入研究范围；新增口径会自动补齐历史。`); $('assetSearch').value=''; $('assetState').value=''; $('assetKind').value=kind; page=1; await refresh();}
     catch(error) {feedback(error.message,true);} finally {button.disabled=false;}
   };
   $('workspaceDate').textContent = new Date().toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long',timeZone:'Asia/Shanghai'});
   function loadNames() {
-    return api('/api/catalog').then(cat => {
+    return api(API + '/catalog').then(cat => {
       for (const item of [...cat.known_funds,...cat.assets.stocks,...cat.assets.indices]) names.set(item.code,item.name);
       if(snapshot) renderRows();
       $('syncUpdated').textContent = '状态将自动刷新';

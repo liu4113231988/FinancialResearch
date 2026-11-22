@@ -1,5 +1,6 @@
 /* Market Research · 前端逻辑 */
 'use strict';
+const API = '/api/v1';
 
 // ==================================================================== 全局状态
 const S = {
@@ -518,7 +519,7 @@ function showAlert(msg) {
 // 两者不能混为一谈 —— 只在 false 时提示，且不阻断分析。
 async function checkName(code, token = fundGeneration) {
   try {
-    const r = await api(`/api/name/${code}`);
+    const r = await api(`${API}/name/${code}`);
     if (token === fundGeneration && (!window.MarketApp || MarketApp.kind === 'fund')
         && $('codeInput').value.trim() === code && r && r.found === false && !r.error) {
       showAlert(`未在基金名录中查到 ${code}，请确认代码是否正确。`);
@@ -695,7 +696,7 @@ function downloadJson(payload, filename) {
   try {
     if (state) state.textContent = '正在读取名录…';
     if (retry) retry.hidden = true;
-    S.cat = await api('/api/catalog');
+    S.cat = await api(API + '/catalog');
     if (state) state.textContent = '';
   } catch (e) {
     if (state) state.textContent = '名录读取失败';
@@ -714,7 +715,7 @@ function downloadJson(payload, filename) {
   });
   // P2-36：声明文案与位置由后端配置；失败时保留页面内置默认文案
   try {
-    const d = await api('/api/disclosure');
+    const d = await api(API + '/disclosure');
     const banner = $('disclosureBanner');
     if (banner && d.text) {
       banner.replaceChildren();
@@ -954,7 +955,7 @@ async function updateCorrelation(win) {
   const end = ('window_requested_end' in m) ? m.window_requested_end : m.end;
   if (end) query.set('end', end);
   try {
-    const r = await api('/api/corr?' + query);
+    const r = await api(API + '/corr?' + query);
     if (token !== correlationGeneration || S.result !== target) return;
     if (r.correlation) {          // 暖缓存：请求内即时重算
       S.rollWin = win;
@@ -1015,7 +1016,7 @@ async function run(code, opts = {}) {
     };
     // 强制重学：绕过结果缓存
     if (opts.force) body.refresh = true;
-    const r = await api('/api/analyze', {
+    const r = await api(API + '/analyze', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
@@ -1024,7 +1025,7 @@ async function run(code, opts = {}) {
       // POST 返回前点过取消：任务此时才刚创建，必须补发 cancel，且不能应用结果。
       pendingCancel = false;
       if (r && r.job_id) {
-        try { await api('/api/job/' + r.job_id + '/cancel', {method: 'POST'}); }
+        try { await api(API + '/job/' + r.job_id + '/cancel', {method: 'POST'}); }
         catch (e) { /* 任务可能已结束，忽略 */ }
       }
       $('progressWrap').hidden = true;
@@ -1083,7 +1084,7 @@ async function poll(jid, token = fundGeneration) {
     // 一半因为一次 502 就前功尽弃。连续失败超 3 次才报错退出。
     let qerr = null;
     for (let t = 0; t < 3; t++) {
-      try { j = await api('/api/job/' + jid); qerr = null; break; }
+      try { j = await api(API + '/job/' + jid); qerr = null; break; }
       catch (e) { qerr = e; await new Promise(r => setTimeout(r, 1500)); }
     }
     if (qerr) {
@@ -1094,7 +1095,7 @@ async function poll(jid, token = fundGeneration) {
     if (token !== fundGeneration) return;
     setProgress(j.stage, j.progress, j.detail);
     if (j.status === 'done') {
-      const r = await api('/api/result/' + jid);
+      const r = await api(API + '/result/' + jid);
       if (token !== fundGeneration) return;
       $('progressWrap').hidden = true;
       applyResult(r.result);
@@ -1127,13 +1128,13 @@ async function pollCorrelation(jid, win, target, token) {
       // 与基金分析轮询一致：单次网络抖动有限退避，不直接作废长任务。
       let j = null, qerr = null;
       for (let t = 0; t < 3; t++) {
-        try { j = await api('/api/job/' + jid); qerr = null; break; }
+        try { j = await api(API + '/job/' + jid); qerr = null; break; }
         catch (e) { qerr = e; await new Promise(r => setTimeout(r, 1500)); }
       }
       if (qerr) throw Error('任务查询失败：' + qerr.message);
       if (token !== correlationGeneration || S.result !== target) return;
       if (j.status === 'done') {
-        const r = await api('/api/result/' + jid);
+        const r = await api(API + '/result/' + jid);
         if (token !== correlationGeneration || S.result !== target) return;
         S.rollWin = win;
         target.correlation = r.result.correlation;
@@ -1159,7 +1160,7 @@ async function cancelActiveJob() {
   if (!jids.length && submitting && typeof pendingCancel !== 'undefined')
     pendingCancel = true;
   for (const jid of jids) {
-    try { await api('/api/job/' + jid + '/cancel', { method: 'POST' }); }
+    try { await api(API + '/job/' + jid + '/cancel', { method: 'POST' }); }
     catch (e) { /* 任务可能刚好结束，忽略 */ }
   }
   // 递增代次让所有在途轮询立即退出，并隐藏进度条
@@ -1949,7 +1950,7 @@ async function applyParams() {
   setProgress('重新学习 ' + spec.name, 0.02, '');
   try {
     const m = S.result.meta;
-    const r = await api('/api/analyze', {
+    const r = await api(API + '/analyze', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: S.result.code, models: m.models,
         params: Object.assign({}, m.params, { [k]: o }),
@@ -2247,7 +2248,7 @@ async function runBacktest() {
   $('progressWrap').hidden = false;
   setProgress('提交回测任务…', 0.02, '');
   try {
-    const r = await api('/api/backtest', {
+    const r = await api(API + '/backtest', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         code: S.result.code,
@@ -2293,12 +2294,12 @@ async function pollBacktest(jid, token = fundGeneration) {
       return;
     }
     let j;
-    try { j = await api('/api/job/' + jid); }
+    try { j = await api(API + '/job/' + jid); }
     catch (e) { if (token !== fundGeneration) return; showAlert('回测查询失败：' + e.message); $('progressWrap').hidden = true; return; }
     if (token !== fundGeneration) return;
     setProgress(j.stage, j.progress, j.detail);
     if (j.status === 'done') {
-      const r = await api('/api/result/' + jid);
+      const r = await api(API + '/result/' + jid);
       if (token !== fundGeneration) return;
       $('progressWrap').hidden = true;
       renderBacktest(r.result);
@@ -2329,7 +2330,7 @@ async function runHoldings() {
   setProgress('提交持仓拟合任务…', 0.02, '');
   try {
     const m = result.meta;
-    const r = await api('/api/holdings', {
+    const r = await api(API + '/holdings', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: result.code, refresh: false, auto_equity: m.auto_equity,
         start: ('window_requested' in m) ? m.window_requested : m.start,
@@ -2367,7 +2368,7 @@ async function pollHoldings(jid, token, holdingsToken) {
       return;
     }
     let j;
-    try { j = await api('/api/job/' + jid); }
+    try { j = await api(API + '/job/' + jid); }
     catch (e) {
       if (!current()) return;
       $('progressWrap').hidden = true;
@@ -2377,7 +2378,7 @@ async function pollHoldings(jid, token, holdingsToken) {
     if (!current()) return;
     setProgress(j.stage, j.progress, j.detail);
     if (j.status === 'done') {
-      const r = await api('/api/result/' + jid);
+      const r = await api(API + '/result/' + jid);
       if (!current()) return;
       $('progressWrap').hidden = true;
       renderHoldings(r.result);
