@@ -301,7 +301,7 @@ node tests/frontend/test_market_async.cjs
 uv run python scripts/freeze_future_validation_evidence.py
 ```
 
-最新完整回归 627 项 unittest（2026-11-24 执行通过，约 144 秒）；三套前端脚本与 `app.js` 语法检查通过，本轮另跑定向契约测试与 lint。两套脚本式回归沿用历史基线、本轮未重跑；Docker/wheel 构建安装与真实数据研究仍未覆盖。冻结证据校验默认只读，`--apply` 仅首次生成且拒绝覆盖。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
+最新完整回归 632 项 unittest（2026-11-24 执行通过，约 146 秒）；三套前端脚本与 `app.js` 语法检查通过，本轮另跑定向契约测试与 lint。两套脚本式回归沿用历史基线、本轮未重跑；Docker/wheel 构建安装与真实数据研究仍未覆盖。冻结证据校验默认只读，`--apply` 仅首次生成且拒绝覆盖。测试前提、浏览器启动与实际基金计算见[测试说明](tests/README.md)。
 
 依赖以 `pyproject.toml` 和 `uv.lock` 为准。`requirements.txt` 引用运行依赖兼容导出，更新命令为：
 

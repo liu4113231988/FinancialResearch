@@ -9,19 +9,22 @@ from market_research.ordering import ranked_frame
 from market_research.modeling.catalog import MODELS, ModelSpec
 from market_research.modeling.estimators import fit_window, estimate_equity, _score
 
-# B2/P3-R：评估资格下限。只用于标注与展示，**不改变排名顺序**；
-# 是否让不合格模型退出 rank/best/insights 属研究口径变更，待确认后单独实施。
+# B2/P3-R：评估资格下限。用于推荐门禁，**不改变排名表顺序**。
 MIN_OOS_SESSIONS = 60
 MIN_REFITS = 3
 
 
-def _coverage_summary(syn: pd.Series, diag_rows: List[dict]) -> Dict[str, Any]:
+def _coverage_summary(syn: pd.Series, diag_rows: List[dict],
+                      expected_n: Optional[int] = None) -> Dict[str, Any]:
     """实际样本外覆盖：日数、起止、有效重估窗口数与资格结论。
 
     `syn` 是逐日拼接的前向序列，日数不等于独立信息量；重估窗口数才是
     真正独立的拟合样本。两者都低于工程下限时标记 ``insufficient``。
+    因必需因子缺报价被置空的日期单独计数，不能当作连续日收益。
     """
     oos_n = int(len(syn))
+    expected = int(expected_n) if expected_n is not None else oos_n
+    gap_n = max(0, expected - oos_n)
     reasons: List[str] = []
     if oos_n < MIN_OOS_SESSIONS:
         reasons.append(f"样本外仅 {oos_n} 个交易日，低于门槛 {MIN_OOS_SESSIONS}")
@@ -32,6 +35,8 @@ def _coverage_summary(syn: pd.Series, diag_rows: List[dict]) -> Dict[str, Any]:
         "oos_n": oos_n,
         "oos_start": syn.index[0].strftime("%Y-%m-%d") if oos_n else None,
         "oos_end": syn.index[-1].strftime("%Y-%m-%d") if oos_n else None,
+        "oos_gap_n": gap_n,
+        "oos_coverage": (oos_n / expected) if expected else None,
         "rebalance_count": rebalances,
         "assessment_status": "insufficient" if reasons else "sufficient",
         "assessment_reasons": reasons,
@@ -185,9 +190,21 @@ class ModelZoo:
         """
         cfg = self.cfg
         params = params or {}
-        assets = [c for c in px.columns if c != fund_col]
-        P = np.log(px.astype(float))
-        R = P.diff().dropna()
+        # P1-25：`load_panel` 会在 attrs 里附带未经全区间删列/删行的原始候选
+        # 价格（causal_pool）。研究路径必须用它，否则"某个指数在尾部才缺数"
+        # 会改写早期窗口的可用因子集。没有该属性时退回旧的对齐面板。
+        causal = px.attrs.get("causal_pool") if isinstance(px, pd.DataFrame) else None
+        source = causal if isinstance(causal, pd.DataFrame) and fund_col in causal.columns else px
+        causal_used = source is causal
+        assets = [c for c in source.columns if c != fund_col]
+        if source is causal:
+            R = np.log(source[assets + [fund_col]].astype(float)).diff()
+            # 只按**基金收益**确定样本日期轴；候选指数缺日保留为 NaN，
+            # 由每个重估窗口自行判断覆盖率，不做全区间删行。
+            R = R.loc[R[fund_col].notna()]
+        else:
+            P = np.log(source.astype(float))
+            R = P.diff().dropna()
         dates = R.index
         X_all = R[assets].values
         y_all = R[fund_col].values
@@ -244,6 +261,10 @@ class ModelZoo:
                         done += 1
                         if progress:
                             progress(key, done, len(keys), out[key].oos_r2)
+                for rep in out.values():
+                    rep.extra["causal_pool_used"] = causal_used
+                    rep.extra["causal_required"] = bool(
+                        cfg.get("require_causal_panel", False))
                 return out
             except Exception as e:                  # noqa: BLE001
                 print(f"[models] 进程池不可用（{type(e).__name__}: {str(e)[:60]}），"
@@ -259,6 +280,10 @@ class ModelZoo:
             out[key] = rep
             if progress:
                 progress(key, i, len(keys), rep.oos_r2)
+        for rep in out.values():
+            rep.extra["causal_pool_used"] = causal_used
+            rep.extra["causal_required"] = bool(
+                cfg.get("require_causal_panel", False))
         return out
 
     # -------------------------------------------------------------- 单模型滚动
@@ -277,18 +302,31 @@ class ModelZoo:
         bounds = tuple(cfg.get("equity_bounds", (0.2, 1.0)))
         eq_start = float(cfg.get("equity_ratio", C.RBSA["equity_ratio"]))
 
+        min_coverage = float(cfg.get("min_coverage", 0.97))
         for k, i in enumerate(rebal_idx):
             lo, hi = i - cfg["window"], i
             Xw, yw = X_all[lo:hi], y_all[lo:hi]
             if len(yw) < cfg["min_obs"]:
                 continue
+            # P1-25：只用**本窗口**的可得性选因子。未来才出现的缺数不得
+            # 改写历史窗口的候选集；不再在全区间先删列。
+            finite = np.isfinite(Xw)
+            coverage = finite.mean(axis=0) if len(Xw) else np.zeros(len(assets))
+            sel = np.flatnonzero(coverage >= min_coverage)
+            if sel.size == 0:
+                continue
+            sel_rows = np.isfinite(yw) & finite[:, sel].all(axis=1)
+            if int(sel_rows.sum()) < cfg["min_obs"]:
+                continue
+            Xw_fit, yw_fit = Xw[sel_rows][:, sel], yw[sel_rows]
+            cols = [assets[j] for j in sel]
             if auto_equity and spec.interpretable:
                 # 只有可解释模型（Σw 有经济含义）才谈得上"实际仓位"；
                 # 黑箱模型的权重只是重要性排序，缩放它没有意义。
                 er, fr = estimate_equity(
-                    lambda E: fit_window(key, Xw, yw, assets, override,
+                    lambda E: fit_window(key, Xw_fit, yw_fit, cols, override,
                                          equity_ratio=E),
-                    Xw, yw, assets, bounds=bounds,
+                    Xw_fit, yw_fit, cols, bounds=bounds,
                     grid=tuple(cfg.get("equity_grid",
                                        (0.20, 0.30, 0.40, 0.50,
                                         0.60, 0.70, 0.80, 0.95))),
@@ -299,33 +337,45 @@ class ModelZoo:
                 # C.RBSA["equity_ratio"]，也就是 ModelZoo(cfg) 传入的
                 # equity_ratio **完全被忽略** —— 一个怎么改都不生效的配置项。
                 er = eq_start
-                fr = fit_window(key, Xw, yw, assets, override, equity_ratio=er)
-            w_full = fr.weights.reindex(assets).fillna(0.0).values
+                fr = fit_window(key, Xw_fit, yw_fit, cols, override,
+                                equity_ratio=er)
+            w_sel = fr.weights.reindex(cols).fillna(0.0).values
 
             # 权重覆盖到下一个重估点：抽稀后相邻点间隔可能远大于 refit，
             # 若只覆盖固定 refit 天会丢掉中间大段样本
             next_i = rebal_idx[k + 1] if k + 1 < len(rebal_idx) else len(dates)
             j_end = min(next_i, len(dates))
-            X_next = X_all[i:j_end]
+            X_next = X_all[i:j_end][:, sel]
             degraded = ""
+            # 只有**真正被赋予权重**的因子缺报价才使该日不可用；
+            # 权重为 0 的候选缺数不应污染合成收益。
+            relevant = np.abs(w_sel) > 0
+            missing = (~np.isfinite(X_next[:, relevant]).all(axis=1)
+                       if relevant.any() else np.zeros(len(X_next), dtype=bool))
+            X_next_clean = np.where(np.isfinite(X_next), X_next, 0.0)
             if fr.predictor is not None:
                 # 黑箱模型：用「上一窗口拟合好的估计器」预测下一段，
                 # 这是真正的样本外（前向）预测。
-                try:
-                    seg = np.asarray(fr.predictor(X_next), dtype=float)
-                    if not np.all(np.isfinite(seg)):
-                        raise ValueError("预测含非有限值")
-                except Exception as e:      # noqa: BLE001
-                    # ★ 旧实现在这里静默回退成 X_next @ w_full，而 w_full 是
-                    #   **重要性权重**（非负、Σ=equity_ratio），把它当线性持仓
-                    #   得到的收益会被记成该黑箱模型的样本外结果 ——
-                    #   失败被伪装成成功，且没有任何痕迹。现在如实记录（P0-05）。
-                    seg = X_next @ w_full
-                    degraded = f"blackbox_fallback:{type(e).__name__}"
-                    n_fallback += 1
+                seg = np.full(len(X_next), np.nan)
+                ok = ~missing
+                if ok.any():
+                    try:
+                        pred = np.asarray(fr.predictor(X_next[ok]), dtype=float)
+                        if not np.all(np.isfinite(pred)):
+                            raise ValueError("预测含非有限值")
+                        seg[ok] = pred
+                        if missing.any():
+                            degraded = "missing_factor_days"
+                    except Exception as e:      # noqa: BLE001
+                        # ★ 回退必须如实记录：把重要性权重当线性持仓得到的收益
+                        #   不能伪装成黑箱模型的原生样本外结果（P0-05）。
+                        seg[ok] = X_next_clean[ok] @ w_sel
+                        degraded = f"blackbox_fallback:{type(e).__name__}"
+                        n_fallback += 1
             else:
                 # 线性约束模型：合成收益 = X @ w，权重和 = 股票仓位
-                seg = X_next @ w_full
+                seg = X_next_clean @ w_sel
+            seg[missing] = np.nan
             syn.loc[dates[i:j_end]] = seg
 
             rows.append({"date": dates[i - 1], **fr.weights.to_dict()})
@@ -333,12 +383,16 @@ class ModelZoo:
             fit_tes.append(fr.te)
             diag_rows.append({"date": dates[i - 1], "r2": fr.r2, "te": fr.te,
                               "alpha": fr.extra.get("alpha"),
+                              "n_factors": int(sel.size),
+                              "n_rows": int(sel_rows.sum()),
+                              "dropped_factors": int(len(assets) - sel.size),
                               "degraded": degraded or None})
             if fr.extra:
                 extras.append(fr.extra)
             last_w, last_date = fr.weights, dates[i - 1]
 
-        syn = syn.dropna()
+        syn_raw = syn
+        syn = syn_raw.dropna()
         # 每个滚动窗口都因 len(yw) < min_obs 被跳过时 rows/diag_rows 为空，
         # 后面的 set_index("date") 会抛 KeyError 而不是给出可读的失败原因。
         # 统一转成 ValueError，交给调用方的 _failed_report 记录。
@@ -397,7 +451,7 @@ class ModelZoo:
 
         # B2/P3-R：覆盖元数据放在 extras 聚合之后，避免被逐窗指标覆盖。
         # 页面/API/导出据此区分"已算出"与"评估充分"。
-        agg_extra.update(_coverage_summary(syn, diag_rows))
+        agg_extra.update(_coverage_summary(syn, diag_rows, len(syn_raw)))
 
         return ModelReport(
             key=key, name=spec.name, family=spec.family, desc=spec.desc,
@@ -415,22 +469,50 @@ class ModelZoo:
 
     # -------------------------------------------------------------- 排名
     @staticmethod
+    def blocking_reasons(r: ModelReport) -> List[str]:
+        """模型不能进入推荐位的原因（原始诊断仍保留）。"""
+        reasons: List[str] = []
+        if r.extra.get("error"):
+            reasons.append("拟合失败")
+        if not np.isfinite(r.oos_r2):
+            reasons.append("样本外 R² 未定义")
+        if r.extra.get("assessment_status") != "sufficient":
+            reasons.append("样本外覆盖不足")
+        fit_ok = r.extra.get("fit_ok")
+        degraded = int(r.extra.get("fallback_windows") or 0) > 0
+        if fit_ok is not None and np.isfinite(fit_ok) and float(fit_ok) < 1.0 - 1e-9:
+            degraded = True
+        if degraded:
+            reasons.append("存在降级拟合窗口")
+        if (r.extra.get("causal_required")
+                and r.extra.get("causal_pool_used") is False):
+            reasons.append("未使用因果面板")
+        return reasons
+
+    @staticmethod
     def rank(reports: Dict[str, ModelReport], key: str = "样本外R²") -> pd.DataFrame:
-        """按指定指标生成排名表（默认样本外 R²，越大越好）。"""
+        """按指定指标生成排名表（默认样本外 R²，越大越好）。
+
+        `可推荐` 是**推荐门禁**，不改变排序：失败、覆盖不足、降级拟合或
+        旧检查点（无因果面板）仍出现在表里，但不能被 best/insights 选中。
+        """
         rows = []
         for k, r in reports.items():
             status = r.extra.get("assessment_status")
+            blockers = ModelZoo.blocking_reasons(r)
             rows.append({
                 "key": k, "模型": r.name, "流派": r.family,
                 "可解释": "是" if r.interpretable else "否",
                 "样本外R²": r.oos_r2, "样本外TE": r.oos_te,
                 "窗口内R²": r.fit_r2_mean, "窗口内TE": r.fit_te_mean,
                 "方向一致率": r.win, "隐含仓位": r.beta, "耗时": r.elapsed,
-                # 评估资格（新增，不影响排序）：不足时页面不得称"最佳/可复制"
+                # 评估资格（不影响排序）：不足时页面不得称"最佳/可复制"
                 "样本外天数": r.extra.get("oos_n"),
                 "有效重估": r.extra.get("rebalance_count"),
                 "评估状态": ("有效" if status == "sufficient" else
                              "不足" if status == "insufficient" else "未知"),
+                "可推荐": "否" if blockers else "是",
+                "阻断原因": "；".join(blockers) or None,
             })
         df = pd.DataFrame(rows)
         if key not in df.columns:

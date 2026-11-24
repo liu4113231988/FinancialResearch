@@ -1006,5 +1006,29 @@ class CumOfflineSettlementTests(unittest.TestCase):
         self.assertGreater(update.call_args.kwargs["realized_return"], 0)
 
 
+class ScoredBasisTest(unittest.TestCase):
+    """C1：Brier 按 P(R>0)（平盘=0）计分，命中率仍剔平盘，两套分母不合并。"""
+
+    def test_brier_includes_neutral_but_hit_rate_excludes_it(self):
+        rows = [
+            {"source": "direction", "probability": 0.8,
+             "realized_return": 0.02, "label": "correct", "status": "settled"},
+            {"source": "direction", "probability": 0.8,
+             "realized_return": 0.0, "label": "neutral", "status": "settled"},
+            {"source": "direction", "probability": 0.3,
+             "realized_return": -0.01, "label": "correct", "status": "settled"},
+        ]
+        stats = ledger._stats(rows)
+        self.assertEqual(stats["decided"], 2)
+        self.assertEqual(stats["hit_rate"], 1.0)
+        self.assertEqual(stats["hit_rate_basis"], "direction_only")
+        self.assertEqual(stats["probability_rows"], 3)
+        self.assertEqual(stats["neutral_scored_rows"], 1)
+        self.assertEqual(stats["brier_basis"], "flat_as_down")
+        expected = ((0.8 - 1) ** 2 + (0.8 - 0) ** 2 + (0.3 - 0) ** 2) / 3
+        self.assertAlmostEqual(stats["brier"], expected)
+        self.assertIn("平盘目标为 0", stats["note"])
+
+
 if __name__ == "__main__":
     unittest.main()

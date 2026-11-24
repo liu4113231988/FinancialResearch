@@ -60,9 +60,25 @@ class CoverageGateTests(unittest.TestCase):
         status = dict(zip(rank["key"], rank["评估状态"]))
         self.assertEqual(status["insufficient"], "不足")
         self.assertEqual(status["sufficient"], "有效")
+        recommended = dict(zip(rank["key"], rank["可推荐"]))
+        self.assertEqual(recommended["insufficient"], "否")
+        self.assertEqual(recommended["sufficient"], "是")
         # 排名仍按样本外 R² 降序，资格标注不改变顺序。
         r2 = list(rank["样本外R²"])
         self.assertEqual(r2, sorted(r2, reverse=True))
+
+    def test_failed_and_non_causal_reports_are_not_recommended(self):
+        from market_research.modeling.engine import _failed_report
+        failed = _failed_report("pcr", ValueError("x"))
+        self.assertIn("拟合失败", ModelZoo.blocking_reasons(failed))
+
+        _, rep = self._report(max_rebal=5)
+        rep.extra["causal_pool_used"] = False
+        rep.extra["causal_required"] = True
+        self.assertIn("未使用因果面板", ModelZoo.blocking_reasons(rep))
+        rank = ModelZoo.rank({"ridge": rep})
+        self.assertEqual(rank.iloc[0]["可推荐"], "否")
+        self.assertIn("未使用因果面板", rank.iloc[0]["阻断原因"])
 
 
 if __name__ == "__main__":

@@ -31,8 +31,13 @@ class RBSA:
     def fit_rolling(self, px: pd.DataFrame, fund_col: str = "__FUND__",
                     verbose: bool = True) -> Dict[str, object]:
         cfg = self.cfg
-        assets = [c for c in px.columns if c != fund_col]
-        R = np.log(px.astype(float)).diff().dropna()
+        # P1-25：优先使用未经全区间删列/删行的因果面板；候选指数缺日保留
+        # 为 NaN，由 ModelZoo 的逐窗覆盖率规则处理。
+        causal = px.attrs.get("causal_pool") if isinstance(px, pd.DataFrame) else None
+        source = causal if isinstance(causal, pd.DataFrame) and fund_col in causal.columns else px
+        assets = [c for c in source.columns if c != fund_col]
+        R = np.log(source[assets + [fund_col]].astype(float)).diff()
+        R = R.loc[R[fund_col].notna()]
         dates = R.index
         X_all = R[assets].values
         y_all = R[fund_col].values

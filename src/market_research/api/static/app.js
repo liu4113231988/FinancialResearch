@@ -793,6 +793,7 @@ function downloadJson(payload, filename) {
   $('btnSaveSel').onclick = () => {
     if (!S.sel) return;
     S.best = S.sel;
+    S.bestIsRecommended = true;   // 用户手动指定，视为显式选择
     renderHead(); renderModelStrip(); renderRank();
     showAlert(`已把「${S.result.models[S.sel].name}」设为最佳模型基准。`);
   };
@@ -1235,8 +1236,10 @@ function applyResult(res) {
     //   旧结果缓存）。旧写法直接赋给 S.sel，下面所有渲染都只命中 `!m` 分支静默
     //   退出，详情区继续显示上一次的数字，看起来像本次结果。
     const present = Object.keys(r.models).filter(k => r.models[k]);
-    S.best = (r.meta.best_model && r.models[r.meta.best_model])
-      ? r.meta.best_model : (present[0] || null);
+    // 后端只在通过评估门禁时给出 best_model；为方便查看仍可回退到第一个模型，
+    // 但此时不能再挂"区间最优"徽标。
+    S.bestIsRecommended = !!(r.meta.best_model && r.models[r.meta.best_model]);
+    S.best = S.bestIsRecommended ? r.meta.best_model : (present[0] || null);
     S.sel = S.best;
     updateFundStatus();
     renderHead();
@@ -1424,7 +1427,7 @@ function renderModelStrip() {
     const m = r.models[k]; if (!m) return '';
     const err = m.metrics.oos_r2 === null;
     return `<div class="mcard ${k === S.sel ? 'sel' : ''}" data-k="${escapeHtml(k)}" tabindex="0" role="button" aria-pressed="${k === S.sel}">
-      ${k === S.best ? '<span class="best">区间最优</span>' : ''}
+      ${(k === S.best && S.bestIsRecommended) ? '<span class="best">区间最优</span>' : ''}
       <div class="nm">${escapeHtml(m.name)}</div>
       <div class="r2" style="color:${err ? 'var(--bad)' : 'var(--fg)'}">
         ${err ? '失败' : fmtNum(m.metrics.oos_r2, 3)}</div>
@@ -1474,7 +1477,7 @@ function renderRank() {
                    && (bt < eq * 0.7 || bt < 0);
       const r2col = noR2 ? 'var(--fg3)' : (neg ? 'var(--bad)' : 'var(--fg)');
       return `<tr class="clickable ${k === S.sel ? 'sel' : ''}" data-k="${escapeHtml(k)}" tabindex="0" aria-selected="${k === S.sel}">
-        <td class="l">${escapeHtml(x['模型'])} ${k === S.best ? '<span class="tag">区间最优</span>' : ''}</td>
+        <td class="l">${escapeHtml(x['模型'])} ${(k === S.best && S.bestIsRecommended) ? '<span class="tag">区间最优</span>' : ''}</td>
         <td class="l">${escapeHtml(x['流派'])}</td>
         <td class="l">${escapeHtml(x['可解释'])}</td>
         <td class="bar-cell" ${noR2 ? 'title="R² 未定义（窗口内目标无变异）"' :
@@ -1507,16 +1510,21 @@ function renderRank() {
   }
   const gap = (best['样本外R²'] ?? 0) - (worst['样本外R²'] ?? 0);
   const insufficient = rows.filter(x => x['评估状态'] === '不足').length;
+  const noReco = !(S.result && S.result.meta && S.result.meta.best_model);
+  const bestLabel = noReco ? 'R² 最高（不可推荐）' : '最佳';
   $('rankNote').innerHTML =
     `排名按<b>样本外 R²</b> 降序——即"用上一窗口拟合好的模型去预测下一段"的表现。
-     最佳：<b style="color:var(--fg)">${escapeHtml(best['模型'])}（${fmtNum(best['样本外R²'], 3)}）</b>，
+     ${bestLabel}：<b style="color:var(--fg)">${escapeHtml(best['模型'])}（${fmtNum(best['样本外R²'], 3)}）</b>，
      最弱：${escapeHtml(worst['模型'])}（${fmtNum(worst['样本外R²'], 3)}），跨度 ${fmtNum(gap, 3)}。
      注意"窗口内 R²"高只代表训练集拟合得好，
      <b>任何模型若训练/样本外差 &gt; 0.08，都说明它只是在背历史，不能用来外推</b>。`
-    + (insufficient
-      ? `<br/><b>本次有 ${insufficient} 个模型样本外覆盖不足（&lt;60 个交易日或 &lt;3 个有效重估窗口），
-         其排名与"最佳"仅是诊断，不可当作推荐。</b>`
-      : '');
+    + (noReco
+      ? `<br/><b>本次没有模型通过推荐门禁（覆盖/降级/因果面板任一不合格），
+         "R² 最高"仅是诊断，不能当作推荐。</b>`
+      : (insufficient
+        ? `<br/><b>本次有 ${insufficient} 个模型样本外覆盖不足（&lt;60 个交易日或 &lt;3 个有效重估窗口），
+           其排名仅是诊断，不可当作推荐。</b>`
+        : ''));
 }
 
 // ==================================================================== 选中模型详情

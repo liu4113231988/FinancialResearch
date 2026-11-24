@@ -224,21 +224,26 @@ def analyze(code: str, models: Optional[List[str]] = None,
                         detail=f"({done}/{total}) 样本外R²="
                                f"{'—' if r2 is None or (isinstance(r2, float) and not math.isfinite(r2)) else f'{r2:.3f}'}")
 
-        zoo_cfg = {**C.RBSA, "auto_equity": bool(auto_equity)}
+        zoo_cfg = {**C.RBSA, "auto_equity": bool(auto_equity),
+                   "require_causal_panel": True}
         zoo = ModelZoo(zoo_cfg)
         reps = zoo.run(panel, models, params=params, max_rebal=max_rebal,
                        progress=on_progress if job_id else None)
         cp.save("models", reps)
     else:
         prog("复用已完成阶段：模型拟合", 0.88, "崩溃重试跳过已完成阶段")
-        zoo = ModelZoo({**C.RBSA, "auto_equity": bool(auto_equity)})
+        zoo = ModelZoo({**C.RBSA, "auto_equity": bool(auto_equity),
+                        "require_causal_panel": True})
 
     # ---------- 4. 序列化
     prog("组装结果", 0.9)
-    R = np.log(panel.astype(float)).diff().dropna()
-    nav_oos = nav.reindex(R.index[C.RBSA["window"]:])
+    # P1-25：模型样本外序列基于因果面板（可能含因必需因子缺数的空档），
+    # 净值不按对齐面板的行号切，直接交给 model_payload 按共同日期重索引。
+    nav_oos = nav
     payload = {k: model_payload(r, nav_oos) for k, r in reps.items()}
     rank = ModelZoo.rank(reps)
+    eligible = (rank[rank["可推荐"] == "是"]
+                if "可推荐" in rank.columns else rank)
 
     # ---------- 4.5 风格漂移（2026-10-12）
     # 分析窗口从固定 10 年改成近 5 年，就是因为这个：十年里风格与经理可能都变过，
@@ -249,13 +254,12 @@ def analyze(code: str, models: Optional[List[str]] = None,
     try:
         from market_research.research.experiments import style_drift as _style_drift
         best_key = None
-        if not rank.empty and "key" in rank.columns:
-            for _, top in rank.iterrows():
-                if reps[top["key"]].interpretable and pd.notna(top.get("样本外R²", np.nan)):
-                    best_key = top["key"]
-                    break
-        if best_key is None:
-            best_key = next((k for k, r in reps.items() if r.interpretable), None)
+        # B2/P3-R：只有通过推荐门禁的模型才能成为 best / 漂移 / 估值基准；
+        # 全部不合格时保持 None，页面显示"暂无可推荐模型"，原始排名仍可查。
+        if not eligible.empty and "key" in eligible.columns:
+            interp = eligible[eligible["key"].map(
+                lambda k: reps[k].interpretable)]
+            best_key = (interp if not interp.empty else eligible).iloc[0]["key"]
         if best_key in reps:
             rep = reps[best_key]
             syn_nav_d = np.exp(rep.syn_ret.dropna().cumsum())
@@ -278,8 +282,13 @@ def analyze(code: str, models: Optional[List[str]] = None,
     try:
         bk = locals().get("best_key")
         if bk is None:
-            bk = next((k for k, r in reps.items() if r.interpretable), None)
-        if bk in reps:
+            valuation = {"available": False, "degraded": False,
+                         "fallback_assets": [], "coverage": None,
+                         "fallback_weight": None,
+                         "note": "暂无可推荐模型：全部候选未通过评估资格，"
+                                 "估值通道不指定基准模型",
+                         "reason": "no_eligible_model"}
+        elif bk in reps:
             pe_pct = D.load_pe_panel(verbose=False)
             v = SignalEngine().valuation_channel(reps[bk].weights_hist, pe_pct, nav.index)
             valuation = dict(v.attrs.get("valuation") or {})
@@ -330,8 +339,15 @@ def analyze(code: str, models: Optional[List[str]] = None,
             "n_rebal": _n_rebal(reps),
             "equity_ratio": C.RBSA["equity_ratio"],
             "auto_equity": bool(auto_equity),
-            "best_model": (rank.iloc[0]["key"] if not rank.empty and
-                           pd.notna(rank.iloc[0]["样本外R²"]) else None),
+            # 只有通过推荐门禁的模型才会成为 best_model；None = 暂无可推荐
+            "best_model": locals().get("best_key"),
+            "recommendation": {
+                "eligible": bool(locals().get("best_key")),
+                "n_eligible": int(len(eligible)),
+                "n_models": int(len(rank)),
+                "rule": ("覆盖≥60 个样本外交易日且≥3 个有效重估窗口；"
+                         "无失败/降级窗口；使用因果面板"),
+            },
             # ---- 分析窗口（2026-10-12 新增）
             # start/end 是**实际生效**的窗口（已裁剪）。它默认近 5 年而不是
             # 原来的固定 2016 起：十年跨度会混入风格漂移与经理变更，
@@ -477,8 +493,11 @@ def refit_single(code: str, model_key: str,
         rep = zoo.run(panel, [model_key], params={model_key: params or {}},
                       workers=1, max_rebal=max_rebal)[model_key]
         cp.save("model", rep)
-    R = np.log(panel.astype(float)).diff().dropna()
-    nav_oos = panel["__FUND__"].reindex(R.index[C.RBSA["window"]:])
+    # P1-25：净值序列不按对齐面板行号切；用因果池中的基金轴（如有），
+    # 让 model_payload 自行按与样本外收益的共同日期对齐。
+    causal = panel.attrs.get("causal_pool") if hasattr(panel, "attrs") else None
+    nav_oos = (causal["__FUND__"] if isinstance(causal, pd.DataFrame)
+               and "__FUND__" in causal.columns else panel["__FUND__"])
     return model_payload(rep, nav_oos)
 
 

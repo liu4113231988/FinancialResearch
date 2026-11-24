@@ -187,10 +187,18 @@ def _score(pred: np.ndarray, y: np.ndarray) -> tuple:
     y 为常数（sst ≈ 0）时 R² 在数学上无定义，返回 NaN 而不是 0 或 −∞：
     NaN 会被中位数/均值自动跳过，也不会被误当成"极差的拟合"。
     """
-    resid = np.asarray(pred, dtype=float) - y
+    pred = np.asarray(pred, dtype=float)
+    y = np.asarray(y, dtype=float)
+    # P1-25：逐窗因子缺报价时合成收益为 NaN。评分只在共同有限样本上计算，
+    # 不做 0 填充、也不用相邻日期跨越缺口拼接。
+    valid = np.isfinite(pred) & np.isfinite(y)
+    if int(valid.sum()) < 2:
+        return float("nan"), float("nan")
+    pred, y = pred[valid], y[valid]
+    resid = pred - y
     sse = float(resid @ resid)
     sst = float(((y - y.mean()) ** 2).sum())
-    te = float(np.std(resid, ddof=1) * np.sqrt(252)) if len(resid) > 1 else np.nan
+    te = float(np.std(resid, ddof=1) * np.sqrt(252))
     if not np.isfinite(sst) or sst <= 1e-18:
         return float("nan"), te          # 目标无变异 → R² 未定义
     return 1.0 - sse / sst, te

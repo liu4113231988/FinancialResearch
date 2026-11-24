@@ -135,6 +135,7 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
     # P3-O 审计：主指标仍沿用训练标签口径（平盘算下跌），另附"剔除平盘"的
     # 对照，便于与台账 neutral 口径核对；两套分母不合并、不互相替代。
     evaluation = {"n": n, "ok": n >= 20, "label_policy": "flat_as_down",
+                  "target_version": "P(R_h>0)_flat_as_down_v1",
                   "neutral_epsilon": FLAT_RETURN_EPSILON}
     if n:
         actual = evaluated.actual
@@ -210,6 +211,7 @@ def compare_forecasts(bars, base, candidate, horizon, display_start, context=Non
     nonflat = ~flat
     result['flat_n'] = int(flat.sum())
     result['label_policy'] = 'flat_as_down'
+    result['target_version'] = 'P(R_h>0)_flat_as_down_v1'
     result['neutral_epsilon'] = FLAT_RETURN_EPSILON
     nonflat_target = target[nonflat]
     for key in ('base', 'candidate'):

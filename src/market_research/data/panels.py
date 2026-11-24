@@ -477,6 +477,17 @@ def load_panel(fund_code: str, start: Optional[str] = None,
                              allow_fetch=allow_fetch)
     out = align_prices(px, nav)
     warnings = list(out.attrs.get("warnings") or [])
+    # P1-25：因果研究面板。保留**全部候选列**与基金净值可得日期，不做全区间
+    # 覆盖率删列，也不因指数缺日删掉基金行；候选缺数保持 NaN，由每个重估
+    # 窗口自行判断覆盖率。显示/相关性仍用对齐后的 `out`。
+    causal = px.reindex(nav.index).copy()
+    causal["__FUND__"] = nav.reindex(causal.index)
+    if start:
+        causal = causal.loc[causal.index >= pd.Timestamp(start)]
+    if end:
+        causal = causal.loc[causal.index <= pd.Timestamp(end)]
+    causal = causal.loc[causal["__FUND__"].notna()]
+    causal.attrs = {}
     fetch_errors = list(px.attrs.get("fetch_errors") or [])
     if fetch_errors:
         # 让"为什么缺这个指数"进入 meta / 报告 / 页面，而不是只留在控制台日志。
@@ -512,6 +523,7 @@ def load_panel(fund_code: str, start: Optional[str] = None,
     if end:
         out = out.loc[out.index <= pd.Timestamp(end)]
     out.attrs["warnings"] = warnings
+    out.attrs["causal_pool"] = causal
     out.attrs["nav_basis"] = actual_basis
     out.attrs["nav_degraded"] = nav_degraded
     out.attrs["nav_degraded_reason"] = nav_reason

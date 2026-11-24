@@ -520,7 +520,11 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
 
     # ---------- 1. 风格穿透（拟合层面，成立）
     if not rank.empty:
-        best_row = rank.iloc[0]
+        # B2/P3-R：只有"可推荐"的模型才能进入结论与推荐位；原始诊断仍保留在排名表。
+        eligible = (rank[rank["可推荐"] == "是"]
+                    if "可推荐" in rank.columns else rank)
+        no_reco = eligible.empty
+        best_row = eligible.iloc[0] if not no_reco else rank.iloc[0]
         bm = payload.get(best_row["key"], {})
         lw = (bm.get("latest_weights") or {}).get("items", [])
         top_txt = "、".join(f"{r['name']} {r['weight']:.0%}" for r in lw[:3]
@@ -529,11 +533,18 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
         blackbox = not bm.get("interpretable", True)
         # B2/P3-R：评估资格不改变排名，但必须改变措辞——低于门槛时不称"成立/可复制"。
         state = str(best_row.get("评估状态") or "未知")
-        assessed = state == "有效"
+        assessed = (state == "有效") and not no_reco
         assessment = (bm.get("assessment") or {})
         reasons = "；".join(assessment.get("reasons") or [])
         lead = ""
-        if not assessed:
+        if no_reco:
+            counts = (rank["评估状态"].value_counts().to_dict()
+                      if "评估状态" in rank.columns else {})
+            lead = (f"<b>暂无可推荐模型</b>：有效 0 个、不足 "
+                    f"{counts.get('不足', 0)} 个、未知 {counts.get('未知', 0)} 个。"
+                    "样本外覆盖不足或存在降级/失败；下方数字来自排名最高的候选，"
+                    "仅作诊断，不能作为推荐或复制依据。")
+        elif not assessed:
             lead = (f"<b>样本外覆盖不足</b>（{best_row.get('样本外天数') or '—'} 个交易日、"
                     f"{best_row.get('有效重估') or '—'} 个有效重估窗口，低于最低门槛）；"
                     "以下数字仅作诊断，不作为模型推荐。"
@@ -558,7 +569,8 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
         out["evidence"] = {
             "warn": not assessed,
             "text": (
-                f"本次样本外覆盖 <b>{best_row.get('样本外天数') or '—'}</b> 个交易日、"
+                (f"全部 {len(rank)} 个候选均未通过推荐门槛；" if no_reco else "")
+                + f"本次样本外覆盖 <b>{best_row.get('样本外天数') or '—'}</b> 个交易日、"
                 f"有效重估窗口 <b>{best_row.get('有效重估') or '—'}</b> 个。"
                 + (f"未达最低工程门槛（{MIN_OOS_SESSIONS} 日 / {MIN_REFITS} 窗），"
                    "结论只能当诊断；" if not assessed else
