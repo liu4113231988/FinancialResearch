@@ -14,6 +14,9 @@ from market_research.market.targets import horizon_data
 MIN_TRAIN = 252
 MAX_TRAIN = 756
 REFIT = 21
+# 与 predictions/judge.py 的 neutral 判定共用同一数值口径（±1e-9），
+# 仅用于**并列展示**"平盘算下跌"与"剔除平盘"两种评分，不改变训练标签。
+FLAT_RETURN_EPSILON = 1e-9
 
 
 def wilder(series, period=14):
@@ -116,7 +119,10 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
         if model is not None:
             probability.iloc[i] = model.predict_proba(features.iloc[[i]])[0, 1]
             baseline.iloc[i] = prior
-    valid = pd.DataFrame({"probability": probability, "baseline": baseline, "actual": labels}).loc[display_start:].dropna()
+    valid = pd.DataFrame({"probability": probability, "baseline": baseline,
+                          "actual": labels, "raw_return": future.reindex(bars.index)}
+                         ).loc[display_start:]
+    valid = valid.dropna(subset=["probability", "baseline", "actual"])
     # Use fixed, non-overlapping starting points, not selected for performance.
     indices = positions[bars.index.get_indexer(valid.index)]
     keep, last = [], -horizon
@@ -126,7 +132,10 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
             last = original
     evaluated = valid.iloc[keep]
     n = len(evaluated)
-    evaluation = {"n": n, "ok": n >= 20}
+    # P3-O 审计：主指标仍沿用训练标签口径（平盘算下跌），另附"剔除平盘"的
+    # 对照，便于与台账 neutral 口径核对；两套分母不合并、不互相替代。
+    evaluation = {"n": n, "ok": n >= 20, "label_policy": "flat_as_down",
+                  "neutral_epsilon": FLAT_RETURN_EPSILON}
     if n:
         actual = evaluated.actual
         evaluation.update(accuracy=float(((evaluated.probability >= .5) == actual).mean()),
@@ -135,6 +144,22 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
                           baseline_brier=float(((evaluated.baseline - actual) ** 2).mean()),
                           start=evaluated.index[0].date().isoformat(), end=evaluated.index[-1].date().isoformat())
         evaluation["advantage"] = bool(n >= 20 and evaluation["brier"] < evaluation["baseline_brier"])
+        flat = evaluated.raw_return.abs() <= FLAT_RETURN_EPSILON
+        nonflat = evaluated.loc[~flat]
+        evaluation["flat_n"] = int(flat.sum())
+        if len(nonflat):
+            target = nonflat.actual
+            evaluation.update(
+                n_excluding_flat=int(len(nonflat)),
+                accuracy_excluding_flat=float(
+                    ((nonflat.probability >= .5) == target).mean()),
+                baseline_accuracy_excluding_flat=float(
+                    ((nonflat.baseline >= .5) == target).mean()),
+                brier_excluding_flat=float(
+                    ((nonflat.probability - target) ** 2).mean()),
+                baseline_brier_excluding_flat=float(
+                    ((nonflat.baseline - target) ** 2).mean()),
+            )
     latest = probability.iloc[-1]
     return {"horizon": horizon, 'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
             "ok": bool(pd.notna(latest)), "probability": latest,
@@ -180,6 +205,13 @@ def compare_forecasts(bars, base, candidate, horizon, display_start, context=Non
         return result
     result.update(start=frame.index[0].date().isoformat(), end=frame.index[-1].date().isoformat())
     target = (frame['return'] > 0).astype(float)
+    # P3-O 审计：主指标仍为"平盘算下跌"，另列剔除平盘的对照；不改既有数值。
+    flat = frame['return'].abs() <= FLAT_RETURN_EPSILON
+    nonflat = ~flat
+    result['flat_n'] = int(flat.sum())
+    result['label_policy'] = 'flat_as_down'
+    result['neutral_epsilon'] = FLAT_RETURN_EPSILON
+    nonflat_target = target[nonflat]
     for key in ('base', 'candidate'):
         probability = frame[key]
         bins = []
@@ -189,8 +221,18 @@ def compare_forecasts(bars, base, candidate, horizon, display_start, context=Non
                 bins.append({'lower': i/5, 'upper': (i+1)/5, 'n': int(group.sum()),
                              'probability': float(probability[group].mean()),
                              'frequency': float(target[group].mean())})
-        result[key] = {'accuracy': float(((probability >= .5) == target).mean()),
-                       'brier': float(((probability - target)**2).mean()), 'calibration': bins}
+        item = {'accuracy': float(((probability >= .5) == target).mean()),
+                'brier': float(((probability - target)**2).mean()), 'calibration': bins}
+        if nonflat.any():
+            prob_nf = probability[nonflat]
+            item.update(
+                n_excluding_flat=int(len(prob_nf)),
+                accuracy_excluding_flat=float(
+                    ((prob_nf >= .5) == nonflat_target).mean()),
+                brier_excluding_flat=float(
+                    ((prob_nf - nonflat_target) ** 2).mean()),
+            )
+        result[key] = item
     result['brier_improvement'] = result['base']['brier'] - result['candidate']['brier']
     if context is not None:
         from market_research.market.context import market_regimes
@@ -262,6 +304,8 @@ def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, be
                "模型估计未来收盘相对当前收盘上涨的概率；不预测精确价格，不含交易费用，未单独校准。",
                f"方向概率以 0.5 为涨跌分界；成交诊断另用固定阈值 ≥{ENTRY_PROBABILITY:.0%} 买入、"
                f"≤{EXIT_PROBABILITY:.0%} 退出，中间区间不产生新订单。上涨概率不是买入建议，两者用途不同。",
+               "训练标签把平盘计入下跌类；评估另列剔除平盘的对照，台账结算把平盘记为 neutral，"
+               "三者分母不同，不可跨口径比较准确率或 Brier。",
                "本项目历史研究未建立稳定的日频方向预测优势；Brier 优于频率基准"
                "不代表统计显著性或扣费后的交易收益。",
                "历史验证采用当前数据版本；复权历史可能修订，未模拟停牌、涨跌停、滑点和实际成交。"]

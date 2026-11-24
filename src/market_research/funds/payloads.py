@@ -8,6 +8,7 @@ import pandas as pd
 import market_research.config as C
 from market_research.ordering import ranked_series
 from market_research.modeling.models import MODELS, ModelReport
+from market_research.modeling.engine import MIN_OOS_SESSIONS, MIN_REFITS
 from market_research.modeling.signals import health_stats
 from market_research.modeling.trends import trend_payload
 from market_research.market.technical import series_forecast, MIN_TRAIN
@@ -467,6 +468,18 @@ def model_payload(rep: ModelReport, nav_oos: pd.Series,
             if rep.latest_weights is not None else 0,
         },
         "extra": _jsafe({k: v for k, v in rep.extra.items() if v is not None}),
+        # B2/P3-R：把"已有预测"与"评估充分"分开。status 缺失时保持 unknown，
+        # 不把旧缓存或失败模型默认成已验证。
+        "assessment": _jsafe({
+            "status": rep.extra.get("assessment_status") or "unknown",
+            "reasons": list(rep.extra.get("assessment_reasons") or []),
+            "oos_n": rep.extra.get("oos_n"),
+            "oos_start": rep.extra.get("oos_start"),
+            "oos_end": rep.extra.get("oos_end"),
+            "rebalance_count": rep.extra.get("rebalance_count"),
+            "min_oos_sessions": MIN_OOS_SESSIONS,
+            "min_refits": MIN_REFITS,
+        }),
         "latest_weights": _weights_payload(rep.latest_weights),
         "weights_last_date": (rep.weights_last_date.strftime("%Y-%m-%d")
                               if rep.weights_last_date is not None else None),
@@ -514,19 +527,44 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
                            if r["weight"] and r["weight"] > 0.02)
         # 若最佳模型是黑箱，其权重只是重要性排序，必须降级表述
         blackbox = not bm.get("interpretable", True)
+        # B2/P3-R：评估资格不改变排名，但必须改变措辞——低于门槛时不称"成立/可复制"。
+        state = str(best_row.get("评估状态") or "未知")
+        assessed = state == "有效"
+        assessment = (bm.get("assessment") or {})
+        reasons = "；".join(assessment.get("reasons") or [])
+        lead = ""
+        if not assessed:
+            lead = (f"<b>样本外覆盖不足</b>（{best_row.get('样本外天数') or '—'} 个交易日、"
+                    f"{best_row.get('有效重估') or '—'} 个有效重估窗口，低于最低门槛）；"
+                    "以下数字仅作诊断，不作为模型推荐。"
+                    + (f"原因：{reasons}。" if reasons else ""))
         if blackbox:
             tail = ("该模型是<b>黑箱模型</b>，下面权重是特征重要性排序，"
                     "<b>不能当作真实持仓</b>；它胜出说明非线性成分重要，"
                     "但风格暴露仍应以可解释模型（线性约束类）为准。")
-        else:
+        elif assessed:
             tail = "这意味着它的收益来源高度集中，可被上述赛道指数直接复制。"
+        else:
+            tail = "权重可用于理解同期风格暴露，但不能据此宣称可被指数复制或预测未来收益。"
         out["penetration"] = {
-            "ok": True,
+            "ok": assessed,
             "model": best_row["模型"],
-            "text": (f"滚动样本外拟合显示，{name} 可被少数几个指数解释："
+            "text": (lead +
+                     f"滚动样本外拟合显示，{name} 可被少数几个指数解释："
                      f"<b>{top_txt}</b>。该模型样本外 R² = "
                      f"<b>{best_row['样本外R²']:.3f}</b>，"
                      f"年化跟踪误差 {best_row['样本外TE']:.1%}。" + tail),
+        }
+        out["evidence"] = {
+            "warn": not assessed,
+            "text": (
+                f"本次样本外覆盖 <b>{best_row.get('样本外天数') or '—'}</b> 个交易日、"
+                f"有效重估窗口 <b>{best_row.get('有效重估') or '—'}</b> 个。"
+                + (f"未达最低工程门槛（{MIN_OOS_SESSIONS} 日 / {MIN_REFITS} 窗），"
+                   "结论只能当诊断；" if not assessed else
+                   f"已达到最低工程门槛（{MIN_OOS_SESSIONS} 日 / {MIN_REFITS} 窗），"
+                   "但这只是最低资格，不代表统计显著、独立验证通过或策略有效；")
+                + "同一区间内比较多个模型存在选择偏差，排名不代表未来表现。"),
         }
         # 结论：低 TE = 好解释
         iqr = rank["样本外TE"].quantile([0.25, 0.75])

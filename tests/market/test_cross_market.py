@@ -32,9 +32,35 @@ class CrossMarketTests(unittest.TestCase):
         self.assertEqual(item["code"], "IXIC")
         self.assertGreater(item["corr_lag_full"], 0.99)
         self.assertGreater(item["corr_lag_120"], 0.99)
+        self.assertEqual(item["corr_window_used"], 120)
+        self.assertEqual(item["n_window_used"], 120)
         self.assertEqual(item["latest_us_date"], dates[-2].strftime("%Y-%m-%d"))
         self.assertIn(item["signal"], ("tailwind", "headwind", "mixed"))
         self.assertIn("前一交易日", out["notes"][0])
+
+    def test_provider_datetime_unit_is_normalized(self):
+        dates, domestic, us = self._fixture()
+        # 供应商索引可能保留秒级单位；本地行情是纳秒，merge_asof 直接合并会报错。
+        us_seconds = us.copy()
+        us_seconds.index = us_seconds.index.as_unit("s")
+        with patch("market_research.tasks.sync.cached", return_value=us_seconds):
+            out = cross_market_block(domestic, "2025-01-02",
+                                     dates[-1].strftime("%Y-%m-%d"))
+        self.assertTrue(out["ok"])
+        self.assertGreater(out["items"][0]["corr_lag_full"], 0.99)
+
+    def test_partial_window_is_not_labelled_as_120_day_correlation(self):
+        dates, domestic, us = self._fixture(100)
+        with patch("market_research.tasks.sync.cached", return_value=us):
+            out = cross_market_block(domestic, "2025-01-02",
+                                     dates[-1].strftime("%Y-%m-%d"))
+        item = out["items"][0]
+        # 共同样本不足 120 时不得用 100 个点冒充满窗相关。
+        self.assertIsNone(item["corr_lag_120"])
+        self.assertIsNotNone(item["corr_lag_60"])
+        self.assertEqual(item["corr_window_used"], 60)
+        self.assertEqual(item["n_window_used"], 60)
+        self.assertEqual(item["confidence"], "low")
 
     def test_missing_cache_returns_explicit_unavailable(self):
         dates, domestic, _ = self._fixture()
@@ -49,6 +75,8 @@ class CrossMarketTests(unittest.TestCase):
         self.assertEqual(_hedge_hint(0.5, 0.01, 150)["signal"], "tailwind")
         self.assertEqual(_hedge_hint(0.5, -0.01, 150)["signal"], "headwind")
         self.assertEqual(_hedge_hint(0.5, -0.01, 150)["confidence"], "medium")
+        self.assertEqual(_hedge_hint(0.5, -0.01, 60)["confidence"], "low")
+        self.assertEqual(_hedge_hint(0.5, -0.01, 120)["confidence"], "medium")
         self.assertEqual(_hedge_hint(0.1, 0.01, 150)["signal"], "mixed")
         self.assertEqual(_hedge_hint(None, 0.01, 150)["signal"], "unavailable")
 

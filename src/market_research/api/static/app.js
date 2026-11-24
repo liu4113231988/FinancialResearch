@@ -1357,6 +1357,7 @@ function renderInsights() {
   const ins = S.result.insights || {};
   const order = [
     ['penetration', 'good', '✓ 风格穿透成立'],
+    ['evidence', 'info', '≡ 证据覆盖'],
     ['exposure_gap', 'warn', '⚠ 仓位假设检验'],
     ['overfit', 'warn', '⚠ 过拟合检查'],
     ['drift', 'warn', '◎ 风格漂移'],
@@ -1367,10 +1368,12 @@ function renderInsights() {
   ];
   $('insights').innerHTML = order.filter(([k]) => ins[k]).map(([k, cls, hd]) => {
     const it = ins[k];
-    const realCls = it.warn ? (k === 'overfit' || k === 'drift' ||
-                                k === 'exposure_gap' ? 'warn' : 'info') : cls;
+    const insufficient = k === 'penetration' && it.ok === false;
+    const realCls = (it.warn || insufficient) ? (k === 'overfit' || k === 'drift' ||
+                                k === 'exposure_gap' || insufficient ? 'warn' : 'info') : cls;
+    const title = insufficient ? '⚠ 风格穿透（证据不足）' : hd;
     return `<div class="card ${realCls}">
-      <div class="hd">${hd}</div><div class="bd">${it.text}</div></div>`;
+      <div class="hd">${title}</div><div class="bd">${it.text}</div></div>`;
   }).join('');
 }
 
@@ -1503,12 +1506,17 @@ function renderRank() {
     return;
   }
   const gap = (best['样本外R²'] ?? 0) - (worst['样本外R²'] ?? 0);
+  const insufficient = rows.filter(x => x['评估状态'] === '不足').length;
   $('rankNote').innerHTML =
     `排名按<b>样本外 R²</b> 降序——即"用上一窗口拟合好的模型去预测下一段"的表现。
      最佳：<b style="color:var(--fg)">${escapeHtml(best['模型'])}（${fmtNum(best['样本外R²'], 3)}）</b>，
      最弱：${escapeHtml(worst['模型'])}（${fmtNum(worst['样本外R²'], 3)}），跨度 ${fmtNum(gap, 3)}。
      注意"窗口内 R²"高只代表训练集拟合得好，
-     <b>任何模型若训练/样本外差 &gt; 0.08，都说明它只是在背历史，不能用来外推</b>。`;
+     <b>任何模型若训练/样本外差 &gt; 0.08，都说明它只是在背历史，不能用来外推</b>。`
+    + (insufficient
+      ? `<br/><b>本次有 ${insufficient} 个模型样本外覆盖不足（&lt;60 个交易日或 &lt;3 个有效重估窗口），
+         其排名与"最佳"仅是诊断，不可当作推荐。</b>`
+      : '');
 }
 
 // ==================================================================== 选中模型详情

@@ -8,6 +8,36 @@ import market_research.config as C
 from market_research.ordering import ranked_frame
 from market_research.modeling.catalog import MODELS, ModelSpec
 from market_research.modeling.estimators import fit_window, estimate_equity, _score
+
+# B2/P3-R：评估资格下限。只用于标注与展示，**不改变排名顺序**；
+# 是否让不合格模型退出 rank/best/insights 属研究口径变更，待确认后单独实施。
+MIN_OOS_SESSIONS = 60
+MIN_REFITS = 3
+
+
+def _coverage_summary(syn: pd.Series, diag_rows: List[dict]) -> Dict[str, Any]:
+    """实际样本外覆盖：日数、起止、有效重估窗口数与资格结论。
+
+    `syn` 是逐日拼接的前向序列，日数不等于独立信息量；重估窗口数才是
+    真正独立的拟合样本。两者都低于工程下限时标记 ``insufficient``。
+    """
+    oos_n = int(len(syn))
+    reasons: List[str] = []
+    if oos_n < MIN_OOS_SESSIONS:
+        reasons.append(f"样本外仅 {oos_n} 个交易日，低于门槛 {MIN_OOS_SESSIONS}")
+    rebalances = int(len(diag_rows))
+    if rebalances < MIN_REFITS:
+        reasons.append(f"有效重估窗口仅 {rebalances} 个，低于门槛 {MIN_REFITS}")
+    return {
+        "oos_n": oos_n,
+        "oos_start": syn.index[0].strftime("%Y-%m-%d") if oos_n else None,
+        "oos_end": syn.index[-1].strftime("%Y-%m-%d") if oos_n else None,
+        "rebalance_count": rebalances,
+        "assessment_status": "insufficient" if reasons else "sufficient",
+        "assessment_reasons": reasons,
+    }
+
+
 def _failed_report(key: str, err: Exception) -> ModelReport:
     """某个模型失败时返回一个占位报告，保证前端仍能渲染完整表格。"""
     spec = MODELS.get(key, ModelSpec(key, key, "unknown", ""))
@@ -365,6 +395,10 @@ class ModelZoo:
                 elif isinstance(v0, str):
                     agg_extra[k] = None
 
+        # B2/P3-R：覆盖元数据放在 extras 聚合之后，避免被逐窗指标覆盖。
+        # 页面/API/导出据此区分"已算出"与"评估充分"。
+        agg_extra.update(_coverage_summary(syn, diag_rows))
+
         return ModelReport(
             key=key, name=spec.name, family=spec.family, desc=spec.desc,
             interpretable=spec.interpretable,
@@ -385,12 +419,18 @@ class ModelZoo:
         """按指定指标生成排名表（默认样本外 R²，越大越好）。"""
         rows = []
         for k, r in reports.items():
+            status = r.extra.get("assessment_status")
             rows.append({
                 "key": k, "模型": r.name, "流派": r.family,
                 "可解释": "是" if r.interpretable else "否",
                 "样本外R²": r.oos_r2, "样本外TE": r.oos_te,
                 "窗口内R²": r.fit_r2_mean, "窗口内TE": r.fit_te_mean,
                 "方向一致率": r.win, "隐含仓位": r.beta, "耗时": r.elapsed,
+                # 评估资格（新增，不影响排序）：不足时页面不得称"最佳/可复制"
+                "样本外天数": r.extra.get("oos_n"),
+                "有效重估": r.extra.get("rebalance_count"),
+                "评估状态": ("有效" if status == "sufficient" else
+                             "不足" if status == "insufficient" else "未知"),
             })
         df = pd.DataFrame(rows)
         if key not in df.columns:

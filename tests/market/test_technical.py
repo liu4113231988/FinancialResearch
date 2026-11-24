@@ -90,6 +90,26 @@ class TechnicalTests(unittest.TestCase):
         self.assertIn("未建立稳定的日频方向预测优势", notes)
         json.dumps(_jsafe(result), allow_nan=False)
 
+    def test_evaluation_adds_flat_audit_without_changing_main_label(self):
+        # 每 7 个交易日才跳一档：5 日周期里既有平盘也有上涨，两种口径都能算。
+        n = 520
+        close = 100. + np.arange(n) // 7
+        frame = pd.DataFrame({"open": close, "high": close, "low": close,
+                              "close": close, "volume": 1000.},
+                             index=pd.bdate_range('2023-01-02', periods=n))
+        out = direction_forecast(frame, features_for(frame, indicators(frame)),
+                                 5, frame.index[0])
+        ev = out['evaluation']
+        self.assertEqual(ev['label_policy'], 'flat_as_down')
+        self.assertGreater(ev['flat_n'], 0)
+        self.assertGreater(ev['n_excluding_flat'], 0)
+        self.assertEqual(ev['n'], ev['flat_n'] + ev['n_excluding_flat'])
+        self.assertTrue(np.isfinite(ev['brier_excluding_flat']))
+        # 主指标仍按"平盘算下跌"计算；新增字段只是并列对照，不替换主口径。
+        self.assertNotEqual(ev['n_excluding_flat'], ev['n'])
+        self.assertTrue(0. <= ev['accuracy_excluding_flat'] <= 1.)
+        json.dumps(_jsafe(out), allow_nan=False)
+
     def test_signals_are_first_condition_and_use_past_only(self):
         frame=sample()
         ind=indicators(frame)

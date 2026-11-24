@@ -15,8 +15,8 @@ import pandas as pd
 
 import market_research.config as C
 import market_research.funds.holdings as H
-from market_research.funds.payloads import holdings_payload, model_payload
-from market_research.modeling.engine import ModelReport
+from market_research.funds.payloads import build_insights, holdings_payload, model_payload
+from market_research.modeling.engine import ModelReport, ModelZoo
 from market_research.research.report import timing_comparison
 
 
@@ -746,6 +746,56 @@ class BacktestCurrentPayloadTest(unittest.TestCase):
         variant = next(v for v in p["variants"] if "估值" in v["name"])
         self.assertTrue(variant["degraded"])
         self.assertIn("行业估值不可用", variant["note"])
+
+
+class AssessmentCoverageTest(unittest.TestCase):
+    """B2/P3-R：覆盖不足时必须显式标注，且结论不得称"可复制/推荐"。"""
+
+    def _case(self, status, reasons, oos_n, refits):
+        idx = pd.bdate_range("2021-01-04", periods=300)
+        rng = np.random.default_rng(3)
+        syn = pd.Series(rng.normal(0, 0.01, len(idx)), index=idx)
+        rep = _model_report(idx, syn)
+        rep.extra.update({
+            "assessment_status": status, "assessment_reasons": reasons,
+            "oos_n": oos_n, "rebalance_count": refits,
+            "oos_start": idx[0].strftime("%Y-%m-%d"),
+            "oos_end": idx[-1].strftime("%Y-%m-%d"),
+        })
+        nav = 2.5 * np.exp(syn.cumsum())
+        payload = {"pcr": model_payload(rep, nav)}
+        rank = ModelZoo.rank({"pcr": rep})
+        ins = build_insights("110022", "测试基金",
+                             {"stats": {}, "nav": [1.0] * 300}, {},
+                             {"pcr": rep}, rank, payload)
+        return payload, rank, ins
+
+    def test_payload_and_rank_expose_coverage(self):
+        payload, rank, _ = self._case("insufficient", ["样本外仅 7 个交易日"],
+                                      7, 1)
+        assessment = payload["pcr"]["assessment"]
+        self.assertEqual(assessment["status"], "insufficient")
+        self.assertEqual(assessment["oos_n"], 7)
+        self.assertEqual(assessment["min_oos_sessions"], 60)
+        self.assertEqual(rank.iloc[0]["评估状态"], "不足")
+        self.assertEqual(rank.iloc[0]["有效重估"], 1)
+
+    def test_insufficient_evidence_downgrades_wording(self):
+        _, rank, ins = self._case("insufficient", ["样本外仅 7 个交易日"], 7, 1)
+        self.assertEqual(rank.iloc[0]["评估状态"], "不足")
+        self.assertFalse(ins["penetration"]["ok"])
+        self.assertIn("样本外覆盖不足", ins["penetration"]["text"])
+        self.assertNotIn("可被上述赛道指数直接复制", ins["penetration"]["text"])
+        self.assertTrue(ins["evidence"]["warn"])
+        self.assertIn("60 日 / 3 窗", ins["evidence"]["text"])
+
+    def test_sufficient_evidence_keeps_replication_wording_with_caveat(self):
+        _, rank, ins = self._case("sufficient", [], 300, 10)
+        self.assertEqual(rank.iloc[0]["评估状态"], "有效")
+        self.assertTrue(ins["penetration"]["ok"])
+        self.assertIn("可被上述赛道指数直接复制", ins["penetration"]["text"])
+        self.assertFalse(ins["evidence"]["warn"])
+        self.assertIn("不代表统计显著", ins["evidence"]["text"])
 
 
 if __name__ == "__main__":
