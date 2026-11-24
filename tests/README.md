@@ -1,6 +1,6 @@
 # 测试说明
 
-核对日期：2026-11-22。最新全量回归：611 项 unittest 通过，三套前端脚本通过。先在项目根目录运行 `uv sync --locked`。下列命令使用可安装的 `market_research` 包及当前测试目录；无需修改 `PYTHONPATH`。
+核对日期：2026-11-24。最新全量回归：618 项 unittest 通过，三套前端脚本通过。先在项目根目录运行 `uv sync --locked`。下列命令使用可安装的 `market_research` 包及当前测试目录；无需修改 `PYTHONPATH`。
 
 | 目录 | 内容 |
 | --- | --- |

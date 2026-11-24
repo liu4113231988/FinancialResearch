@@ -31,6 +31,21 @@ class ValidationIOTests(unittest.TestCase):
     def read(self,name='good.csv'):
         return validation.read_bars(dict(kind='stock',code='sh600519',csv=name),self.plan,self.root)
 
+    def test_cross_market_reference_is_read_only_and_versioned(self):
+        reference = {'ok': False, 'items': [], 'notes': ['缓存不可用']}
+        with patch.object(validation, 'cross_market_block', return_value=reference) as block, \
+                patch.object(validation, 'evaluate_asset', return_value={'complete': True}), \
+                patch.object(validation, 'comparison_coverage',
+                             return_value={'unit': 'paired_comparisons',
+                                           'planned': 1, 'sufficient': 1,
+                                           'incomplete': [], 'sufficient_rows': 1}):
+            report = validation.run_plan(self.plan, self.root)
+        asset = report['assets'][0]
+        self.assertEqual(report['version'], 16)
+        self.assertEqual(asset['cross_market_reference'], reference)
+        block.assert_called_once()
+        self.assertEqual(asset['status'], 'evaluated')
+
     def test_report_created_during_evaluation_is_never_overwritten(self):
         source=self.root/'plan.json'; target=self.root/'report.json'
         source.write_text('{}',encoding='utf-8')

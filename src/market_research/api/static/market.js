@@ -1,6 +1,6 @@
 /* 股票与指数工作区：入口切换、请求状态和市场图表。 */
 'use strict';
-const API = '/api/v1';
+var API = '/api/v1';
 window.MarketApp = (() => {
   const el = id => document.getElementById(id);
   const views = { stock: {}, index: {}, fund: {} };
@@ -296,6 +296,27 @@ window.MarketApp = (() => {
     plot('stockRsi',series.dates,[line('RSI14',series.rsi,{markLine:{symbol:'none',silent:true,label:{color:'#aabbbf'},lineStyle:{color:'#7d8f95',type:'dashed'},data:[{yAxis:30},{yAxis:70}]}})],false,{yAxis:{type:'value',min:0,max:100,axisLabel:{color:'#8796ab'},splitLine:{lineStyle:{color:'#25343c'}}}});
     el('stockSignalHistory').replaceChildren(...(t.signals.length?t.signals.map(signal=>{const row=part('div','','signal-row');row.append(part('time',signal.date),part('span',signal.label),part('span',`收盘 ${num(signal.close)}`),part('span',`趋势分 ${signal.score}`));return row;}):[part('p','当前区间没有首次满足的规则条件。','note')]));
   }
+  function renderCrossMarket(block) {
+    const panel = el('marketCrossPanel');
+    panel.hidden = !block || !block.ok;
+    if (panel.hidden) return;
+    const part = (tag, text, cls) => {const e=document.createElement(tag);e.textContent=text;if(cls)e.className=cls;return e;};
+    const cov = block.notes.join(' ');
+    el('marketCrossAsOf').textContent = `${block.window.n_domestic_returns} 个本地交易日 · ${block.rule_version}`;
+    el('marketCrossBody').replaceChildren(...(block.items || []).map(item => {
+      const tr = document.createElement('tr');
+      const labels = {tailwind:'顺风',headwind:'逆风',mixed:'不判断',unavailable:'数据不足'};
+      const signal = labels[item.signal] || '—';
+      for (const text of [item.name, num(item.corr_lag_60), num(item.corr_lag_120),
+        num(item.corr_same_60), item.latest_us_date || '—', signal]) tr.append(part('td', text));
+      const last = tr.lastElementChild;
+      if (item.signal === 'tailwind') last.className = 'signal-tailwind';
+      if (item.signal === 'headwind') last.className = 'signal-headwind';
+      last.title = item.hint || cov;
+      return tr;
+    }));
+    el('marketCrossNote').textContent = cov;
+  }
   function render(data) {
     el('marketEmpty').hidden = true; el('marketResult').hidden = false;
     const s = data.stats, m = data.meta;
@@ -342,6 +363,7 @@ window.MarketApp = (() => {
     el('marketRelative').replaceChildren(...(c.ok ? [
       `相对 ${c.name} 区间收益差 ${pct(c.excess_return)}`, `Beta ${num(c.beta)}`, `日收益相关系数 ${num(c.correlation)}`,
     ] : ['暂无可用的基准比较']).map(text => {const p = document.createElement('p'); p.textContent = text; return p;}));
+    renderCrossMarket(data.cross_correlation);
     plot('marketDrawdown', series.dates, [line('回撤', series.drawdown, {areaStyle: {opacity: 0.12}})], true);
     plot('marketVolatility', series.dates, [line('20 日年化波动', series.volatility)], true);
     el('marketNotes').replaceChildren(...data.warnings.map(text => {const li = document.createElement('li'); li.textContent = text; return li;}));
@@ -355,9 +377,9 @@ window.MarketApp = (() => {
     el('marketRefresh').onclick = () => result && submit(result.code, true);
     el('marketExportQuality').onclick = () => {
       if (!result?.quality) return;
-      const {kind, code, status, completeness, quality, meta} = result;
-      downloadJson({kind, code, status, completeness, quality, adjust: meta.adjust,
-        benchmark: meta.benchmark, provenance: meta.provenance},
+      const {kind, code, status, completeness, quality, meta, cross_correlation} = result;
+      downloadJson({kind, code, status, completeness, quality, cross_correlation,
+        adjust: meta.adjust, benchmark: meta.benchmark, provenance: meta.provenance},
       `market_quality_${code}_${quality.actual_end}.json`);
     };
     el('marketFilters').onchange = () => {if (result) status('区间或口径已更改，点击「应用区间」更新结果。');};

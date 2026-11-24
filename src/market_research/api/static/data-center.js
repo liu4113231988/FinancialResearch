@@ -1,11 +1,11 @@
 /* Persistent asset synchronization, independent of the research workspace. */
 'use strict';
-const API = '/api/v1';
+var API = '/api/v1';
 (() => {
   const $ = id => document.getElementById(id);
   const dialog = $('dataCenter');
   const states = {pending: '等待同步', running: '同步中', success: '已同步', error: '同步失败'};
-  const kinds = {stock: '股票', fund: '基金', index: '指数'};
+  const kinds = {stock: '股票', fund: '基金', index: '指数', us_index: '美股指数'};
   let snapshot, busy = false, refreshAgain = false, readError = '', page = 1;
   const names = new Map();
   function node(tag, text, cls) {const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e;}
@@ -64,7 +64,7 @@ const API = '/api/v1';
     $('openDataCenter').classList.toggle('has-error', failed > 0);
     $('syncSchedule').textContent = `每日 ${snapshot.time} · 北京时间${snapshot.enabled ? '' : ' · 服务内调度已停用'}`;
     $('syncOverview').replaceChildren(...[
-      ['股票',counts.stock], ['基金',counts.fund], ['指数',counts.index], ['待同步 / 进行中',waiting], ['失败口径',failed],
+      ['股票',counts.stock], ['基金',counts.fund], ['指数',counts.index], ['美股指数',counts.us_index], ['待同步 / 进行中',waiting], ['失败口径',failed],
     ].map(([label,value]) => {const p=node('div');p.append(node('span',label),node('strong',String(value)));return p;}));
     $('universeSummary').replaceChildren(node('span','你的研究范围','universe-caption'), ...Object.keys(kinds).map(kind=>{const p=node('span');p.append(node('b',String(counts[kind])),document.createTextNode(' '+kinds[kind]));return p;}));
     $('syncUpdated').textContent = `状态更新于 ${new Date().toLocaleTimeString('zh-CN')} · 列表按同步口径显示，同一证券可能有多条`;
@@ -79,10 +79,12 @@ const API = '/api/v1';
   }
   function changeKind() {
     const kind = $('addAssetKind').value;
-    $('addBasisField').hidden = kind === 'index';
+    $('addBasisField').hidden = kind === 'index' || kind === 'us_index';
     const options = kind === 'fund' ? [['total','总回报'],['cum','累计净值']] : [['qfq','前复权'],['hfq','后复权'],['','不复权']];
     $('addAssetBasis').replaceChildren(...options.map(([value,text]) => new Option(text,value)));
-    $('addAssetCode').placeholder = kind === 'fund' ? '如 110022' : kind === 'index' ? '如 sh000300' : '如 600519';
+    $('addAssetCode').placeholder = kind === 'fund' ? '如 110022'
+      : kind === 'index' ? '如 sh000300'
+      : kind === 'us_index' ? '如 IXIC / INX / DJI' : '如 600519';
   }
   $('openDataCenter').onclick = () => {dialog.showModal(); refresh();};
   $('closeDataCenter').onclick = () => dialog.close();
@@ -96,13 +98,13 @@ const API = '/api/v1';
   $('syncLastPage').onclick = () => {page = Number.MAX_SAFE_INTEGER; renderRows();};
   $('addAssetForm').onsubmit = async event => {
     event.preventDefault(); const button = $('addAssetButton'); button.disabled = true;
-    try {const code=$('addAssetCode').value.trim(), kind=$('addAssetKind').value; await api(API + '/sync/assets',{kind,code,basis:kind==='index'?'':$('addAssetBasis').value}); feedback(`${code} 已加入研究范围；新增口径会自动补齐历史。`); $('assetSearch').value=''; $('assetState').value=''; $('assetKind').value=kind; page=1; await refresh();}
+    try {const code=$('addAssetCode').value.trim(), kind=$('addAssetKind').value; await api(API + '/sync/assets',{kind,code,basis:(kind==='index'||kind==='us_index')?'':$('addAssetBasis').value}); feedback(`${code} 已加入研究范围；新增口径会自动补齐历史。`); $('assetSearch').value=''; $('assetState').value=''; $('assetKind').value=kind; page=1; await refresh();}
     catch(error) {feedback(error.message,true);} finally {button.disabled=false;}
   };
   $('workspaceDate').textContent = new Date().toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long',timeZone:'Asia/Shanghai'});
   function loadNames() {
     return api(API + '/catalog').then(cat => {
-      for (const item of [...cat.known_funds,...cat.assets.stocks,...cat.assets.indices]) names.set(item.code,item.name);
+      for (const item of [...cat.known_funds,...cat.assets.stocks,...cat.assets.indices,...(cat.assets.us_indices || [])]) names.set(item.code,item.name);
       if(snapshot) renderRows();
       $('syncUpdated').textContent = '状态将自动刷新';
     }).catch(() => {

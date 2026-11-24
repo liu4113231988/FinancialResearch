@@ -2,6 +2,11 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync('src/market_research/api/static/app.js', 'utf8');
+for (const name of ['app.js', 'market.js', 'data-center.js', 'ledger.js']) {
+  const text = fs.readFileSync(`src/market_research/api/static/${name}`, 'utf8');
+  assert.doesNotMatch(text, /^const API\s*=/m,
+    `${name} must not declare a global const API`);
+}
 const nodes = new Map();
 const pending = [];
 const context = {URLSearchParams, setTimeout: fn => fn(),

@@ -1,6 +1,7 @@
 """股票、指数日线分析；与基金风格拟合独立，复用 DuckDB 和绩效指标。"""
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
+import logging
 import re
 import numpy as np
 import pandas as pd
@@ -10,6 +11,7 @@ from market_research.modeling.backtest import perf_metrics
 from market_research.serialization import _jsafe
 from market_research.validation.window import parse_window
 
+LOG = logging.getLogger(__name__)
 STOCKS = {"sh600519": "贵州茅台", "sz000001": "平安银行", "sz300750": "宁德时代", "sh601318": "中国平安"}
 INDICES = {k: v for k, v in C.NAME_OF.items() if re.fullmatch(r"(?:sh|sz)\d{6}", k)}
 
@@ -250,6 +252,14 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
             technical['notices'] = [n for n in technical['notices'] if '复权' not in n]
             technical['notices'].append('指数为价格指数；技术条件未在实际ETF成交、费用与跟踪偏差上验证。')
     payload = market_payload(kind, code, bars, reference, benchmark, adjust, warnings, context.tail(1500))
+    try:
+        from market_research.market.cross_market import cross_market_block
+        payload["cross_correlation"] = cross_market_block(bars.close, start, end)
+    except Exception as error:                              # noqa: BLE001
+        LOG.warning("跨市场相关性计算失败：%s", error)
+        payload["cross_correlation"] = {"ok": False, "rule_version": "cross_market_v1",
+                                        "items": [], "notes": ["跨市场相关性暂不可用，不影响价格与风险分析。"]}
+        warnings.append("跨市场相关性暂不可用，不影响价格与风险分析。")
     payload["quality"] = market_quality(bars, reference, start, end, calendar, calendar_info)
     quality = payload["quality"]
     sources = {}

@@ -27,6 +27,14 @@ class SyncTests(unittest.TestCase):
         self.config.stop()
         self.directory.cleanup()
 
+    def test_us_index_registration_and_default_ensure(self):
+        self.assertEqual(sync.register("us_index", "ixic"), "us_index:IXIC:")
+        with self.assertRaises(ValueError):
+            sync.register("us_index", "spy")
+        sync.ensure_cross_market_assets()
+        codes = sorted(a["code"] for a in sync.assets() if a["kind"] == "us_index")
+        self.assertEqual(codes, ["DJI", "INX", "IXIC"])
+
     def test_daily_schedule_catchup_and_retry(self):
         with patch.dict(os.environ, {"FIL_SYNC_TIME": "18:30"}):
             asset = {"last_success": "2026-10-29T18:31:00+08:00"}

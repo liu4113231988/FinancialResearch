@@ -244,6 +244,29 @@
         "raw_response_included": false
       }
     },
+    "index_us_sina": {
+      "endpoint": "akshare index_us_stock_sina",
+      "fields": [
+        "date",
+        "close"
+      ],
+      "date_field": "date",
+      "numeric_field": "close",
+      "rows": [
+        {
+          "date": "2026-11-02",
+          "close": 5800.0
+        },
+        {
+          "date": "2026-11-03",
+          "close": 5810.0
+        },
+        {
+          "date": "2026-11-04",
+          "close": 5820.0
+        }
+      ]
+    },
     "csindex_pe": {
       "endpoint": "akshare stock_zh_index_value_csindex(市盈率2)",
       "fields": [

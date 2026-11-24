@@ -32,6 +32,10 @@ CONTRACTS = {
         "endpoint": "akshare index_hist_sw(period=day)",
         "fields": ["日期", "收盘"],
     },
+    "index_us_sina": {
+        "endpoint": "akshare index_us_stock_sina",
+        "fields": ["date", "close"],
+    },
     "csindex_pe": {
         "endpoint": "akshare stock_zh_index_value_csindex(市盈率2)",
         "fields": ["日期", "市盈率2"],

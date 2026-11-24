@@ -162,6 +162,8 @@ class IconCache:
 async def lifespan(app):
     settings=Settings.load().validate()
     JOBS.migrate()
+    from market_research.tasks import sync
+    sync.ensure_cross_market_assets()
     if settings.auto_services:
         # The independent singleton supervisor survives API restart. Every
         # analysis has its own process; duplicate supervisors exit on file lock.

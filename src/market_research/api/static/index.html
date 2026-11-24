@@ -79,7 +79,7 @@
   <div class="dc-heading"><div><p class="eyebrow">YOUR MARKET UNIVERSE</p><h2 id="dataCenterTitle">数据中心</h2><p class="meta" id="syncSchedule">读取同步计划…</p></div><button type="button" id="closeDataCenter" class="icon-button" aria-label="关闭数据中心">✕</button></div>
   <div class="sync-overview" id="syncOverview"></div>
   <form id="addAssetForm" class="add-asset-form">
-    <label>资产<select id="addAssetKind"><option value="stock">股票</option><option value="fund">基金</option><option value="index">指数</option></select></label>
+    <label>资产<select id="addAssetKind"><option value="stock">股票</option><option value="fund">基金</option><option value="index">指数</option><option value="us_index">美股指数</option></select></label>
     <label class="asset-code-field">证券代码<input id="addAssetCode" placeholder="如 600519" required maxlength="8" autocomplete="off"></label>
     <label id="addBasisField">数据口径<select id="addAssetBasis"><option value="qfq">前复权</option><option value="hfq">后复权</option><option value="">不复权</option></select></label>
     <button type="submit" id="addAssetButton" class="btn primary">＋ 添加资产</button>
@@ -87,7 +87,7 @@
   <p class="dc-help">添加后自动排队补齐历史；复权股票与基金每天校验完整历史，其他行情增量更新。</p>
   <div class="dc-toolbar">
     <label class="sr-only" for="assetSearch">搜索证券名称或代码</label><input id="assetSearch" type="search" placeholder="搜索名称或代码">
-    <label class="sr-only" for="assetKind">资产类型</label><select id="assetKind"><option value="">全部类型</option><option value="stock">股票</option><option value="fund">基金</option><option value="index">指数</option></select>
+    <label class="sr-only" for="assetKind">资产类型</label><select id="assetKind"><option value="">全部类型</option><option value="stock">股票</option><option value="fund">基金</option><option value="index">指数</option><option value="us_index">美股指数</option></select>
     <label class="sr-only" for="assetState">同步状态</label><select id="assetState"><option value="">全部状态</option><option value="error">同步失败</option><option value="pending">等待同步</option><option value="running">同步中</option><option value="success">已同步</option></select>
     <button type="button" id="refreshSync" class="btn ghost">刷新状态</button>
   </div>
@@ -178,6 +178,14 @@
     </div>
     <div class="grid2 market-charts"><section class="panel"><h3>成交量 <span class="meta" id="marketVolumeUnit"></span></h3><div id="marketVolume" class="chart short" role="img" aria-label="历史成交量"></div><p class="note" id="marketVolumeNote"></p></section><section class="panel"><h3>与基准比较 · 起点归一为 1</h3><div id="marketCompare" class="chart short" role="img" aria-label="同区间基准表现比较"></div><p class="note" id="marketCompareNote"></p></section></div>
     <div class="market-relative" id="marketRelative"></div>
+    <section class="panel" id="marketCrossPanel" hidden>
+      <div class="sec-head"><h3>跨市场相关性 · 美股三大指数</h3><span class="meta" id="marketCrossAsOf"></span></div>
+      <div class="table-wrap"><table class="tbl" id="marketCrossTable">
+        <thead><tr><th class="l">指数</th><th>滞后60日</th><th>滞后120日</th><th>同日60日</th><th>最新美股日</th><th>方向提示</th></tr></thead>
+        <tbody id="marketCrossBody"></tbody>
+      </table></div>
+      <p class="note" id="marketCrossNote"></p>
+    </section>
     <div class="grid2 market-charts"><section class="panel"><h3>历史回撤</h3><div id="marketDrawdown" class="chart short" role="img" aria-label="历史最大值至当前的回撤"></div></section><section class="panel"><h3>20 日滚动年化波动</h3><div id="marketVolatility" class="chart short" role="img" aria-label="20日滚动年化波动率"></div></section></div>
     <section class="market-notes" aria-label="数据口径"><h3>数据与口径</h3><ul id="marketNotes"></ul></section>
   </div>

@@ -136,7 +136,7 @@ class MarketRequest(WindowRequest):
 
 
 class SyncAssetRequest(RequestModel):
-    kind: Literal["stock", "fund", "index"]
+    kind: Literal["stock", "fund", "index", "us_index"]
     code: str
     basis: str = ""
 

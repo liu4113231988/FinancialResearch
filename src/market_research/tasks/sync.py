@@ -100,9 +100,14 @@ def migrate():
 
 
 def register(kind, code, basis=""):
-    if kind not in ("stock", "index", "fund"):
+    if kind not in ("stock", "index", "fund", "us_index"):
         raise ValueError("未知同步类型")
-    if kind == "fund":
+    if kind == "us_index":
+        code = str(code).strip().upper()
+        if code not in C.US_INDEX:
+            raise ValueError("未知美股指数；可选 IXIC / INX / DJI")
+        basis = ""
+    elif kind == "fund":
         if not (isinstance(code, str) and len(code) == 6 and code.isdigit()):
             raise ValueError("基金代码必须为六位数字")
         basis = basis or "total"
@@ -158,6 +163,17 @@ def discover():
                     add("index", code)
         except (KeyError, ValueError):
             LOG.warning("不能识别历史数据集 %s", name)
+
+
+def ensure_cross_market_assets():
+    """跨市场观察指数默认纳入同步，但不进入 A 股候选池。"""
+    migrate()
+    with storage.connection() as db:
+        for code in C.US_INDEX:
+            db.execute(
+                "INSERT INTO sync_assets(asset_key,kind,code,basis) VALUES (?,?,?,?) "
+                "ON CONFLICT DO NOTHING",
+                [f"us_index:{code}:", "us_index", code, ""])
 
 
 def assets():
@@ -270,6 +286,8 @@ def fetch(asset, start, end, abort=None):
         if series.attrs.get("degraded"):
             raise ValueError("总回报构造降级，保留上一份数据")
         result = series.to_frame()
+    elif kind == "us_index":
+        result = D.fetch_us_index_sina(code, start).to_frame(name="close")
     elif kind == "index" and code in C.SW_INDUSTRY:
         result = D.fetch_index_sw(code, start).to_frame(name="close")
     else:
@@ -550,6 +568,7 @@ def main():
     schedule_time()
     C.DATA_DIR.mkdir(parents=True, exist_ok=True)
     logs.configure("sync")
+    ensure_cross_market_assets()
     # ★ --once 才是计划任务/worker 实际调用的入口，不能绕过总开关；
     #   只放在 serve() 里等于 FIL_SYNC_ENABLED=0 对定时同步无效。
     if not enabled():

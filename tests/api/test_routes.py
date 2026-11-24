@@ -24,6 +24,12 @@ class HealthTests(unittest.TestCase):
         from market_research.api.routes import meta as meta_route
         self.meta = meta_route
 
+    def test_catalog_exposes_us_indices_without_changing_rbsa_pool(self):
+        body = self.client.get("/api/catalog").json()
+        self.assertEqual([item["code"] for item in body["assets"]["us_indices"]],
+                         list(C.US_INDEX))
+        self.assertNotIn("IXIC", body["candidate_pool"]["宽基"])
+
     def test_liveness_does_not_depend_on_storage(self):
         response = self.client.get("/api/health")
         self.assertEqual(response.status_code, 200)

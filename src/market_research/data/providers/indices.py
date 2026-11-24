@@ -40,6 +40,23 @@ def fetch_index_sw(code: str, start: Optional[str] = None) -> pd.Series:
     return _clean_series(s, start)
 
 
+def fetch_us_index_sina(code: str, start: Optional[str] = None) -> pd.Series:
+    """美股指数日线收盘价。code 用无点短码（IXIC/INX/DJI），symbol 映射见 config。"""
+    import akshare as ak
+    if code not in C.US_INDEX_SYMBOL:
+        raise ValueError(f"未知美股指数：{code}")
+    symbol = C.US_INDEX_SYMBOL[code]
+    df = _retry(ak.index_us_stock_sina, symbol=symbol, source="index_us_sina")
+    provenance.require_columns(df, ["date", "close"], "index_us_sina")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
+    s = pd.to_numeric(df["close"], errors="coerce")
+    s.index = df["date"]
+    s = s.astype(float).dropna().sort_index()
+    s.name = code
+    return _clean_series(s, start)
+
+
 def _fetch_one(code: str, start: str, end: Optional[str]):
     if code in C.SW_INDUSTRY:
         s = fetch_index_sw(code, start)

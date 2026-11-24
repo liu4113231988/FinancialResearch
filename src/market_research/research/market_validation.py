@@ -14,6 +14,7 @@ from scipy.stats import norm
 
 from market_research.market.analysis import normalize_code, clean_bars
 from market_research.market.context import context_features
+from market_research.market.cross_market import cross_market_block
 from market_research.market.targets import horizon_data
 from market_research.market.technical import indicators, features_for, direction_forecast, compare_forecasts
 from market_research.market.uncertainty import block_intervals
@@ -23,7 +24,7 @@ from market_research.serialization import _jsafe
 from market_research.validation.window import _iso
 
 VARIANTS = ('base', 'volatility', 'volume', 'relative', 'all')
-VERSION = 15
+VERSION = 16
 
 
 def validate_plan(plan):
@@ -303,6 +304,13 @@ def run_plan(plan, root, progress=None, execution_only=False):
             row.update(actual_start=bars.index[0].date().isoformat(),actual_end=bars.index[-1].date().isoformat())
             row['expected_end']=check_calendar_coverage(bars,calendar,plan,'资产行情')
             row['calendar_sha256'] = hashlib.sha256(calendar.asi8.tobytes()).hexdigest() if calendar is not None else None
+            try:
+                row['cross_market_reference'] = cross_market_block(
+                    bars.close, plan['start'], plan['end'])
+            except Exception as error:                      # noqa: BLE001
+                row['cross_market_reference'] = {
+                    'ok': False, 'reason': f'{type(error).__name__}: {str(error)[:160]}',
+                    'items': [], 'notes': ['跨市场参考计算失败，不影响方向/成交验证。']}
             if execution_only:
                 row.update(data_sha256=fingerprint(bars), calendar_sha256=hashlib.sha256(calendar.asi8.tobytes()).hexdigest() if calendar is not None else None,
                            result=evaluate_execution_asset(bars, plan, calendar, capital_config))

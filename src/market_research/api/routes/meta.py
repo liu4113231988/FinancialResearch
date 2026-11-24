@@ -174,7 +174,8 @@ def catalog():
                 known.append({"code": k, "name": v})
     return {
         "assets": {"stocks": [{"code": k, "name": v} for k, v in STOCKS.items()],
-                   "indices": [{"code": k, "name": v} for k, v in INDICES.items()]},
+                   "indices": [{"code": k, "name": v} for k, v in INDICES.items()],
+                   "us_indices": [{"code": k, "name": v} for k, v in C.US_INDEX.items()]},
         "models": model_catalog(),
         "default_models": ["enet_slsqp", "lasso", "ridge", "corr_topk", "pcr"],
         "quick_models": ["enet_slsqp", "corr_topk", "pcr", "rf", "krr"],

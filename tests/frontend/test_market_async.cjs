@@ -5,6 +5,10 @@ const source = fs.readFileSync('src/market_research/api/static/market.js', 'utf8
 const app = fs.readFileSync('src/market_research/api/static/app.js', 'utf8');
 assert.match(source, /本次未入账/);
 assert.match(app, /registration: m\.registration/);
+assert.match(source, /renderCrossMarket\(data\.cross_correlation\)/);
+assert.match(source, /quality, cross_correlation/);
+assert.match(fs.readFileSync('src/market_research/api/static/index.html', 'utf8'),
+  /id="marketCrossPanel"/);
 const tick = () => new Promise(setImmediate);
 function setup(handler) {
   const dom = new JSDOM(fs.readFileSync('src/market_research/api/static/index.html', 'utf8'), {runScripts:'outside-only', url:'http://localhost'});
@@ -26,6 +30,28 @@ function setup(handler) {
   return {w,d,timers,close:()=>w.close()};
 }
 (async () => {
+  {
+    const dom = new JSDOM(fs.readFileSync('src/market_research/api/static/index.html', 'utf8'),
+      {runScripts:'outside-only', url:'http://localhost'});
+    dom.window.echarts = {init:()=>({setOption() {},resize() {},dispose() {}})};
+    dom.window.fetch = async path => ({
+      ok:true, status:200,
+      json:async () => String(path).endsWith('/catalog')
+        ? {known_funds:[], assets:{stocks:[], indices:[]},
+           models:[], quick_models:[], full_models:[]} : {}});
+    let current = '';
+    try {
+      for (const name of ['market.js','data-center.js','ledger.js','app.js']) {
+        current = name;
+        dom.window.eval(fs.readFileSync(`src/market_research/api/static/${name}`, 'utf8'));
+      }
+      await tick();
+    } catch (error) {
+      assert.fail(`${current} cannot coexist on one page: ${error.message}`);
+    } finally {
+      dom.window.close();
+    }
+  }
   let resolvePost, count=0; const calls=[];
   const h=setup((url, opts) => {
     calls.push(url);

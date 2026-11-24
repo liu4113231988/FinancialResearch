@@ -1,6 +1,6 @@
 /* Market Research · 前端逻辑 */
 'use strict';
-const API = '/api/v1';
+var API = '/api/v1';
 
 // ==================================================================== 全局状态
 const S = {
