@@ -92,10 +92,10 @@
 
 **新增能力（2026-11-24，工作区改动）**：独立新增 `us_index` 同步资产（IXIC/INX/DJI），不进入 A 股 RBSA 候选池；`cross_market_block` 输出同日探索相关和严格滞后一交易日的 60/120/全样本相关，方向提示仅取滞后口径，样本不足或弱相关时标为不判断。市场结果页新增只读表格与免责说明；数据中心可查看/同步美股指数；结果导出和离线验证报告（版本 16）增加 `cross_market_reference`，不进入模型输入、排名、覆盖率或完成状态。结果缓存版本升至 15。618 项 unittest 与三套前端脚本通过；akshare 接口已做一次联网冒烟，但未把实时判断当作策略有效性验证。随后修正窗口语义：共同样本不足 120/60 时不输出对应窗口相关，方向提示置信度按**实际参与相关性的窗口样本数**判定（60 日窗口不会因共同样本更长而升级），并新增 `corr_window_used/n_window_used`。
 - **P3-N**（行为层，会改变资金曲线，未动）：`market/capital.py:71` 无 `units==0` 门控 vs `market/execution.py:99` 仅空仓首买；`capital.py:143-145` `_retry_note` 文案与 orders=targets.shift(1) 实现不符；`compare_probability_execution` 两种账户实际评估不同策略。
-- **P3-O**（口径）：离线 `(future > 0)`（`market/technical.py:90`）把平盘计入下跌类，台账 `neutral` 不入分母（`predictions/judge.py:173-176`）；跨口径比较 accuracy/Brier 有偏。
+- **P3-O**（2026-11-25 已统一）：训练/历史评估/台账 Brier 统一为 `P(R_h>0)`、平盘目标 0；命中率独立只算 up/down，平盘不入分母。
 - **P3-P**：`market/technical.py:130-137,202-208` 少样本仍输出数值（仅 `ok=False` 标记），未像 `market_validation.py` 留空。
 - **P3-Q 剩余**：`market/capital.py:103-104` 残余仓位卖出额低于最低佣金时被 `insufficient_cash_for_sell_fee` 永久阻塞、闭合周期不计（费用触发的平仓死锁，区别于已登记的容量触发残留）。
-- **P3-R 剩余**：`rbsa.py:48-49` 的 `W+30` vs `modeling/engine.py:177-178` 的 `W+60` 两套门槛；`payloads.py:629-654`「仓位假设失配」以名义 0.9 诊断（`auto_equity=True` 实际逐窗自适应）；`pipeline.py:117` 波动目标变体 `fillna(1.0)` vs `backtest.py:177,203` 的 0.5；`config.py:251-252` `l1_ratio/alpha_grid` 死配置；`estimators.py:276,320,380,402` 四模型等权降级不传 status 不可观测。以上均会改变数值或诊断结论，须独立评估。
+- **P3-R 剩余**（2026-11-25：`W+30/W+60` 已统一为 W+30，仓位失配诊断已改用逐窗 `equity_used`，波动目标预热仓位已统一交给 `run_backtest` 的 0.5；以下仍存）：`config.py` 的 `l1_ratio/alpha_grid` 死配置；`estimators.py` 四模型等权降级不传 status 不可观测。
 - **P3-S**：统一 CLI 已同时保护 `stdout/stderr`，直接入口的 `✗`/`…` 已替换为 ASCII 文案，GBK 重定向不再因符号输出崩溃；其他模块的同类字符仍由统一入口兜底。
 
 ### 2026-11-12 股票、基金、指数拟合预测专项检查
@@ -182,7 +182,7 @@
 **该计划初次编写时仅为计划**：未修改业务代码、研究配置、行情/预测数据库或冻结协议。下方勾选状态与实施记录是后续按计划执行的结果；涉及 `[产品]` / `[研究口径]` / `[法务]` / `[运维]` 的决策，由项目负责人或相应责任方确认，不把本次文档更新视为批量迁移、重判、部署或启用新默认值的授权。
 
 - 复审基线：`9f75233`，开始时工作区无修改。2026-11-16 实跑 `PYTHONUTF8=1 uv run --locked python -m unittest discover -s tests -t . -p 'test_*.py'`，**585 项通过，94.259 秒**；三套前端脚本 `test_refit.js`、`test_ui_async.cjs`、`test_market_async.cjs` 通过。
-- 当前基线（2026-11-25）：**637 项通过，约 187 秒**；三套前端脚本通过。`FIL_SYNC_TIME` 配置错误已实测为 500 `field=config`，此前“剩余”描述是文档未同步。
+- 当前基线（2026-11-25）：**642 项通过，约 234 秒**；三套前端脚本通过。`FIL_SYNC_TIME` 配置错误已实测为 500 `field=config`，此前“剩余”描述是文档未同步。
 - 已修并保留回归：P1-22 原始价结算、P1-23 独立基金净值预测轴、P1-24/P2-44 PCR 折内预处理与维度边界、P1-26 持仓旧结果、P1-27/P1-28 数据降级及持仓部分失败、P2-43 持仓参数、P1-29 基金入账及历史记录审计、P1-30/P1-31 结算时点与收盘证据、P2-42 配置错误分类、P3-H 前端 `/api/v1` 迁移、P3-M 不可回收子进程释放本地名额。**不重新实现或重复立项**。
 - 仍需完成：P1-25 全区间选池、P3-R 实际 OOS 门槛、P3-O 评分口径、P3-P 少样本展示、P2-31 失效模型推荐门禁。
 - 正面检查：种子 99、800 个工作日、`close=100*exp(cumsum(N(.0002,.012)))`，OHLC 分别为 close×(.999,1.01,.99,1)；只将位置 651 之后的 OHLC 乘 1.5，5/20 日模型此前的概率均不变。该检查仅证明固定日期/候选定义下的前缀稳定性，不证明预测优势。
@@ -264,7 +264,7 @@
 - [ ] 所有模型、持仓RBSA、重学、回测、研究walkforward和检查点使用同一选池契约；保留11模型实际预测器与线性权重的区分。修改研究/结果版本并隔离旧检查点，不静默复用旧清洁面板。
 - [ ] **验收**：300个工作日，基金/a=`100+arange(300)`、b=`200+arange(300)`，仅把b[200:]设空，共同历史窗口的候选/权重/预测应一致；另测未来新增因子、前缀缺日、训练内缺日、预测段缺日、0/1/2因子、全模型边界。固定种子、串行、相同重估锚点比较；有意丢弃的尾部限流外历史不混入前缀断言。
 
-**实施记录（2026-11-24，工作区改动）**：`data.panels.load_panel` 在 `attrs.causal_pool` 保留未经全区间删列/删行的原始候选价格与基金轴；`ModelZoo.run` 与 `RBSA.fit_rolling` 优先使用它，在**每个训练窗口内**按 `min_coverage=0.97` 计算因子可得率，低覆盖因子逐窗剔除。收益先对原始有序轴做 `diff`，不用前填价构造假收益；权重在重估区间内冻结，未被选中因子缺数不影响该 OOS 点，必需因子缺报价则该日合成收益置空并计入 `oos_gap_n/oos_coverage`，评分只在共同有限样本上计算。`CACHE_VERSION` 升至 16；`analysis` 传 `require_causal_panel=True`，旧检查点/无因果池结果不进入推荐。新增回归覆盖“未来缺数不改写历史窗口”和“预测段缺因子留空”。现已落盘 `train_start/train_end/selected/dropped/fingerprint`（`fit_diag.csv` 导出，页面只显示最近一窗摘要），OOS TE 按“实际样本数 / 日历交易日”折算并在 `te_basis` 标注；`ModelZoo.run` 最小门槛统一为 W+30，短样本返回“评估不足”而非直接报错；`_attach_common_oos` 取跨模型交集并重算 `common_oos_r2/te`。**未完成**：健康度内部逐窗 TE 仍按 252 日年化（未用窗口日历跨度）；未来新增因子、前缀缺日、0/1 因子边界未逐一验收。
+**实施记录（2026-11-24，工作区改动）**：`data.panels.load_panel` 在 `attrs.causal_pool` 保留未经全区间删列/删行的原始候选价格与基金轴；`ModelZoo.run` 与 `RBSA.fit_rolling` 优先使用它，在**每个训练窗口内**按 `min_coverage=0.97` 计算因子可得率，低覆盖因子逐窗剔除。收益先对原始有序轴做 `diff`，不用前填价构造假收益；权重在重估区间内冻结，未被选中因子缺数不影响该 OOS 点，必需因子缺报价则该日合成收益置空并计入 `oos_gap_n/oos_coverage`，评分只在共同有限样本上计算。`CACHE_VERSION` 升至 16；`analysis` 传 `require_causal_panel=True`，旧检查点/无因果池结果不进入推荐。新增回归覆盖“未来缺数不改写历史窗口”和“预测段缺因子留空”。现已落盘 `train_start/train_end/selected/dropped/fingerprint`（`fit_diag.csv` 导出，页面只显示最近一窗摘要），OOS 与逐窗 TE 均按“实际样本数 / 日历交易日”折算（`te_basis`、`te_ppy`）；`ModelZoo.run` 最小门槛统一为 W+30，短样本返回“评估不足”而非直接报错；`_attach_common_oos` 取跨模型交集并重算 `common_oos_r2/te`；新增回归覆盖未来新增因子、前缀缺日、0/1 因子、起始窗口全缺与预测段缺数。**未完成**：全区间描述性相关性仍用删列面板（仅展示）；历史行业归属缺失（P1-11）与候选池幸存者偏差未消除；持仓/回测的资金曲线年化仍假定逐日连续。
 
 #### B2 / P3-R、P2-31：按实际OOS而非输入总行数决定评估资格
 
@@ -291,7 +291,7 @@
 - [ ] 复用已有字段并仅补必要的目标/评分版本及资格元数据，保存总体数、成熟数、有效评分数和各类排除原因。相同资产、周期、版本、数据口径的预测才允许合并；旧版/证据未知样本分组显示，不静默升级或覆盖既有判定。
 - [ ] **验收**：同一组概率/价格同时送入历史评估和台账统计，固定h目标、平盘、一字板、缺目标价、顺延价、observed_bars/calendar_sessions均得到一致的概率评分资格、标签和分母；混版本不得合并。Brier可独立手算核对。
 
-**实施记录（2026-11-24，工作区改动，审计与统一评分）**：`technical.direction_forecast` 与 `compare_forecasts` 新增 `label_policy=flat_as_down`、`target_version=P(R_h>0)_flat_as_down_v1`、`flat_n`、`n_excluding_flat`、`accuracy/brier_excluding_flat` 及 `neutral_epsilon=1e-9`。台账 `_stats` 的 Brier 改为与训练一致的 `P(R_h>0)` 口径（平盘目标 0，neutral 仍进入 Brier 分母），命中率继续只算 up/down 对错、剔除 neutral；新增 `brier_basis/scoring_version/neutral_scored_rows`，历史行可按已存的 `realized_return` 直接重算。新增“Brier 含平盘、命中率剔平盘”手算回归。**未完成**：calendar_sessions 目标日缺价的顺延收益仍只作诊断、未与固定 h 完全隔离；涨跌停样本的概率评分与可成交性仍未拆分。
+**实施记录（2026-11-24，工作区改动，审计与统一评分）**：`technical.direction_forecast` 与 `compare_forecasts` 新增 `label_policy=flat_as_down`、`target_version=P(R_h>0)_flat_as_down_v1`、`flat_n`、`n_excluding_flat`、`accuracy/brier_excluding_flat` 及 `neutral_epsilon=1e-9`。台账 `_stats` 的 Brier 改为与训练一致的 `P(R_h>0)` 口径（平盘目标 0，neutral 仍进入 Brier 分母），命中率继续只算 up/down 对错、剔除 neutral；新增 `brier_basis/scoring_version/neutral_scored_rows`，历史行可按已存的 `realized_return` 直接重算。新增“Brier 含平盘、命中率剔平盘”手算回归。Brier 进一步纳入目标收盘可得的 blocked（涨跌停/一字板/零成交），`scoring_version=flat_as_down_v2`，命中率仍只算 up/down；新增 blocked 评分回归。**未完成**：calendar_sessions 目标日缺价的顺延收益仍只作诊断、未与固定 h 完全隔离；`insufficient/no_feed` 仍无法评分。
 
 #### C2 / P3-P：评估基线、不确定性与独立证据等级
 

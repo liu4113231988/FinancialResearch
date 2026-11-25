@@ -81,6 +81,45 @@ class CausalSelectionTests(unittest.TestCase):
         # 不连续样本不能按 252 日/年直接年化
         self.assertEqual(rep.extra["te_basis"], "calendar_adjusted")
         self.assertLess(rep.extra["oos_periods_per_year"], 252.0)
+        # 覆盖缺口的训练窗口也不能按 252 日/年直接年化
+        self.assertLess(float(rep.fit_diag["te_ppy"].min()), 252.0)
+
+    def test_future_new_factor_is_not_used_in_early_windows(self):
+        frame = _panel()
+        rng = np.random.default_rng(9)
+        late = np.exp(np.cumsum(rng.normal(0, 0.008, 120)))
+        frame["d"] = np.nan
+        frame.loc[frame.index[200:], "d"] = late
+        rep = _run(frame)
+        first = str(rep.fit_diag.iloc[0]["selected"]).split(",")
+        last = str(rep.fit_diag.iloc[-1]["selected"]).split(",")
+        self.assertNotIn("d", first)
+        self.assertIn("d", last)
+
+    def test_prefix_missing_factor_enters_only_when_window_coverage_allows(self):
+        frame = _panel()
+        frame.loc[frame.index[:80], "b"] = np.nan
+        rep = _run(frame)
+        first = str(rep.fit_diag.iloc[0]["selected"]).split(",")
+        last = str(rep.fit_diag.iloc[-1]["selected"]).split(",")
+        self.assertNotIn("b", first)
+        self.assertIn("b", last)
+        self.assertIn("0.", str(rep.fit_diag.iloc[0]["dropped"]))
+
+    def test_single_factor_window_does_not_crash(self):
+        frame = _panel()
+        frame["b"] = np.nan
+        frame["c"] = np.nan
+        rep = _run(frame)
+        self.assertEqual(int(rep.fit_diag.iloc[-1]["n_factors"]), 1)
+        self.assertGreater(rep.oos_r2, -10.0)
+
+    def test_all_factors_missing_skips_early_windows(self):
+        frame = _panel()
+        cut = frame.index[200]
+        frame.loc[frame.index < cut, ["a", "b", "c"]] = np.nan
+        rep = _run(frame)
+        self.assertGreaterEqual(rep.fit_diag.index[0], cut)
 
     def test_selection_audit_is_persisted(self):
         rep = _run(_panel())

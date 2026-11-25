@@ -1009,6 +1009,25 @@ class CumOfflineSettlementTests(unittest.TestCase):
 class ScoredBasisTest(unittest.TestCase):
     """C1：Brier 按 P(R>0)（平盘=0）计分，命中率仍剔平盘，两套分母不合并。"""
 
+    def test_blocked_with_known_target_price_enters_brier_not_hit_rate(self):
+        rows = [
+            {"source": "direction", "probability": 0.8, "direction": "up",
+             "realized_return": 0.02, "label": "blocked", "status": "settled"},
+            {"source": "direction", "probability": 0.3, "direction": "down",
+             "realized_return": -0.01, "label": "correct", "status": "settled"},
+        ]
+        stats = ledger._stats(rows)
+        # 涨跌停/零成交不改变"方向是否看对"的概率评分，只影响可成交性。
+        self.assertEqual(stats["decided"], 1)
+        self.assertEqual(stats["hit_rate"], 1.0)
+        self.assertEqual(stats["probability_rows"], 2)
+        self.assertEqual(stats["blocked_scored_rows"], 1)
+        self.assertEqual(stats["brier_basis"],
+                         "flat_as_down;blocked_if_target_known")
+        self.assertEqual(stats["scoring_version"], "flat_as_down_v2")
+        expected = ((0.8 - 1) ** 2 + (0.3 - 0) ** 2) / 2
+        self.assertAlmostEqual(stats["brier"], expected)
+
     def test_brier_includes_neutral_but_hit_rate_excludes_it(self):
         rows = [
             {"source": "direction", "probability": 0.8,
@@ -1024,7 +1043,8 @@ class ScoredBasisTest(unittest.TestCase):
         self.assertEqual(stats["hit_rate_basis"], "direction_only")
         self.assertEqual(stats["probability_rows"], 3)
         self.assertEqual(stats["neutral_scored_rows"], 1)
-        self.assertEqual(stats["brier_basis"], "flat_as_down")
+        self.assertEqual(stats["brier_basis"],
+                         "flat_as_down;blocked_if_target_known")
         expected = ((0.8 - 1) ** 2 + (0.8 - 0) ** 2 + (0.3 - 0) ** 2) / 3
         self.assertAlmostEqual(stats["brier"], expected)
         self.assertIn("平盘目标为 0", stats["note"])

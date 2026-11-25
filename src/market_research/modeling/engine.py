@@ -350,6 +350,14 @@ class ModelZoo:
                 er = eq_start
                 fr = fit_window(key, Xw_fit, yw_fit, cols, override,
                                 equity_ratio=er)
+            # P1-25：窗口内若因缺报价删过行，TE 也不能按逐日 252 直接年化。
+            window_periods = 252.0
+            if len(Xw_fit) > 1:
+                span = len(pd.bdate_range(dates[lo], dates[hi - 1]))
+                if span > len(Xw_fit):
+                    window_periods = 252.0 * len(Xw_fit) / span
+                    _, fr.te = _score(fr.pred, yw_fit,
+                                      periods_per_year=window_periods)
             w_sel = fr.weights.reindex(cols).fillna(0.0).values
 
             # 权重覆盖到下一个重估点：抽稀后相邻点间隔可能远大于 refit，
@@ -407,6 +415,7 @@ class ModelZoo:
                 "alpha": fr.extra.get("alpha"),
                 "train_start": dates[lo].strftime("%Y-%m-%d"),
                 "train_end": dates[hi - 1].strftime("%Y-%m-%d"),
+                "te_ppy": float(window_periods),
                 "selected": ",".join(cols),
                 "dropped": ",".join(dropped_names),
                 "fingerprint": fingerprint,

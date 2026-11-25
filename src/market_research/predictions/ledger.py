@@ -737,14 +737,32 @@ def _stats(rows: List[dict]) -> dict:
     # C1/P3-O：Brier 的概率目标统一为 P(R_h>0)，平盘对应 0，与训练标签及
     # `direction_forecast` 的评估一致；命中率仍是"方向对错"，继续剔除 neutral。
     # 两套分母并列但不合并。历史行有 realized_return 即可按新口径重算，无需迁移。
+    def _score_label(row) -> str | None:
+        label = row.get("label")
+        if label in ("correct", "incorrect", "neutral"):
+            return label
+        # 目标收盘可得时，涨跌停/一字板/零成交仍可评分：方向对错与能不能
+        # 成交是两件事。label 保留 blocked（可成交性），Brier 另按该标签计。
+        if label != "blocked" or row.get("realized_return") is None:
+            return None
+        if row.get("direction") not in ("up", "down"):
+            return None
+        realized = float(row["realized_return"])
+        if abs(realized) <= 1e-9:
+            return "neutral"
+        went_up = realized > 0
+        correct = went_up if row["direction"] == "up" else (not went_up)
+        return "correct" if correct else "incorrect"
+
     scored = [row for row in direction
               if row.get("realized_return") is not None
-              and row.get("label") in ("correct", "incorrect", "neutral")]
+              and _score_label(row) is not None]
     brier_values = [
         (float(row["probability"]) - (1.0 if float(row["realized_return"]) > 0 else 0.0)) ** 2
         for row in scored
     ]
-    neutral_scored = sum(1 for row in scored if row.get("label") == "neutral")
+    neutral_scored = sum(1 for row in scored if _score_label(row) == "neutral")
+    blocked_scored = sum(1 for row in scored if row.get("label") == "blocked")
     rule_returns = [float(row["realized_return"]) for row in rules
                     if row.get("realized_return") is not None]
     grace_settled = sum(1 for row in rows
@@ -761,9 +779,10 @@ def _stats(rows: List[dict]) -> dict:
         "hit_rate_basis": "direction_only",
         "brier": (sum(brier_values) / len(brier_values)) if brier_values else None,
         "probability_rows": len(brier_values),
-        "brier_basis": "flat_as_down",
-        "scoring_version": "flat_as_down_v1",
+        "brier_basis": "flat_as_down;blocked_if_target_known",
+        "scoring_version": "flat_as_down_v2",
         "neutral_scored_rows": neutral_scored,
+        "blocked_scored_rows": blocked_scored,
         "rule_events": len(rules),
         "rule_return_mean": ((sum(rule_returns) / len(rule_returns))
                              if rule_returns else None),
@@ -774,8 +793,9 @@ def _stats(rows: List[dict]) -> dict:
         "current_total": len(rows) - len(legacy),
         "note": "hit_rate 只统计方向概率的 up/down 对错，neutral 不计入分母；"
                 "Brier 统一按 P(R_h>0) 计算，平盘目标为 0（与模型训练/评估一致），"
-                "neutral 样本仍进入 Brier 分母。规则事件单列触发后收益；"
-                "observed/blocked/insufficient 不进入命中率或 Brier。"
+                "neutral 与目标价可得的 blocked（涨跌停/零成交）样本仍进入 "
+                "Brier 分母，但都不进入命中率分母。规则事件单列触发后收益；"
+                "observed/insufficient 不进入命中率或 Brier。"
                 "legacy_rows 是口径修正前的旧规则行（5/20 各一条），"
                 "current_total 已将其排除。"
                 "grace_settled 是宽限期顺延结算样本，实际会话数冻结在 "

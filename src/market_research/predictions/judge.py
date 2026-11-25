@@ -5,7 +5,9 @@
   - 规则买卖事件不是方向预测，按固定 5 会话只记录触发后收益（observed）；
   - 到期日之后允许 2 个交易日宽限；
   - 收盘涨算上涨、跌算下跌，平盘记 neutral（不判对错）；不做相对基准；
-  - neutral / observed / blocked / insufficient 均不计入方向命中率。
+  - neutral / observed / blocked / insufficient 均不计入方向命中率；
+    但目标收盘可得的 blocked（涨跌停/零成交）仍按方向进入 Brier，
+    “方向是否看对”与“能否成交”分开记录。
 """
 from __future__ import annotations
 
