@@ -507,11 +507,54 @@ def r14():
         "返回的 FitResult 权重全为有限值")
 
 
+def r15():
+    print("\nR15 · 多窗口诊断聚合：fit_ok 取最小值，其余指标取中位数")
+    from market_research.modeling.engine import _agg_extras
+
+    # 9 个窗口收敛 + 1 个窗口降级。中位数仍是 1.0，只有最小值能暴露降级。
+    extras = [{"fit_ok": 1.0, "alpha": 0.01, "n_support": 6,
+               "top_corr": [0.9, 0.8], "top_corr_codes": ["a", "b"]}
+              for _ in range(9)]
+    extras.append({"fit_ok": 0.0, "alpha": 0.03, "n_support": 8,
+                   "top_corr": [0.5], "top_corr_codes": ["c"]})
+    agg = _agg_extras(extras)
+    chk(agg.get("fit_ok") == 0.0,
+        f"10 窗口中含 1 个降级 → fit_ok={agg.get('fit_ok')}"
+        "（修复前取中位数会得到 1.0，把降级抹平）")
+    chk(abs(float(agg.get("alpha")) - 0.01) < 1e-12,
+        f"普通数值仍取中位数：alpha={agg.get('alpha')}（应为 0.01，不是 0.03）")
+    chk(float(agg.get("n_support")) == 6.0,
+        f"其余数值不受 fit_ok 规则影响：n_support={agg.get('n_support')}")
+    # 0.9×9 + 0.8×9 + 0.5 排序后第 10 个仍是 0.8
+    chk(abs(float(agg.get("top_corr")) - 0.8) < 1e-12,
+        f"数值列表取全体元素中位数（top_corr={agg.get('top_corr')}）")
+    chk("top_corr_codes" not in agg,
+        "字符串列表不进聚合（无意义的中位代码），已丢弃")
+
+    # 全部收敛 → 不误报降级
+    chk(_agg_extras([{"fit_ok": 1.0}] * 3).get("fit_ok") == 1.0,
+        "全部窗口收敛时 fit_ok=1.0（nanmin 不会误判）")
+    # 部分窗口缺该键 → 只用出现过的值判定
+    chk(_agg_extras([{"fit_ok": 1.0}, {"fit_ok": 0.0}, {"alpha": 0.1}]
+                    ).get("fit_ok") == 0.0,
+        "缺 fit_ok 的窗口不参与判定（已出现的 1.0/0.0 取最小 = 0.0）")
+    chk(_agg_extras([]) == {} and _agg_extras([{"ok": True}]).get("ok") is None,
+        "空输入返回空字典；布尔值不参与数值聚合（置 None）")
+
+    # 端到端：降级窗口必须触发 blocking_reasons
+    bad = ModelZoo.blocking_reasons(type("R", (), {
+        "oos_r2": 0.5, "oos_te": 0.01, "te": 0.01, "fit_r2_mean": 0.5,
+        "fold_r2": [0.5, 0.5, 0.5],
+        "extra": {"assessment_status": "sufficient", "fit_ok": 0.0}})())
+    chk(any("降级" in x for x in bad),
+        f"fit_ok=0.0 的报告被标记为存在降级窗口（{bad[-1] if bad else ''}）")
+
+
 def main():
     print("=" * 78)
     print("行为回归（2026-10-11 轮次修复）")
     print("=" * 78)
-    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14):
+    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15):
         try:
             fn()
         except Exception as e:                                # noqa: BLE001

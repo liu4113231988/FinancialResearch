@@ -281,15 +281,17 @@ def _fit_lasso(X, y, cols, equity_ratio, prm):
     if sup.size > int(prm.get("max_assets", 8)):
         sup = sup[np.argsort(-np.abs(coef[sup]))[:int(prm.get("max_assets", 8))]]
 
+    st: Dict[str, Any] = {}
     w_full = np.zeros(X.shape[1])
-    w_full[sup] = _constrained_fit(X[:, sup], y, equity_ratio)
+    w_full[sup] = _constrained_fit(X[:, sup], y, equity_ratio, status=st)
     w = _clean_weights(w_full, cols, equity_ratio,
                        float(prm.get("min_weight", 0.01)),
                        int(prm.get("max_assets", 8)))
     wv = w.reindex(cols).fillna(0.0).values
     r2, te = _score(X @ wv, y)
     return FitResult(weights=w, pred=X @ wv, r2=r2, te=te,
-                     extra={"alpha": float(mdl.alpha), "n_support": int(sup.size)})
+                     extra={"alpha": float(mdl.alpha), "n_support": int(sup.size),
+                            "fit_ok": 1.0 if st.get("ok", True) else 0.0})
 
 
 def _fit_ridge(X, y, cols, equity_ratio, prm):
@@ -325,15 +327,17 @@ def _fit_corr_topk(X, y, cols, equity_ratio, prm):
     corr = np.nan_to_num(corr)
     k = int(np.clip(int(prm.get("top_k", 6)), 1, X.shape[1]))
     sup = np.argsort(-corr)[:k]
+    st: Dict[str, Any] = {}
     w_full = np.zeros(X.shape[1])
-    w_full[sup] = _constrained_fit(X[:, sup], y, equity_ratio)
+    w_full[sup] = _constrained_fit(X[:, sup], y, equity_ratio, status=st)
     w = _clean_weights(w_full, cols, equity_ratio,
                        float(prm.get("min_weight", 0.01)), k)
     wv = w.reindex(cols).fillna(0.0).values
     r2, te = _score(X @ wv, y)
     return FitResult(weights=w, pred=X @ wv, r2=r2, te=te,
                      extra={"top_corr": [float(corr[j]) for j in sup],
-                            "top_corr_codes": [cols[j] for j in sup]})
+                            "top_corr_codes": [cols[j] for j in sup],
+                            "fit_ok": 1.0 if st.get("ok", True) else 0.0})
 
 
 def _fit_pcr(X, y, cols, equity_ratio, prm):
@@ -392,14 +396,16 @@ def _fit_ewma(X, y, cols, equity_ratio, prm):
     half_life = float(prm.get("half_life", 126))
     age = np.arange(len(y))[::-1]                 # 最近一日 age=0 → 权重 1
     sw = 0.5 ** (age / half_life)
-    w_full = _constrained_fit(X, y, equity_ratio, sw)
+    st: Dict[str, Any] = {}
+    w_full = _constrained_fit(X, y, equity_ratio, sw, status=st)
     w = _clean_weights(w_full, cols, equity_ratio,
                        float(prm.get("min_weight", 0.0)),
                        int(prm.get("max_assets", 15)))
     wv = w.reindex(cols).fillna(0.0).values
     r2, te = _score(X @ wv, y)
     return FitResult(weights=w, pred=X @ wv, r2=r2, te=te,
-                     extra={"half_life": half_life})
+                     extra={"half_life": half_life,
+                            "fit_ok": 1.0 if st.get("ok", True) else 0.0})
 
 
 def _fit_huber(X, y, cols, equity_ratio, prm):
@@ -413,8 +419,9 @@ def _fit_huber(X, y, cols, equity_ratio, prm):
     n_iter = int(prm.get("n_iter", 3))
     sw = np.ones(len(y))
     w_full = None
+    st: Dict[str, Any] = {}
     for _ in range(n_iter):
-        w_full = _constrained_fit(X, y, equity_ratio, sw)
+        w_full = _constrained_fit(X, y, equity_ratio, sw, status=st)
         r = X @ w_full - y
         scale = np.median(np.abs(r - np.median(r))) / 0.6745
         if scale <= 1e-12:
@@ -428,7 +435,8 @@ def _fit_huber(X, y, cols, equity_ratio, prm):
     wv = w.reindex(cols).fillna(0.0).values
     r2, te = _score(X @ wv, y)
     return FitResult(weights=w, pred=X @ wv, r2=r2, te=te,
-                     extra={"huber_k": k, "n_iter": n_iter})
+                     extra={"huber_k": k, "n_iter": n_iter,
+                            "fit_ok": 1.0 if st.get("ok", True) else 0.0})
 
 
 def _fit_gbr(X, y, cols, equity_ratio, prm):

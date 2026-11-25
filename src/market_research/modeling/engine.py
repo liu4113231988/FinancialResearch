@@ -47,6 +47,39 @@ def _coverage_summary(syn: pd.Series, diag_rows: List[dict],
     }
 
 
+def _agg_extras(extras: List[dict]) -> Dict[str, Any]:
+    """把各重估窗口的 `extra` 汇总成一份诊断字典。
+
+    数值型默认取中位数；但 `fit_ok`（约束优化是否收敛）取**最小值**：
+    10 个窗口里只要 1 个降级，整体就不能声称"全部收敛"，中位数会把这种
+    边缘失败抹平（9 个 1.0 + 1 个 0.0 的中位数仍是 1.0）。
+    """
+    agg: Dict[str, Any] = {}
+    if not extras:
+        return agg
+    for k in set().union(*[set(e.keys()) for e in extras]):
+        vals = [e[k] for e in extras if k in e]
+        if not vals:
+            continue
+        v0 = vals[0]
+        if isinstance(v0, (bool, np.bool_)):
+            agg[k] = None
+        elif isinstance(v0, (int, float, np.floating)):
+            numeric = [float(v) for v in vals]
+            # fit_ok 用最小值：只要有一个窗口降级，就不能声称全部收敛。
+            agg[k] = (float(np.nanmin(numeric)) if k == "fit_ok"
+                      else float(np.nanmedian(numeric)))
+        elif isinstance(v0, (list, tuple)):
+            # 只对纯数值列表取中位数（如 top_corr），字符串列表直接丢弃
+            flat = [x for v in vals for x in v]
+            if flat and all(isinstance(x, (int, float, np.floating))
+                            for x in flat):
+                agg[k] = float(np.nanmedian([float(x) for x in flat]))
+        elif isinstance(v0, str):
+            agg[k] = None
+    return agg
+
+
 def _failed_report(key: str, err: Exception) -> ModelReport:
     """某个模型失败时返回一个占位报告，保证前端仍能渲染完整表格。"""
     spec = MODELS.get(key, ModelSpec(key, key, "unknown", ""))
@@ -472,26 +505,7 @@ class ModelZoo:
             agg_extra["fallback_windows"] = int(n_fallback)
             agg_extra["fallback_ratio"] = float(n_fallback) / len(diag_rows)
         if extras:
-            allk = set().union(*[set(e.keys()) for e in extras])
-            for k in allk:
-                vals = [e[k] for e in extras if k in e]
-                if not vals:
-                    continue
-                v0 = vals[0]
-                if isinstance(v0, (bool, np.bool_)):
-                    agg_extra[k] = None
-                elif isinstance(v0, (int, float, np.floating)):
-                    agg_extra[k] = float(np.nanmedian(
-                        [float(v) for v in vals]))
-                elif isinstance(v0, (list, tuple)):
-                    # 只对纯数值列表取中位数（如 top_corr），字符串列表直接丢弃
-                    flat = [x for v in vals for x in v]
-                    if flat and all(isinstance(x, (int, float, np.floating))
-                                     for x in flat):
-                        agg_extra[k] = float(np.nanmedian(
-                            [float(x) for x in flat]))
-                elif isinstance(v0, str):
-                    agg_extra[k] = None
+            agg_extra.update(_agg_extras(extras))
 
         # B2/P3-R：覆盖元数据放在 extras 聚合之后，避免被逐窗指标覆盖。
         # 页面/API/导出据此区分"已算出"与"评估充分"。
