@@ -241,7 +241,13 @@ def analyze(code: str, models: Optional[List[str]] = None,
     # 净值不按对齐面板的行号切，直接交给 model_payload 按共同日期重索引。
     nav_oos = nav
     payload = {k: model_payload(r, nav_oos) for k, r in reps.items()}
-    rank = ModelZoo.rank(reps)
+    # B2/P3-R：优先按"共同样本外日期"重算的可比 R² 排序；交集不足的模型
+    # 会在 blocking_reasons 中被标记。旧检查点没有共同口径时退回各自 R²。
+    comparison_key = ("共同OOS R²"
+                      if any(getattr(r, "extra", {}).get("common_oos_r2")
+                             is not None for r in reps.values())
+                      else "样本外R²")
+    rank = ModelZoo.rank(reps, key=comparison_key)
     eligible = (rank[rank["可推荐"] == "是"]
                 if "可推荐" in rank.columns else rank)
 
@@ -332,6 +338,7 @@ def analyze(code: str, models: Optional[List[str]] = None,
             # 前缀稳定性（P0-04/P1 修复轮）：calendar 锚点只由日期决定，
             # 限流也只从头部丢弃（保留尾部）→ 抽稀与否都稳定；
             # linspace 只有完全不抽稀（max_rebal=0）时才稳定。
+            "ranking_basis": comparison_key,
             "rebal_mode": zoo.rebal_mode,
             "prefix_stable": bool(zoo.rebal_mode == "calendar" or
                                   not (max_rebal if max_rebal is not None

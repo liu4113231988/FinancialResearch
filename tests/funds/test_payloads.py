@@ -789,6 +789,46 @@ class AssessmentCoverageTest(unittest.TestCase):
         self.assertTrue(ins["evidence"]["warn"])
         self.assertIn("60 日 / 3 窗", ins["evidence"]["text"])
 
+    def test_selection_audit_summary_is_exposed(self):
+        idx = pd.bdate_range("2021-01-04", periods=300)
+        rng = np.random.default_rng(3)
+        syn = pd.Series(rng.normal(0, 0.01, len(idx)), index=idx)
+        rep = _model_report(idx, syn)
+        rep.fit_diag = pd.DataFrame([{
+            "r2": 0.8, "te": 0.1, "selected": "a,b",
+            "dropped": "c:0.50", "fingerprint": "0123456789abcdef",
+            "train_start": "2021-01-04", "train_end": "2021-12-31",
+            "n_factors": 2, "dropped_factors": 1,
+        }], index=[idx[-1]])
+        payload = model_payload(rep, 2.5 * np.exp(syn.cumsum()))
+        selection = payload["selection"]
+        self.assertEqual(selection["n_windows"], 1)
+        self.assertEqual(selection["n_windows_with_drops"], 1)
+        self.assertEqual(selection["selected"], "a,b")
+        self.assertEqual(selection["dropped"], "c:0.50")
+        self.assertEqual(selection["fingerprint"], "0123456789abcdef")
+
+    def test_exposure_gap_uses_adaptive_equity_not_nominal(self):
+        idx = pd.bdate_range("2021-01-04", periods=300)
+        rng = np.random.default_rng(3)
+        syn = pd.Series(rng.normal(0, 0.01, len(idx)), index=idx)
+        rep = _model_report(idx, syn)
+        rep.beta = 0.30
+        rep.extra.update({"assessment_status": "sufficient",
+                          "equity_used": 0.30, "oos_n": 300,
+                          "rebalance_count": 10,
+                          "causal_pool_used": True,
+                          "causal_required": True})
+        nav = 2.5 * np.exp(syn.cumsum())
+        payload = {"pcr": model_payload(rep, nav)}
+        rank = ModelZoo.rank({"pcr": rep})
+        ins = build_insights("110022", "测试基金",
+                             {"stats": {}, "nav": [1.0] * 300}, {},
+                             {"pcr": rep}, rank, payload)
+        self.assertFalse(ins["exposure_gap"]["warn"])
+        self.assertIn("逐窗自适应", ins["exposure_gap"]["text"])
+        self.assertIn("30%", ins["exposure_gap"]["text"])
+
     def test_sufficient_evidence_keeps_replication_wording_with_caveat(self):
         _, rank, ins = self._case("sufficient", [], 300, 10)
         self.assertEqual(rank.iloc[0]["评估状态"], "有效")

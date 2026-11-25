@@ -1511,9 +1511,11 @@ function renderRank() {
   const gap = (best['样本外R²'] ?? 0) - (worst['样本外R²'] ?? 0);
   const insufficient = rows.filter(x => x['评估状态'] === '不足').length;
   const noReco = !(S.result && S.result.meta && S.result.meta.best_model);
+  const basis = (S.result && S.result.meta && S.result.meta.ranking_basis) || '样本外 R²';
   const bestLabel = noReco ? 'R² 最高（不可推荐）' : '最佳';
   $('rankNote').innerHTML =
-    `排名按<b>样本外 R²</b> 降序——即"用上一窗口拟合好的模型去预测下一段"的表现。
+    `排名按<b>${escapeHtml(basis)}</b> 降序——即"用上一窗口拟合好的模型去预测下一段"的表现
+     ${basis === '共同OOS R²' ? '（仅取各模型共同可评分的日期，避免空档长度不同造成不可比）' : ''}。
      ${bestLabel}：<b style="color:var(--fg)">${escapeHtml(best['模型'])}（${fmtNum(best['样本外R²'], 3)}）</b>，
      最弱：${escapeHtml(worst['模型'])}（${fmtNum(worst['样本外R²'], 3)}），跨度 ${fmtNum(gap, 3)}。
      注意"窗口内 R²"高只代表训练集拟合得好，

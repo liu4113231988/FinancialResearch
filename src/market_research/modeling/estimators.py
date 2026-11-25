@@ -176,7 +176,8 @@ class FitResult:
     predictor: Optional[Callable[[np.ndarray], np.ndarray]] = None
 
 
-def _score(pred: np.ndarray, y: np.ndarray) -> tuple:
+def _score(pred: np.ndarray, y: np.ndarray,
+           periods_per_year: float = 252.0) -> tuple:
     """
     (R², 年化 TE)。
 
@@ -198,7 +199,7 @@ def _score(pred: np.ndarray, y: np.ndarray) -> tuple:
     resid = pred - y
     sse = float(resid @ resid)
     sst = float(((y - y.mean()) ** 2).sum())
-    te = float(np.std(resid, ddof=1) * np.sqrt(252))
+    te = float(np.std(resid, ddof=1) * np.sqrt(periods_per_year))
     if not np.isfinite(sst) or sst <= 1e-18:
         return float("nan"), te          # 目标无变异 → R² 未定义
     return 1.0 - sse / sst, te

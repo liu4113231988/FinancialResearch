@@ -316,6 +316,31 @@ _HOLDING_CONSTRAINTS = [
 ]
 
 
+def _selection_payload(rep: ModelReport) -> dict | None:
+    """P1-25：最近一窗的候选/剔除/训练区间/指纹摘要。
+
+    完整逐窗明细保存在 `rep.fit_diag`（可导出 CSV），页面只展示最近一窗
+    与窗口计数，避免 11 个模型把整份候选表塞进首屏 JSON。
+    """
+    diag = getattr(rep, "fit_diag", None)
+    if not isinstance(diag, pd.DataFrame) or diag.empty:
+        return None
+    if "selected" not in diag.columns:
+        return None
+    latest = diag.iloc[-1]
+    return _jsafe({
+        "n_windows": int(len(diag)),
+        "n_windows_with_drops": (int((diag["dropped_factors"] > 0).sum())
+                                 if "dropped_factors" in diag.columns else None),
+        "train_start": latest.get("train_start"),
+        "train_end": latest.get("train_end"),
+        "selected": latest.get("selected"),
+        "dropped": latest.get("dropped"),
+        "fingerprint": latest.get("fingerprint"),
+        "note": "最近一窗；完整逐窗明细见 fit_diag/style_weights 导出",
+    })
+
+
 def _weights_payload(w: pd.Series, min_w: float = 0.005,
                      top_n: int = 15) -> dict:
     """
@@ -480,6 +505,7 @@ def model_payload(rep: ModelReport, nav_oos: pd.Series,
             "min_oos_sessions": MIN_OOS_SESSIONS,
             "min_refits": MIN_REFITS,
         }),
+        "selection": _selection_payload(rep),
         "latest_weights": _weights_payload(rep.latest_weights),
         "weights_last_date": (rep.weights_last_date.strftime("%Y-%m-%d")
                               if rep.weights_last_date is not None else None),
@@ -557,13 +583,17 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
             tail = "这意味着它的收益来源高度集中，可被上述赛道指数直接复制。"
         else:
             tail = "权重可用于理解同期风格暴露，但不能据此宣称可被指数复制或预测未来收益。"
+        common_r2 = best_row.get("共同OOS R²")
+        r2_col = ("共同OOS R²" if "共同OOS R²" in rank.columns
+                  and common_r2 is not None and pd.notna(common_r2)
+                  else "样本外R²")
         out["penetration"] = {
             "ok": assessed,
             "model": best_row["模型"],
             "text": (lead +
                      f"滚动样本外拟合显示，{name} 可被少数几个指数解释："
-                     f"<b>{top_txt}</b>。该模型样本外 R² = "
-                     f"<b>{best_row['样本外R²']:.3f}</b>，"
+                     f"<b>{top_txt}</b>。该模型{r2_col} = "
+                     f"<b>{best_row[r2_col]:.3f}</b>，"
                      f"年化跟踪误差 {best_row['样本外TE']:.1%}。" + tail),
         }
         out["evidence"] = {
@@ -697,7 +727,16 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
                  if models[k].beta is not None and np.isfinite(models[k].beta)]
     if lin_betas:
         b = float(np.median(lin_betas))
-        eq = C.RBSA["equity_ratio"]
+        # P3-R：auto_equity=True 时实际约束是逐窗估计的 equity_used，
+        # 不能拿名义 0.9 去判断"仓位假设失配"，否则会把自适应后的正常结果
+        # 误报成低仓位。只有缺少该元数据时才退回名义值。
+        used = []
+        for k in lin_keys:
+            value = models[k].extra.get("equity_used")
+            if value is not None and np.isfinite(float(value)):
+                used.append(float(value))
+        eq = float(np.median(used)) if used else C.RBSA["equity_ratio"]
+        eq_basis = ("逐窗自适应仓位中位数" if used else "名义固定仓位")
         vr = next((models[k].vol_ratio for k in lin_keys
                    if models[k].vol_ratio is not None
                    and np.isfinite(models[k].vol_ratio)), None)
@@ -708,7 +747,7 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
                 "text": (
                     f"<b>该基金的实际股票仓位约 {b:.0%}</b>"
                     f"（用线性约束模型的回归斜率估计），"
-                    f"远低于框架假设的 {eq:.0%}。"
+                    f"远低于框架{eq_basis} {eq:.0%}。"
                     f"合成基准因此承担了过多波动"
                     + (f"（是基金自身波动的 {vr:.1f} 倍）" if vr else "") + "，"
                     f"<b>这会系统性压低线性模型的 R²</b>。"
@@ -720,7 +759,7 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
                     f"要让 R² 反映「风格识别能力」而非「仓位差异」，"
                     f"应把约束改成 <code>Σw ≈ {b:.2f}</code>（按隐含 beta 缩放），"
                     f"或改用<b>不约束仓位</b>的纯风格回归。"
-                    f"本页面为保持跨基金可比，仍统一用 {eq:.0%}；"
+                    f"本页面为保持跨基金可比，仍统一用 {eq:.0%}（{eq_basis}）；"
                     f"此时<b>建议直接参考排名靠前的黑箱模型</b>——"
                     f"它们不受仓位假设影响。"),
             }
@@ -728,8 +767,8 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
             out["exposure_gap"] = {
                 "warn": False,
                 "text": (f"线性约束模型反推出的实际股票仓位约 {b:.0%}，"
-                         f"与框架假设的 {eq:.0%} 基本吻合，"
-                         f"说明该基金是常规满仓运作，R² 具备横向可比性。"),
+                         f"与框架{eq_basis} {eq:.0%} 基本吻合，"
+                         f"说明该基金仓位与约束假设一致，R² 具备横向可比性。"),
             }
 
     # ---------- 5. 候选池覆盖度

@@ -78,6 +78,21 @@ class CausalSelectionTests(unittest.TestCase):
         self.assertLess(rep.extra["oos_coverage"], 1.0)
         for day in gap_days:
             self.assertNotIn(day, rep.syn_ret.index)
+        # 不连续样本不能按 252 日/年直接年化
+        self.assertEqual(rep.extra["te_basis"], "calendar_adjusted")
+        self.assertLess(rep.extra["oos_periods_per_year"], 252.0)
+
+    def test_selection_audit_is_persisted(self):
+        rep = _run(_panel())
+        diag = rep.fit_diag
+        for column in ("train_start", "train_end", "selected", "dropped",
+                       "fingerprint", "n_factors"):
+            self.assertIn(column, diag.columns)
+        self.assertTrue((diag["fingerprint"].str.len() == 16).all())
+        self.assertTrue(diag["train_start"].notna().all())
+        self.assertTrue(diag["train_end"].notna().all())
+        self.assertEqual(diag.iloc[0]["n_factors"], 3)
+        self.assertEqual(rep.extra["te_basis"], "daily")
 
 
 if __name__ == "__main__":

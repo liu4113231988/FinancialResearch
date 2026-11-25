@@ -6,7 +6,7 @@ import pandas as pd
 
 import market_research.config as C
 from market_research.modeling.engine import (MIN_OOS_SESSIONS, MIN_REFITS,
-                                             ModelZoo)
+                                             ModelReport, ModelZoo)
 
 
 def _panel(n=600, seed=11):
@@ -66,6 +66,36 @@ class CoverageGateTests(unittest.TestCase):
         # 排名仍按样本外 R² 降序，资格标注不改变顺序。
         r2 = list(rank["样本外R²"])
         self.assertEqual(r2, sorted(r2, reverse=True))
+
+    def test_minimum_fit_is_w_plus_30_and_marks_insufficient(self):
+        cfg = {**C.RBSA, "window": 100, "refit": 20, "min_obs": 60,
+               "auto_equity": False, "rebal_mode": "linspace"}
+        rep = ModelZoo(cfg).run(_panel(n=131), ["ridge"], workers=1,
+                                max_rebal=1)["ridge"]
+        self.assertEqual(rep.extra["oos_n"], 30)
+        self.assertEqual(rep.extra["assessment_status"], "insufficient")
+        with self.assertRaisesRegex(ValueError, "至少需要 100\\+30"):
+            ModelZoo(cfg).run(_panel(n=130), ["ridge"], workers=1,
+                              max_rebal=1)
+
+    def test_common_oos_intersection_and_short_overlap_blocker(self):
+        idx = pd.bdate_range("2022-01-03", periods=300)
+        y = pd.Series(np.linspace(-0.01, 0.01, len(idx)), index=idx)
+        base = dict(name="m", family="线性", desc="", interpretable=True,
+                    oos_r2=0.9, oos_te=0.1, oos_ic=1.0, win=0.6, beta=0.9,
+                    vol_ratio=1.0, fit_r2_mean=0.9, fit_te_mean=0.1,
+                    latest_weights=pd.Series(dtype=float),
+                    weights_last_date=None, weights_hist=pd.DataFrame(),
+                    extra={"assessment_status": "sufficient"}, elapsed=0.0)
+        long = ModelReport(key="long", syn_ret=y.copy(), oos_y=y, **base)
+        short = ModelReport(key="short", syn_ret=y.iloc[:40].copy(),
+                            oos_y=y.iloc[:40], **base)
+        ModelZoo._attach_common_oos({"long": long, "short": short})
+        self.assertEqual(long.extra["common_oos_n"], 40)
+        self.assertEqual(short.extra["common_oos_n"], 40)
+        self.assertAlmostEqual(long.extra["common_oos_r2"], 1.0)
+        self.assertIn("跨模型共同 OOS 不足",
+                      ModelZoo.blocking_reasons(short))
 
     def test_failed_and_non_causal_reports_are_not_recommended(self):
         from market_research.modeling.engine import _failed_report

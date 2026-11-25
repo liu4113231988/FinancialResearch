@@ -230,6 +230,8 @@ def save_result(res: dict, outdir: Optional[Path] = None) -> Path:
     outdir = Path(outdir or C.RES_DIR / f"{res['code']}_{res['name']}")
     outdir.mkdir(parents=True, exist_ok=True)
     res["weights_hist"].to_csv(outdir / "style_weights.csv", encoding="utf-8-sig")
+    # P1-25：逐窗训练区间、入选/剔除因子、输入指纹随报告落盘。
+    res["fit_diag"].to_csv(outdir / "fit_diag.csv", encoding="utf-8-sig")
     res["signal"].to_csv(outdir / "signals.csv", encoding="utf-8-sig")
     res["backtest"]["equity"].to_csv(outdir / "equity.csv", encoding="utf-8-sig")
     res["backtest"]["metrics"].to_csv(outdir / "metrics.csv", encoding="utf-8-sig")

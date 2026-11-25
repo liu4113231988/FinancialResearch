@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -12,6 +13,9 @@ from market_research.modeling.estimators import fit_window, estimate_equity, _sc
 # B2/P3-R：评估资格下限。用于推荐门禁，**不改变排名表顺序**。
 MIN_OOS_SESSIONS = 60
 MIN_REFITS = 3
+# 最小可拟合门槛：至少一个完整训练窗 + 1 个月样本外。与之匹配的是 RBSA
+# 的 W+30；不再额外要求 W+60，短样本允许出诊断结果，但评估状态为不足。
+MIN_FIT_EXTRA = 30
 
 
 def _coverage_summary(syn: pd.Series, diag_rows: List[dict],
@@ -92,6 +96,9 @@ class ModelReport:
     extra: Dict[str, Any]
     elapsed: float
     fit_diag: pd.DataFrame = field(default_factory=pd.DataFrame)  # 逐窗口 r2/te/alpha
+    # P1-25：样本外真实收益（与 syn_ret 同轴），用于跨模型共同日期重算。
+    # 默认 None 以兼容旧检查点与测试夹具。
+    oos_y: Optional[pd.Series] = None
 
 
 class ModelZoo:
@@ -221,8 +228,10 @@ class ModelZoo:
 
         n = len(dates)
         W = cfg["window"]
-        if n < W + 60:
-            raise ValueError(f"样本不足：仅 {n} 行，滚动窗口需要 {W}+60。")
+        if n < W + MIN_FIT_EXTRA:
+            raise ValueError(
+                f"样本不足：仅 {n} 行，滚动拟合至少需要 {W}+{MIN_FIT_EXTRA}。"
+                f"更短的历史无法产生评估结果。")
         mr = max_rebal if max_rebal is not None else self.max_rebal
         # rebal_mode="calendar" → 固定日历锚点，追加数据不改变历史重估点（P0-04）
         if str(cfg.get("rebal_mode", self.rebal_mode)) == "calendar":
@@ -265,6 +274,7 @@ class ModelZoo:
                     rep.extra["causal_pool_used"] = causal_used
                     rep.extra["causal_required"] = bool(
                         cfg.get("require_causal_panel", False))
+                self._attach_common_oos(out)
                 return out
             except Exception as e:                  # noqa: BLE001
                 print(f"[models] 进程池不可用（{type(e).__name__}: {str(e)[:60]}），"
@@ -284,6 +294,7 @@ class ModelZoo:
             rep.extra["causal_pool_used"] = causal_used
             rep.extra["causal_required"] = bool(
                 cfg.get("require_causal_panel", False))
+        self._attach_common_oos(out)
         return out
 
     # -------------------------------------------------------------- 单模型滚动
@@ -381,12 +392,28 @@ class ModelZoo:
             rows.append({"date": dates[i - 1], **fr.weights.to_dict()})
             fit_r2s.append(fr.r2)
             fit_tes.append(fr.te)
-            diag_rows.append({"date": dates[i - 1], "r2": fr.r2, "te": fr.te,
-                              "alpha": fr.extra.get("alpha"),
-                              "n_factors": int(sel.size),
-                              "n_rows": int(sel_rows.sum()),
-                              "dropped_factors": int(len(assets) - sel.size),
-                              "degraded": degraded or None})
+            # P1-25：逐窗审计信息 —— 训练起止、入选/剔除因子及覆盖率、
+            # 输入指纹。指纹只截断前 16 位，用于同一窗口的可复现核对，
+            # 不是安全哈希。
+            dropped_names = [
+                f"{assets[j]}:{coverage[j]:.2f}"
+                for j in np.flatnonzero(coverage < min_coverage)]
+            fingerprint = hashlib.sha256(
+                np.ascontiguousarray(
+                    np.column_stack([Xw_fit, yw_fit])).tobytes()
+            ).hexdigest()[:16]
+            diag_rows.append({
+                "date": dates[i - 1], "r2": fr.r2, "te": fr.te,
+                "alpha": fr.extra.get("alpha"),
+                "train_start": dates[lo].strftime("%Y-%m-%d"),
+                "train_end": dates[hi - 1].strftime("%Y-%m-%d"),
+                "selected": ",".join(cols),
+                "dropped": ",".join(dropped_names),
+                "fingerprint": fingerprint,
+                "n_factors": int(sel.size),
+                "n_rows": int(sel_rows.sum()),
+                "dropped_factors": int(len(assets) - sel.size),
+                "degraded": degraded or None})
             if fr.extra:
                 extras.append(fr.extra)
             last_w, last_date = fr.weights, dates[i - 1]
@@ -400,7 +427,15 @@ class ModelZoo:
             raise ValueError(
                 "无有效拟合窗口（全部 len(yw) < min_obs），样本不足以拟合")
         y_oos = pd.Series(y_all, index=dates).reindex(syn.index)
-        oos_r2, oos_te = _score(syn.values, y_oos.values)
+        # P1-25：合成收益可能因必需因子缺报价留下空档。年化 TE 不能把
+        # 不连续样本当逐日序列，按"实际样本数 / 日历内交易日数"折算年化频率。
+        oos_periods = 252.0
+        if len(syn) > 1:
+            span = len(pd.bdate_range(syn.index[0], syn.index[-1]))
+            if span > len(syn):
+                oos_periods = 252.0 * len(syn) / span
+        oos_r2, oos_te = _score(syn.values, y_oos.values,
+                                periods_per_year=oos_periods)
         ic = float(syn.corr(y_oos, method="spearman"))
         win = float((np.sign(syn.values) == np.sign(y_oos.values)).mean())
 
@@ -452,6 +487,9 @@ class ModelZoo:
         # B2/P3-R：覆盖元数据放在 extras 聚合之后，避免被逐窗指标覆盖。
         # 页面/API/导出据此区分"已算出"与"评估充分"。
         agg_extra.update(_coverage_summary(syn, diag_rows, len(syn_raw)))
+        agg_extra["oos_periods_per_year"] = float(oos_periods)
+        agg_extra["te_basis"] = ("calendar_adjusted"
+                                 if abs(oos_periods - 252.0) > 1e-9 else "daily")
 
         return ModelReport(
             key=key, name=spec.name, family=spec.family, desc=spec.desc,
@@ -464,17 +502,53 @@ class ModelZoo:
             weights_last_date=last_date,
             weights_hist=wdf, syn_ret=syn,
             extra=agg_extra, elapsed=time.time() - t0,
-            fit_diag=fit_diag,
+            fit_diag=fit_diag, oos_y=y_oos,
         )
 
     # -------------------------------------------------------------- 排名
+    @staticmethod
+    def _attach_common_oos(reports: Dict[str, ModelReport]) -> None:
+        """跨模型共同样本外日期与可比指标。
+
+        各模型自己的 OOS 序列可能因因子缺报价而空档长度不同；直接比较各自
+        全段的 R² 不是同一道题。这里取交集，并在交集中重算 R²/TE。
+        """
+        usable = [r.syn_ret for r in reports.values()
+                  if isinstance(r.syn_ret, pd.Series) and len(r.syn_ret)]
+        if not usable:
+            return
+        common = usable[0].index
+        for series in usable[1:]:
+            common = common.intersection(series.index)
+        common = common.sort_values()
+        for r in reports.values():
+            s = r.syn_ret
+            n = int(len(common)) if isinstance(s, pd.Series) and len(s) else 0
+            r.extra["common_oos_n"] = n
+            r.extra["common_oos_r2"] = None
+            r.extra["common_oos_te"] = None
+            if not n:
+                continue
+            r.extra["common_oos_start"] = common[0].strftime("%Y-%m-%d")
+            r.extra["common_oos_end"] = common[-1].strftime("%Y-%m-%d")
+            y = getattr(r, "oos_y", None)
+            if isinstance(y, pd.Series) and len(y):
+                r2, te = _score(s.reindex(common).values,
+                                y.reindex(common).values)
+                r.extra["common_oos_r2"] = r2
+                r.extra["common_oos_te"] = te
+
     @staticmethod
     def blocking_reasons(r: ModelReport) -> List[str]:
         """模型不能进入推荐位的原因（原始诊断仍保留）。"""
         reasons: List[str] = []
         if r.extra.get("error"):
             reasons.append("拟合失败")
-        if not np.isfinite(r.oos_r2):
+        try:
+            finite_r2 = bool(np.isfinite(float(r.oos_r2)))
+        except (TypeError, ValueError):
+            finite_r2 = False
+        if not finite_r2:
             reasons.append("样本外 R² 未定义")
         if r.extra.get("assessment_status") != "sufficient":
             reasons.append("样本外覆盖不足")
@@ -487,6 +561,9 @@ class ModelZoo:
         if (r.extra.get("causal_required")
                 and r.extra.get("causal_pool_used") is False):
             reasons.append("未使用因果面板")
+        common_n = r.extra.get("common_oos_n")
+        if common_n is not None and int(common_n) < MIN_OOS_SESSIONS:
+            reasons.append("跨模型共同 OOS 不足")
         return reasons
 
     @staticmethod
@@ -508,6 +585,8 @@ class ModelZoo:
                 "方向一致率": r.win, "隐含仓位": r.beta, "耗时": r.elapsed,
                 # 评估资格（不影响排序）：不足时页面不得称"最佳/可复制"
                 "样本外天数": r.extra.get("oos_n"),
+                "共同OOS天数": r.extra.get("common_oos_n"),
+                "共同OOS R²": r.extra.get("common_oos_r2"),
                 "有效重估": r.extra.get("rebalance_count"),
                 "评估状态": ("有效" if status == "sufficient" else
                              "不足" if status == "insufficient" else "未知"),
