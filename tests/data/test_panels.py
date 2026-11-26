@@ -1,5 +1,5 @@
 """Incomplete index pools recover without refetching successful series."""
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -201,6 +201,77 @@ class NavBasisPolicyTests(unittest.TestCase):
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(refreshed.iloc[0], 200.0)
         self.assertEqual(again.iloc[0], 200.0)
+
+    def test_nav_snapshot_evidence_survives_window_and_canonical_reads(self):
+        from market_research.data.providers import funds
+        from market_research.funds.payloads import fund_forecast_payload
+        from market_research.tasks import sync
+
+        dates = pd.bdate_range(end="2025-01-02", periods=340)
+        start, end = dates[0].date().isoformat(), dates[-1].date().isoformat()
+        values = np.linspace(1.0, 2.0, len(dates))
+        nav_rows = pd.DataFrame({"date": dates, "value": values})
+        anchors = pd.DataFrame({"date": dates[:1], "return": [0.0]})
+        observed = datetime(2025, 1, 2, 13, tzinfo=timezone.utc)
+        sync_started = observed - timedelta(minutes=10)
+        prices = pd.DataFrame({"801780": values}, index=dates)
+
+        for basis in ("total", "cum"):
+            with self.subTest(basis=basis), \
+                    patch.object(funds, "datetime") as clock, \
+                    patch.object(sync, "now", return_value=observed), \
+                    patch.object(funds, "_retry", side_effect=lambda _fn, **kw: (
+                        anchors if kw["source"] == "fund_cum_return" else nav_rows)) as fetch, \
+                    patch.object(panels, "fetch_start_for", return_value=start), \
+                    patch.object(panels, "load_index_universe", return_value=prices):
+                clock.now.return_value = observed
+                first = panels.load_fund_nav_cached("110022", start, basis=basis)
+                fetch_count = fetch.call_count
+                hit = panels.load_fund_nav_cached("110022", start, basis=basis)
+                self.assertEqual(fetch.call_count, fetch_count)
+                later = observed + timedelta(minutes=1)
+                clock.now.return_value = later
+                asset = {"asset_key": f"fund:110022:{basis}", "kind": "fund",
+                         "code": "110022", "basis": basis}
+                sync.synchronize(asset, sync_started)
+                canonical = panels.load_fund_nav_cached("110022", start, basis=basis)
+                with patch.object(sync, "cached", return_value=None):
+                    updated_window = panels.load_fund_nav_cached("110022", start, basis=basis)
+                for series, timestamp in ((first, observed), (hit, observed),
+                                          (canonical, later), (updated_window, later)):
+                    self.assertEqual(series.attrs["nav_observed_at"], timestamp.isoformat())
+                    self.assertEqual(series.attrs["nav_observed_data_end"], end)
+                    self.assertEqual(series.attrs["nav_snapshot_version"],
+                                     funds.nav_series_version(series, basis))
+                with patch("market_research.funds.payloads._fund_forecast", return_value={}):
+                    panel = panels.load_panel("110022", start=start, nav_basis=basis,
+                                              verbose=False, include_forecast_nav=True)
+                    nav = panel.attrs["forecast_nav"]
+                    full = fund_forecast_payload(nav)["meta"]
+                    clipped = fund_forecast_payload(nav.iloc[:-1])["meta"]
+                self.assertEqual(full["nav_basis"], basis)
+                self.assertEqual(full["nav_date"], end)
+                self.assertEqual(full["nav_observed_at"], later.isoformat())
+                self.assertIsNone(full["nav_announcement_at"])
+                self.assertEqual(full["nav_data_version"], full["nav_snapshot_version"])
+                self.assertEqual(clipped["nav_observed_data_end"], end)
+                self.assertNotEqual(clipped["nav_data_version"], full["nav_data_version"])
+                with patch.object(sync, "synchronize", side_effect=TimeoutError("offline")):
+                    stale = panels.load_fund_nav_cached("110022", start, refresh=True, basis=basis)
+                self.assertIn("offline", stale.attrs["source_error"])
+                self.assertEqual(stale.attrs["nav_observed_at"], later.isoformat())
+
+    def test_old_window_cache_has_no_observation_evidence(self):
+        frame = self._series(100.0).to_frame()
+        storage.write(self.cache_name, frame, {
+            "v": C.DATA_CACHE_VERSION, "code": "110022", "basis": "total",
+            "start": "2024-01-01",
+            "info": {"fetched_at": "2024-01-05T21:00:00+08:00", "data_end": "2024-01-05"},
+        })
+        actual = panels.load_fund_nav_cached("110022", "2024-01-01", allow_fetch=False)
+        self.assertNotIn("nav_observed_at", actual.attrs)
+        self.assertNotIn("nav_observed_data_end", actual.attrs)
+        self.assertNotIn("nav_snapshot_version", actual.attrs)
 
     def test_load_panel_exposes_degraded_basis_and_warning(self):
         nav = self._series(90.0)

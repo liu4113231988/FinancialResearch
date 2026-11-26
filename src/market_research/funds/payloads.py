@@ -1,5 +1,6 @@
 """把计算结果转换为前端图表与诊断字典；不读取行情、不启动任务。"""
 from __future__ import annotations
+from datetime import datetime, timezone
 import math
 from market_research.serialization import _jnum, _jsafe, _dates
 from typing import Any, Dict, List
@@ -12,6 +13,7 @@ from market_research.modeling.engine import MIN_OOS_SESSIONS, MIN_REFITS
 from market_research.modeling.signals import health_stats
 from market_research.modeling.trends import trend_payload
 from market_research.market.technical import series_forecast, MIN_TRAIN
+from market_research.data.providers.funds import NAV_OBSERVATION_FIELDS, nav_series_version
 
 
 
@@ -161,6 +163,21 @@ def nav_block(panel: pd.DataFrame, nav: pd.Series) -> dict:
 
 def fund_forecast_payload(nav: pd.Series, horizons=(5, 20),
                           max_points: int = 400) -> dict:
+    series = nav.astype(float).dropna()
+    result = _fund_forecast(series, horizons, max_points)
+    basis = nav.attrs.get("nav_basis")
+    result["meta"] = {
+        **{key: nav.attrs.get(key) for key in NAV_OBSERVATION_FIELDS},
+        "nav_date": series.index[-1].date().isoformat() if len(series) else None,
+        "nav_basis": basis,
+        "nav_announcement_at": None,
+        "nav_data_version": nav_series_version(series, basis) if basis and len(series) else None,
+        "forecast_generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return result
+
+
+def _fund_forecast(s: pd.Series, horizons, max_points: int) -> dict:
     """基金净值的方向概率。
 
     与模型详情的「趋势色带」是两件事：色带只描述已经发生的形态，
@@ -168,7 +185,6 @@ def fund_forecast_payload(nav: pd.Series, horizons=(5, 20),
     `direction_forecast`（标签按成熟期截断、每 21 日滚动重训），
     样本不足时显式返回不可用，不补 0.5 或历史均值。
     """
-    s = pd.Series(nav).astype(float).dropna()
     if len(s) < MIN_TRAIN + 65:
         return {"basis": "fund_nav", "available": False, "dates": [],
                 "horizons": [], "reason": "净值样本不足以训练方向模型",

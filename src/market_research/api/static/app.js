@@ -1284,9 +1284,7 @@ function renderHead() {
   if (registration.status) {
     const badge = document.createElement('span');
     badge.className = registration.status === 'recorded' ? 'meta-note' : 'meta-warn';
-    badge.textContent = registration.status === 'recorded'
-      ? ` · 本次入账 ${registration.recorded} 条`
-      : ` · 本次未入账（${registration.reason || registration.status}）`;
+    badge.textContent = ' · ' + registrationText(registration);
     badge.title = registration.detail || '';
     $('fundMeta').appendChild(badge);
   }
@@ -2506,8 +2504,23 @@ function renderBtQuality(p) {
   if (p.meta && p.meta.nav_degraded) {
     parts.push(`净值口径已降级为累计净值（${p.meta.nav_degraded_reason || '总回报构造失败'}），回测结论不可按总回报解读`);
   }
+  if (p.meta?.registration?.status) parts.push(registrationText(p.meta.registration));
   el.textContent = parts.join(' ');
   el.hidden = parts.length === 0;
+}
+
+function registrationText(registration) {
+  const reasons = {
+    cache_hit: '复用已计算结果', duplicate: '同日同来源同周期已有首条记录',
+    historical_window: '历史窗口', stale_nav: '净值并非最新已核验会话',
+    availability_unknown: '缺少可核验的净值或时点证据', matured: '评估窗口已结束',
+    refresh_failed: '数据刷新失败', write_failed: '台账写入失败',
+    no_eligible_rows: '无可入账的预测或触发事件', cancelled: '任务已取消或尝试已失效',
+  };
+  const reason = reasons[registration.reason] || registration.reason || registration.status;
+  if (registration.status === 'recorded') return `本次入账 ${registration.recorded} 条`;
+  if (registration.recorded) return `本次入账 ${registration.recorded} 条，其余跳过（${reason}）`;
+  return `本次未入账（${reason}）`;
 }
 
 function renderBtVariantNotes(p) {

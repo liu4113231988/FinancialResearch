@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import math
 import time
 import warnings
@@ -30,6 +31,7 @@ warnings.filterwarnings("ignore")
 import market_research.config as C
 import market_research.data.marketdata as D
 from market_research.data.files import _atomic_pickle_dump
+from market_research.data.providers.funds import nav_series_version
 from market_research.modeling.backtest import run_backtest, score_to_position
 from market_research.modeling.models import MODELS, MODEL_ORDER, ModelZoo
 from market_research.modeling.signals import SignalEngine, build_decision
@@ -55,8 +57,10 @@ def nav_basis_meta(attrs: dict) -> dict:
             "nav_basis": nav_basis,
             "nav_degraded": nav_degraded,
             "nav_degraded_reason": nav_reason or None,
+            "nav_source_error": attrs.get("nav_source_error"),
             "nav_observed_at": attrs.get("nav_observed_at"),
             "nav_observed_data_end": attrs.get("nav_observed_data_end"),
+            "nav_snapshot_version": attrs.get("nav_snapshot_version"),
             # 供应商公告时间不可得；观察时间只表示本地至迟已取得，不冒充公告。
             "nav_announcement_at": None,
             "nav_availability_note": "公告时间未知；观察时间为本地至迟取得时间"}
@@ -311,6 +315,8 @@ def analyze(code: str, models: Optional[List[str]] = None,
         valuation=valuation, drift=drift,
         quality=dict(getattr(panel, "attrs", {}).get("data_quality") or {}))
 
+    generated_at = datetime.now(timezone.utc).isoformat()
+    forecast.setdefault("meta", {})["analysis_generated_at"] = generated_at
     result = {
         "code": code, "name": name,
         "status": completeness["status"], "ok": completeness["ok"],
@@ -331,6 +337,7 @@ def analyze(code: str, models: Optional[List[str]] = None,
             "models": models,
             "params": _jsafe(params or {}),
             "elapsed": round(time.time() - t0, 1),
+            "analysis_generated_at": generated_at,
             "window": C.RBSA["window"],
             "refit": C.RBSA["refit"],
             "max_rebal": (max_rebal if max_rebal is not None
@@ -364,6 +371,7 @@ def analyze(code: str, models: Optional[List[str]] = None,
             "window_default_years": C.DEFAULT_WINDOW_YEARS,
             "window_min_years": C.MIN_WINDOW_YEARS,
             **nav_basis_meta(getattr(panel, "attrs", {})),
+            **forecast.get("meta", {}),
             # 价格覆盖降级（剔除停编指数、连续缺失截断）必须透传到界面，
             # 否则用户会以为用的是完整候选池
             "data_warnings": list(getattr(panel, "attrs", {}).get("warnings") or []),
@@ -606,11 +614,15 @@ def backtest_fund(code: str, model_key: str = "enet_slsqp",
                       start_date=start_date, end_date=end_date,
                       decision_trades=trades)
 
+    nav_meta = nav_basis_meta(panel.attrs)
     return _backtest_payload(code, name, model_key, auto_equity, bt,
                              health, decision, time.time() - t0,
                              valuation=valuation,
                              meta_extra={
-                                 **nav_basis_meta(getattr(panel, "attrs", {})),
+                                 **nav_meta,
+                                 "analysis_generated_at": datetime.now(timezone.utc).isoformat(),
+                                 "nav_date": nav.index[-1].date().isoformat(),
+                                 "nav_data_version": nav_series_version(nav, nav_meta["nav_basis"]),
                                  "data_quality": dict(
                                      getattr(panel, "attrs", {}).get("data_quality") or {}),
                                  "data_warnings": list(

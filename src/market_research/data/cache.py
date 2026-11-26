@@ -5,6 +5,7 @@ from typing import Optional
 import pandas as pd
 import market_research.config as C
 from market_research.data import storage
+from market_research.data.providers.funds import NAV_OBSERVATION_FIELDS
 from market_research.errors import CacheMiss
 
 LOG = logging.getLogger(__name__)
@@ -42,10 +43,19 @@ def _safe_metadata(name: str):
         return None
 
 
-def _safe_read(name: str):
+def _safe_read(name: str, meta: Optional[dict], include_info: bool):
     """损坏的行情缓存按未命中处理，由后续 builder 重建覆盖（自愈）。"""
     try:
-        return storage.read(name)
+        frame, saved = storage.read(name, with_metadata=True)
+        if frame is None or (meta is not None and _fingerprint(saved) != _fingerprint(meta)):
+            return None
+        if include_info:
+            info = saved.get("info") or {}
+            frame.attrs.update(info)
+            if info.get("last_error"):
+                frame.attrs.update(stale=True, source_error=info["last_error"],
+                                   cached_at=info.get("fetched_at"))
+        return frame
     except Exception as exc:                                  # noqa: BLE001
         LOG.warning("缓存 %s 读取失败，按未命中处理：%s: %s",
                     name, type(exc).__name__, str(exc)[:180])
@@ -86,7 +96,7 @@ def _cache_info_write(name: str, info: dict):
 
 
 def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False,
-            allow_fetch: bool = True):
+            allow_fetch: bool = True, *, include_info: bool = False):
     """DuckDB 为唯一写入目标；兼容导入旧 CSV，刷新失败保留上一份数据。
 
     allow_fetch=False 表示"只读"：缓存未命中时抛 `CacheMiss`，绝不调用
@@ -96,13 +106,14 @@ def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False,
     metadata / 行情损坏时按未命中处理：可抓取则由 builder 重建并覆盖坏记录
     （自愈），只读则抛 CacheMiss 让上层返回 202，而不是把冷缓存打成 500。
     """
-    if not refresh and (meta is None or _cache_meta_valid(name, meta)):
-        frame = _safe_read(name)
+    if not refresh:
+        frame = _safe_read(name, meta, include_info)
         if frame is not None:
             return frame
         # 旧 CSV 迁移本身要写库：只读请求线程不做这件事，直接按未命中处理。
         legacy = C.DATA_DIR / f"{name}.csv" if allow_fetch else None
-        if legacy is not None and legacy.exists():
+        if (legacy is not None and legacy.exists()
+                and (meta is None or _cache_meta_valid(name, meta))):
             try:
                 frame = pd.read_csv(legacy, index_col=0, parse_dates=True)
                 if len(frame):
@@ -122,15 +133,15 @@ def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False,
         # P2-27：数据源故障不回退到「口径已过期」的旧缓存（如旧版 total
         # 缓存里其实是 cum 数据）；只有 meta 仍匹配时才降级使用旧数据，
         # 并把 stale/source_error 挂到返回值上，由统一 data_quality 透传。
-        previous = (_safe_read(name)
-                    if meta is None or _cache_meta_valid(name, meta) else None)
+        previous = _safe_read(name, meta, include_info)
         if previous is None or not len(previous):
             raise
         error = f"{type(exc).__name__}: {str(exc)[:200]}"
         LOG.warning("数据源抓取失败，沿用本地缓存 %s：%s", name, error)
         previous.attrs["stale"] = True
         previous.attrs["source_error"] = error
-        previous.attrs["cached_at"] = cache_info(name).get("fetched_at")
+        previous.attrs["cached_at"] = (previous.attrs.get("fetched_at") if include_info
+                                       else cache_info(name).get("fetched_at"))
         _cache_info_write(name, {
             "last_error": error,
             "last_error_at": time.strftime("%Y-%m-%d %H:%M:%S")})
@@ -148,6 +159,8 @@ def _with_info(meta: dict, df) -> dict:
     """
     meta = dict(meta or {})
     info = dict(meta.get("info") or {})
+    info.update({key: df.attrs[key] for key in NAV_OBSERVATION_FIELDS
+                 if key in df.attrs})
     info.setdefault("fetched_at", time.strftime("%Y-%m-%d %H:%M:%S"))
     if isinstance(df, pd.DataFrame) and len(df.index):
         try:

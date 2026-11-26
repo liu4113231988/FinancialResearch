@@ -1,4 +1,6 @@
 from __future__ import annotations
+from datetime import datetime, timezone
+import hashlib
 import logging
 from typing import Optional
 import numpy as np
@@ -9,6 +11,26 @@ from market_research.data.http import _retry, _clean_series
 from market_research.errors import ProviderContractError
 
 LOG = logging.getLogger(__name__)
+
+NAV_OBSERVATION_FIELDS = ("nav_observed_at", "nav_observed_data_end",
+                          "nav_snapshot_version")
+
+
+def nav_series_version(series: pd.Series, basis: str) -> str:
+    """指纹绑定有序日期、数值及实际净值口径。"""
+    dates = pd.DatetimeIndex(series.index).as_unit("ns").asi8.astype("<i8")
+    values = series.to_numpy(dtype="<f8")
+    return hashlib.sha256(basis.encode() + dates.tobytes() + values.tobytes()).hexdigest()
+
+
+def _observed_nav(series: pd.Series, basis: str, observed_at: datetime) -> pd.Series:
+    if not series.empty:
+        series.attrs.update(
+            nav_observed_at=observed_at.isoformat(),
+            nav_observed_data_end=series.index[-1].date().isoformat(),
+            nav_snapshot_version=nav_series_version(series, basis),
+        )
+    return series
 
 
 def _require_nav_frame(df, source: str):
@@ -38,6 +60,7 @@ def fetch_fund_nav(code: str, start: Optional[str] = None) -> pd.Series:
 
     df = _retry(ak.fund_open_fund_info_em, symbol=code,
                 indicator="累计净值走势", source="fund_nav")
+    observed_at = datetime.now(timezone.utc)
     _require_nav_frame(df, "fund_nav")
     df = df.iloc[:, :2].copy()
     df.columns = ["date", "nav"]
@@ -46,7 +69,7 @@ def fetch_fund_nav(code: str, start: Optional[str] = None) -> pd.Series:
     # 注意：必须按"索引（日期）"去重，不能按数值去重——
     # 累计净值存在大量数值相同的相邻记录，按数值去重会误删四成以上样本。
     s.name = f"fund_{code}"
-    return _clean_series(s, start)
+    return _observed_nav(_clean_series(s, start), NAV_BASIS_CUM, observed_at)
 
 
 NAV_BASIS_CUM = "cum"        # 数据源「累计净值走势」直接取对数差分（当前默认）
@@ -264,6 +287,7 @@ def fetch_fund_total_return(code: str,
         cum.attrs["degraded"] = True
         return cum
     rr = fetch_cum_return_curve(code, start)
+    observed_at = datetime.now(timezone.utc)
     if rr.empty:
         LOG.warning("%s 拿不到累计收益率锚点，只用分红修正（拆分未校准）", code)
         idx = cum.index.intersection(unit.index)
@@ -282,6 +306,8 @@ def fetch_fund_total_return(code: str,
         LOG.warning("%s 总回报构造结果为空，退回累计净值口径", code)
         cum.attrs["degraded"] = True
         return cum
+    if not F.attrs.get("degraded") and cum.index[-1] == unit.index[-1] == F.index[-1]:
+        return _observed_nav(F, NAV_BASIS_TOTAL, observed_at)
     return F
 
 

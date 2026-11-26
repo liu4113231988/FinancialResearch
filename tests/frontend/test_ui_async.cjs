@@ -127,6 +127,16 @@ vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('async func
   assert.match(source, /data_provenance/);
   assert.match(source, /registration: m\.registration/);
   assert.match(source, /本次未入账/);
+  const registrationContext = {$: id => nodes.get(id)};
+  vm.createContext(registrationContext);
+  const registrationStart = source.indexOf('function renderBtQuality(');
+  const registrationEnd = source.indexOf('\nfunction ', source.indexOf('function registrationText(') + 1);
+  vm.runInContext(source.slice(registrationStart, registrationEnd), registrationContext);
+  assert.match(registrationContext.registrationText({status: 'not_recorded', reason: 'cache_hit'}), /复用已计算结果/);
+  assert.match(registrationContext.registrationText({status: 'partial', recorded: 1, reason: 'duplicate'}), /本次入账 1 条.*已有首条/);
+  nodes.set('btQuality', {});
+  registrationContext.renderBtQuality({meta: {registration: {status: 'not_recorded', reason: 'availability_unknown'}}});
+  assert.match(nodes.get('btQuality').textContent, /缺少可核验的净值或时点证据/);
   assert.match(source, /\$\('btnWatch'\)\.onclick = toggleWatchlist/);
   assert.match(source, /\$\('watchSel'\)\.onchange/);
   assert.match(source, /\$\('btnExport'\)\.onclick = exportResult/);

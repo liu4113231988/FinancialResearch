@@ -52,7 +52,8 @@ for _d in (DATA_DIR, FIG_DIR, RES_DIR):
 #      评估增加覆盖元数据；旧结果与新口径不可混用，必须重算。
 # 17 = 逐窗 TE 按日历跨度年化、共同 OOS 口径排序、W+30 最小拟合门槛；
 #      fit_diag 结构扩展。旧结果缺少这些字段，必须重算。
-CACHE_VERSION = 17
+# 18 = 基金快照、预测输入指纹与生成时点随结果缓存保留。
+CACHE_VERSION = 18
 
 # 数据缓存版本：修改 align_prices / 覆盖率阈值 / 候选池等取数口径后 +1，
 # 旧版 output/data/panel_*.csv 会被自动判为过期并重新抓取；

@@ -73,10 +73,12 @@ def _fund_analyze_result():
     return {
         "code": "110022",
         "name": "测试基金",
-        "meta": {"nav_basis": "total",
+        "meta": {"nav_basis": "total", "nav_date": AS_OF,
+                 "nav_snapshot_version": "a" * 64, "nav_data_version": "b" * 64,
                  "nav_observed_at": f"{AS_OF}T21:00:00+08:00",
                  "nav_observed_data_end": AS_OF,
                  "nav_announcement_at": None,
+                 "forecast_generated_at": f"{AS_OF}T21:55:00+08:00",
                  "analysis_generated_at": f"{AS_OF}T22:00:00+08:00",
                  "provenance": {"git_commit": "abc123", "code_version": "1",
                                 "data_stamp": "stamp",
@@ -100,7 +102,8 @@ def _fund_backtest_result():
         "meta": {"code": "110022", "name": "测试基金", "model": "enet_slsqp",
                  "end": AS_OF, "thresholds": {"exit": -0.5, "enter": -0.2},
                  "health_stats": {"min": -0.6},
-                 "nav_basis": "total",
+                 "nav_basis": "total", "nav_date": AS_OF,
+                 "nav_snapshot_version": "a" * 64, "nav_data_version": "b" * 64,
                  "nav_observed_at": f"{AS_OF}T21:00:00+08:00",
                  "nav_observed_data_end": AS_OF,
                  "nav_announcement_at": None,
@@ -255,10 +258,11 @@ class FundA3Tests(unittest.TestCase):
         result = _fund_analyze_result()
         result["forecast"]["as_of"] = str(as_of)
         meta = result["meta"]
-        meta.update(nav_basis=basis,
+        meta.update(nav_basis=basis, nav_date=str(as_of),
                     nav_observed_at=observed.isoformat(),
                     nav_observed_data_end=str(as_of),
                     nav_announcement_at=None,
+                    forecast_generated_at=generated.isoformat(),
                     analysis_generated_at=generated.isoformat(),
                     provenance={**meta["provenance"],
                                 "generated_at": generated.isoformat()})
@@ -270,9 +274,10 @@ class FundA3Tests(unittest.TestCase):
         result = self._result("2025-01-02",
                               datetime(2025, 1, 15, 15, 20, tzinfo=ledger.SHANGHAI),
                               datetime(2025, 1, 15, 16, tzinfo=ledger.SHANGHAI))
+        result["forecast"]["horizons"] = [{"horizon": 5, "ok": True, "probability": 0.6}]
         outcome = ledger.record_result_ex(
-            "analyze", {}, result,
-            now=datetime(2025, 1, 15, 16, 30, tzinfo=ledger.SHANGHAI))
+            "analyze", {"end": None}, result,
+            now=datetime(2025, 1, 15, 16, tzinfo=ledger.SHANGHAI))
         self.assertEqual(outcome["status"], "not_recorded")
         self.assertEqual(outcome["reason"], "stale_nav")
         self.assertEqual(ledger._records(), [])
@@ -327,8 +332,11 @@ class FundA3Tests(unittest.TestCase):
                          "refresh_failed")
         self.assertEqual(ledger.record_result_ex("analyze", {}, result, now=now)["status"],
                          "recorded")
+        result["forecast"]["horizons"][0]["probability"] = 0.10
         self.assertEqual(ledger.record_result_ex("analyze", {}, result, now=now)["reason"],
                          "duplicate")
+        first = next(row for row in ledger._records() if row["horizon"] == 5)
+        self.assertEqual(first["probability"], 0.62)
 
     def test_matured_fund_is_not_backfilled(self):
         result = self._result(
@@ -341,17 +349,39 @@ class FundA3Tests(unittest.TestCase):
             now=datetime(2025, 1, 15, 16, tzinfo=ledger.SHANGHAI))
         self.assertEqual(outcome["reason"], "matured")
 
-        available = self._result(
-            "2025-01-02", datetime(2025, 1, 15, 15, 20, tzinfo=ledger.SHANGHAI),
-            datetime(2025, 1, 15, 15, 40, tzinfo=ledger.SHANGHAI))
-        available["forecast"]["horizons"] = [
-            item for item in available["forecast"]["horizons"]
-            if item["horizon"] == 5]
-        with patch.object(ledger, "_fund_availability_reason", return_value=None):
-            outcome = ledger.record_result_ex(
-                "analyze", {}, available,
-                now=datetime(2025, 1, 15, 16, tzinfo=ledger.SHANGHAI))
+    def test_old_snapshot_is_stale_at_registration_even_before_maturity(self):
+        observed = datetime(2025, 1, 2, 21, tzinfo=ledger.SHANGHAI)
+        result = self._result("2025-01-02", observed, observed + timedelta(hours=1))
+        now = datetime(2025, 1, 7, 16, tzinfo=ledger.SHANGHAI)
+        outcome = ledger.record_result_ex("analyze", {}, result, now=now)
+        self.assertEqual((outcome["reason"], outcome["matured"]), ("stale_nav", 0))
+        rule = _fund_backtest_result()
+        rule["meta"].update(result["meta"])
+        rule["current"]["date"] = rule["trades"][0]["date"] = "2025-01-02"
+        with patch.object(ledger, "RULE_EVAL_SESSIONS", 3):
+            outcome = ledger.record_result_ex("backtest", {}, rule, now=now)
         self.assertEqual(outcome["reason"], "matured")
+        self.assertEqual(ledger._records(), [])
+
+    def test_missing_or_invalid_evidence_is_unknown(self):
+        observed = datetime(2025, 1, 2, 21, tzinfo=ledger.SHANGHAI)
+        for key, value in (("nav_observed_at", "2025-01-02T21:00:00"),
+                           ("nav_observed_at", None), ("nav_date", "2025-01-01"),
+                           ("nav_data_version", ""), ("forecast_generated_at", None),
+                           ("analysis_generated_at", "2025-01-02T20:00:00+08:00")):
+            with self.subTest(key=key, value=value):
+                result = self._result("2025-01-02", observed, observed + timedelta(hours=1))
+                result["meta"][key] = value
+                self.assertEqual(ledger.record_result_ex(
+                    "analyze", {}, result, now=observed + timedelta(hours=2))["reason"],
+                    "availability_unknown")
+        result = self._result("2025-01-02", observed, observed + timedelta(hours=1))
+        with patch("market_research.data.providers.calendar.bundled_calendar",
+                   side_effect=ValueError("no coverage")):
+            outcome = ledger.record_result_ex(
+                "analyze", {}, result, now=observed + timedelta(hours=2))
+        self.assertEqual(outcome["reason"], "availability_unknown")
+        self.assertEqual(ledger._records(), [])
 
     def test_market_outcome_separates_direction_and_rule(self):
         with patch("market_research.data.providers.calendar.bundled_calendar",
@@ -363,9 +393,32 @@ class FundA3Tests(unittest.TestCase):
         self.assertEqual(outcome["direction"], 2)
         self.assertEqual(outcome["rule"], 1)
 
+    def test_cancelled_and_replaced_attempts_do_not_register(self):
+        from market_research.tasks.store import DurableJobStore, bind_attempt
+
+        jobs = DurableJobStore()
+        observed = datetime(2025, 1, 2, 21, tzinfo=ledger.SHANGHAI)
+        result = self._result("2025-01-02", observed, observed + timedelta(hours=1))
+        now = observed + timedelta(hours=2)
+        jid, _ = jobs.enqueue("110022", [], "analyze", {})
+        first = jobs.claim()
+        jobs.retry_crashed(jid, first["token"], "retry")
+        second = jobs.claim()
+        with bind_attempt(first["token"]):
+            outcome = ledger.record_result_ex("analyze", {}, result, now=now, job_id=jid)
+        self.assertEqual(outcome["reason"], "cancelled")
+        self.assertTrue(jobs.cancel(jid))
+        with bind_attempt(second["token"]):
+            outcome = ledger.record_result_ex("analyze", {}, result, now=now, job_id=jid)
+        self.assertEqual(outcome["reason"], "cancelled")
+        self.assertEqual(ledger._records(), [])
+
     def test_read_only_fund_audit_separates_evidence_status(self):
-        params = {"nav_observed_at": "2025-01-02T21:00:00+08:00",
+        params = {"nav_date": "2025-01-02", "nav_basis": "total",
+                  "nav_snapshot_version": "a" * 64, "nav_data_version": "b" * 64,
+                  "nav_observed_at": "2025-01-02T21:00:00+08:00",
                   "nav_observed_data_end": "2025-01-02",
+                  "forecast_generated_at": "2025-01-02T21:30:00+08:00",
                   "analysis_generated_at": "2025-01-02T22:00:00+08:00",
                   "data_stamp": "stamp"}
         verified = ledger._make(
@@ -373,12 +426,17 @@ class FundA3Tests(unittest.TestCase):
             as_of="2025-01-02", source="direction", direction="up",
             horizon=5, probability=0.6, price_basis="total",
             params=params)
+        verified["created_at"] = datetime(2025, 1, 2, 22, 30, tzinfo=ledger.SHANGHAI).timestamp()
         legacy = ledger._make(
             asset_kind="fund", asset_code="110022", asset_name="旧记录",
             as_of="2025-01-03", source="direction", direction="up",
             horizon=5, probability=0.6, price_basis="total", params={})
         ledger._insert([verified, legacy])
-        audit = ledger.fund_audit()
+        path = C.DATA_DIR / "market.duckdb"
+        before = path.read_bytes()
+        with patch.object(ledger, "_schema", side_effect=AssertionError("audit attempted DDL")):
+            audit = ledger.fund_audit()
+        self.assertEqual(path.read_bytes(), before)
         self.assertEqual(audit["total"], 2)
         self.assertEqual(audit["verified"], 1)
         self.assertEqual(audit["pending_evidence"], 1)
@@ -393,14 +451,22 @@ class RegistrationServiceTests(unittest.TestCase):
         from market_research.services import analysis as service
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "result.pkl"
+            evidence = _fund_analyze_result()["meta"]
             path.write_bytes(pickle.dumps({
                 "code": "110022",
-                "meta": {"registration": {"status": "recorded", "recorded": 2}}}))
+                "meta": {**evidence, "registration": {"status": "recorded", "recorded": 2}}}))
+            cached_bytes = path.read_bytes()
             with patch.object(service, "fund_cache_path", return_value=path), \
-                    patch.object(service.sync, "register"):
+                    patch.object(service.sync, "register"), \
+                    patch.object(ledger, "record_result_ex") as register:
                 response = service.submit("analyze", {"code": "110022"})
+            register.assert_not_called()
+            self.assertEqual(path.read_bytes(), cached_bytes)
         self.assertTrue(response["cached"])
-        registration = response["result"]["meta"]["registration"]
+        meta = response["result"]["meta"]
+        for field, value in evidence.items():
+            self.assertEqual(meta[field], value)
+        registration = meta["registration"]
         self.assertEqual(registration["status"], "not_recorded")
         self.assertEqual(registration["reason"], "cache_hit")
 
@@ -409,6 +475,8 @@ class RegistrationServiceTests(unittest.TestCase):
         result = _fund_analyze_result()
         with patch("market_research.data.providers.calendar.bundled_calendar",
                    return_value=(SESSIONS, {})), \
+                patch.object(ledger, "_now", return_value=datetime(
+                    2026, 10, 30, 23, tzinfo=ledger.SHANGHAI)), \
                 patch.object(ledger, "_insert", side_effect=OSError("locked")):
             outcome = service._record_predictions("analyze", {}, result)
         self.assertEqual(outcome["reason"], "write_failed")

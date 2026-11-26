@@ -219,11 +219,8 @@ def cached(kind, code, basis, start, end, fresh=True):
     if (start or C.START_DATE) < HISTORY_START:
         return None
     try:
-        if fresh:
-            meta = storage.metadata(name)
-        else:
-            # 结算须从同一版本读取报价与观察证据。
-            frame, meta = storage.read(name, with_metadata=True)
+        # 行情与观察证据必须来自同一次锁内读取。
+        frame, meta = storage.read(name, with_metadata=True)
     except Exception as exc:                                  # noqa: BLE001
         LOG.warning("同步缓存 %s 元数据损坏，视为未就绪：%s: %s",
                     name, type(exc).__name__, str(exc)[:180])
@@ -249,12 +246,6 @@ def cached(kind, code, basis, start, end, fresh=True):
                 LOG.info("同步缓存 %s 的数据末日 %s 落后检查日 %s 共 %d 天，视为未就绪",
                          name, data_end, through, lag)
                 return None
-        try:
-            frame = storage.read(name)
-        except Exception as exc:                              # noqa: BLE001
-            LOG.warning("同步缓存 %s 读取失败，视为未就绪：%s: %s",
-                        name, type(exc).__name__, str(exc)[:180])
-            return None
     if frame is None:
         return None
     frame = frame.loc[start or C.START_DATE:end].copy()
@@ -375,6 +366,11 @@ def overlay_refresh(kind, code, basis, incoming, end=None):
         info = {**(previous.get("info") or {}), **incoming.attrs,
                 "fetched_at": now().isoformat(),
                 "data_end": frame.index[-1].date().isoformat()}
+        if kind == "fund":
+            from market_research.data.providers.funds import NAV_OBSERVATION_FIELDS
+            for field in NAV_OBSERVATION_FIELDS:
+                info[field] = incoming.attrs.get(field)
+            frame.attrs.update({field: info[field] for field in NAV_OBSERVATION_FIELDS})
         if kind in ("stock", "index"):
             # 旧行即使落入新快照的首尾日期内，也不能继承新观察时间。
             for field in ("request_started_at", "observed_at",

@@ -29,6 +29,13 @@ def bind_attempt(token):
         _TOKEN.reset(marker)
 
 
+def active_attempt(db, jid):
+    """在调用方持有的数据库锁内核对当前任务所有权。"""
+    return db.execute(
+        "SELECT 1 FROM analysis_jobs WHERE id=? AND token=? AND status='running' AND lease_until>?",
+        [jid, _TOKEN.get(), time.time()]).fetchone() is not None
+
+
 def _schema(db):
     db.execute((files("market_research.data") / "migrations/003_jobs.sql").read_text(encoding="utf-8"))
 

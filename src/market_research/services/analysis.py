@@ -176,7 +176,7 @@ def submit(operation, params):
                 meta["from_cache"] = True
                 # 缓存里冻结的是计算结果，不得重放旧入账标记；本次命中不重新记账。
                 meta["registration"] = {
-                    "status": "not_recorded", "recorded": 0,
+                    "status": "not_recorded", "recorded": 0, "direction": 0, "rule": 0,
                     "reason": "cache_hit",
                     "detail": "结果缓存命中，本次未重新入账"}
                 # 清理按 mtime 判"长期未用"，命中只读不会更新 mtime，
@@ -250,8 +250,12 @@ def _stamp(result, data_stamp=None):
             meta = {}
             result["meta"] = meta
         meta["provenance"] = result_provenance(data_stamp)
-        meta["analysis_generated_at"] = datetime.now(
-            timezone(timedelta(hours=8))).isoformat()
+        if not meta.get("analysis_generated_at"):
+            meta["analysis_generated_at"] = datetime.now(
+                timezone(timedelta(hours=8))).isoformat()
+        forecast_meta = (result.get("forecast") or {}).get("meta")
+        if isinstance(forecast_meta, dict):
+            forecast_meta["analysis_generated_at"] = meta["analysis_generated_at"]
     return result
 
 
@@ -262,7 +266,7 @@ def _checkpoint_for(operation, params, jid, stamp):
     """P3-F：为长任务建阶段检查点；行情/相关性等短任务用空实现。"""
     if not jid or operation not in _CHECKPOINT_OPERATIONS:
         return checkpoints.NullCheckpoint()
-    fingerprint = {"operation": operation, "stamp": stamp,
+    fingerprint = {"operation": operation, "stamp": stamp, "cache_version": C.CACHE_VERSION,
                    "config_hash": config_hash(),
                    "args": {key: value for key, value in params.items()
                             if key != "job_id"}}
@@ -277,15 +281,15 @@ def _dispatch(operation, params, jid):
     return result
 
 
-def _record_predictions(operation, params, result):
+def _record_predictions(operation, params, result, *, jid=None):
     """把实盘最新收盘的预测写入台账；状态随结果返回，失败不影响分析。"""
     try:
         from market_research.predictions.ledger import record_result_ex
-        outcome = record_result_ex(operation, params, result)
+        outcome = record_result_ex(operation, params, result, job_id=jid)
     except Exception as exc:                               # noqa: BLE001
         LOG.warning("预测台账写入失败，不影响分析结果", exc_info=True)
         outcome = {"status": "not_recorded", "recorded": 0,
-                   "reason": "write_failed",
+                   "reason": "write_failed", "direction": 0, "rule": 0,
                    "detail": f"{type(exc).__name__}: {str(exc)[:160]}"}
     if isinstance(result, dict):
         result.setdefault("meta", {})["registration"] = outcome
@@ -318,7 +322,7 @@ def _dispatch_stage(operation, params, jid, checkpoint, stamp_before):
                 LOG.info("分析期间行情发生变化，跳过结果缓存写入")
         except Exception:
             LOG.exception("分析完成，但缓存写入失败")
-        _record_predictions("analyze", params, result)
+        _record_predictions("analyze", params, result, jid=jid)
         _register_result_nav_basis(params, result)
         return result
     if operation == "market":
@@ -339,7 +343,7 @@ def _dispatch_stage(operation, params, jid, checkpoint, stamp_before):
         arguments["end_date"]=arguments.pop("end",None)
         result = _stamp(backtest_fund(**arguments,job_id=jid,checkpoint=checkpoint),
                         stamp_before)
-        _record_predictions("backtest", params, result)
+        _record_predictions("backtest", params, result, jid=jid)
         return result
     if operation == "holdings":
         return _stamp(holdings(**params, job_id=jid, checkpoint=checkpoint),
