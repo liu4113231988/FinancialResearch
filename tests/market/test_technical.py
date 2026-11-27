@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from market_research.market.technical import indicators, wilder, features_for, direction_forecast, analyze_technical
+from market_research.market.technical import indicators, wilder, features_for, direction_forecast, compare_forecasts, analyze_technical
 from market_research.funds.payloads import _jsafe
 
 
@@ -124,6 +124,74 @@ class TechnicalTests(unittest.TestCase):
                             for s in result['signals']))
         self.assertTrue(any('不能直接' in x for x in result['notices']))
         json.dumps(_jsafe(result),allow_nan=False)
+
+
+class C2EvaluationContractTests(unittest.TestCase):
+    """C2/P3-P：可计算 != 评估充分；少样本主指标留空，诊断字段保留。"""
+
+    @staticmethod
+    def _seed99_frame(n=800):
+        rng = np.random.default_rng(99)
+        close = 100 * np.exp(np.cumsum(rng.normal(.0002, .012, n)))
+        return pd.DataFrame({"open": close * .999, "high": close * 1.01,
+                             "low": close * .99, "close": close, "volume": 1000.},
+                            index=pd.bdate_range('2020-01-01', periods=n))
+
+    def test_seed99_20day_computable_but_assessment_insufficient(self):
+        frame = self._seed99_frame()
+        out = direction_forecast(frame, features_for(frame, indicators(frame)),
+                                 20, frame.index[-252])
+        ev = out['evaluation']
+        self.assertTrue(out['computable'])
+        self.assertEqual(out['ok'], out['computable'])
+        self.assertEqual(ev['n'], 12)          # 252 展示窗内只有 12 个非重叠起点
+        self.assertEqual(ev['assessment_status'], 'insufficient')
+        self.assertIsNone(ev['primary'])
+        self.assertIsNone(ev['advantage'])
+        self.assertGreater(out['training_rows'], 0)
+        self.assertEqual(sum(ev['class_distribution'].values()), ev['n'])
+        self.assertEqual(ev['start'], '2022-02-07')
+        # 主指标留空，但研究诊断仍可显式保留
+        self.assertTrue(np.isfinite(ev['brier']))
+        self.assertTrue(np.isfinite(ev['baseline_brier']))
+
+    def test_no_mature_sample_status_and_empty_distribution(self):
+        frame = sample(40)
+        out = direction_forecast(frame, features_for(frame, indicators(frame)),
+                                 5, frame.index[0])
+        ev = out['evaluation']
+        self.assertEqual(ev['n'], 0)
+        self.assertEqual(ev['assessment_status'], 'insufficient')
+        self.assertIsNone(ev['primary'])
+        self.assertIsNone(ev['advantage'])
+        self.assertEqual(ev['class_distribution'], {'up': 0, 'down': 0, 'flat': 0})
+
+    def test_comparison_primary_empty_when_common_sample_insufficient(self):
+        frame = self._seed99_frame()
+        ind = indicators(frame)
+        base = direction_forecast(frame, features_for(frame, ind), 20,
+                                  frame.index[-252])
+        candidate = {'series': [0.5] * len(base['series'])}
+        out = compare_forecasts(frame, base, candidate, 20, frame.index[-252])
+        self.assertEqual(out['n'], 12)
+        self.assertEqual(out['assessment_status'], 'insufficient')
+        self.assertIsNone(out['primary'])
+        self.assertEqual(sum(out['class_distribution'].values()), out['n'])
+        # 兼容字段仍给出，供研究诊断；不得据此宣称优势
+        self.assertTrue(np.isfinite(out['brier_improvement']))
+
+    def test_comparison_primary_present_when_sample_sufficient(self):
+        frame = self._seed99_frame()
+        ind = indicators(frame)
+        base = direction_forecast(frame, features_for(frame, ind), 5,
+                                  frame.index[0])
+        candidate = {'series': [0.5] * len(base['series'])}
+        out = compare_forecasts(frame, base, candidate, 5, frame.index[0])
+        self.assertGreater(out['n'], 20)
+        self.assertEqual(out['assessment_status'], 'sufficient')
+        self.assertIsNotNone(out['primary'])
+        self.assertAlmostEqual(out['primary']['brier_improvement'],
+                               out['brier_improvement'])
 
 
 if __name__=='__main__':unittest.main()

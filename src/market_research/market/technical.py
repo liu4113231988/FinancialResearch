@@ -134,9 +134,16 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
     n = len(evaluated)
     # P3-O 审计：主指标仍沿用训练标签口径（平盘算下跌），另附"剔除平盘"的
     # 对照，便于与台账 neutral 口径核对；两套分母不合并、不互相替代。
-    evaluation = {"n": n, "ok": n >= 20, "label_policy": "flat_as_down",
+    # C2/P3-P：可计算（有最新概率）与评估充分（固定非重叠样本 n>=20）分开；
+    # n>=20 只是已有评估的展示下限，不是"可靠"或统计功效的证据。
+    sufficient = n >= 20
+    evaluation = {"n": n, "ok": sufficient,
+                  "assessment_status": "sufficient" if sufficient else "insufficient",
+                  "label_policy": "flat_as_down",
                   "target_version": "P(R_h>0)_flat_as_down_v1",
-                  "neutral_epsilon": FLAT_RETURN_EPSILON}
+                  "neutral_epsilon": FLAT_RETURN_EPSILON,
+                  "primary": None, "advantage": None,
+                  "class_distribution": {"up": 0, "down": 0, "flat": 0}}
     if n:
         actual = evaluated.actual
         evaluation.update(accuracy=float(((evaluated.probability >= .5) == actual).mean()),
@@ -144,8 +151,18 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
                           brier=float(((evaluated.probability - actual) ** 2).mean()),
                           baseline_brier=float(((evaluated.baseline - actual) ** 2).mean()),
                           start=evaluated.index[0].date().isoformat(), end=evaluated.index[-1].date().isoformat())
-        evaluation["advantage"] = bool(n >= 20 and evaluation["brier"] < evaluation["baseline_brier"])
         flat = evaluated.raw_return.abs() <= FLAT_RETURN_EPSILON
+        evaluation["class_distribution"] = {
+            "flat": int(flat.sum()),
+            "up": int(((actual == 1) & ~flat).sum()),
+            "down": int(((actual == 0) & ~flat).sum())}
+        if sufficient:
+            evaluation["primary"] = {
+                "accuracy": evaluation["accuracy"], "brier": evaluation["brier"],
+                "baseline_brier": evaluation["baseline_brier"],
+                "start": evaluation["start"], "end": evaluation["end"]}
+            evaluation["advantage"] = bool(
+                evaluation["brier"] < evaluation["baseline_brier"])
         nonflat = evaluated.loc[~flat]
         evaluation["flat_n"] = int(flat.sum())
         if len(nonflat):
@@ -162,8 +179,9 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
                     ((nonflat.baseline - target) ** 2).mean()),
             )
     latest = probability.iloc[-1]
+    computable = bool(pd.notna(latest))
     return {"horizon": horizon, 'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
-            "ok": bool(pd.notna(latest)), "probability": latest,
+            "ok": computable, "computable": computable, "probability": latest,
             "baseline": baseline.iloc[-1],
             "training_rows": training_rows, "minimum_training_rows": MIN_TRAIN,
             "evaluation": evaluation, "series": probability.loc[display_start:].tolist(),
@@ -199,9 +217,14 @@ def compare_forecasts(bars, base, candidate, horizon, display_start, context=Non
             keep.append(i); last = position
     frame = frame.iloc[keep]
     n = len(frame)
-    result = {'n': n, 'ok': n >= 20, 'start': None, 'end': None,
+    sufficient = n >= 20
+    result = {'n': n, 'ok': sufficient,
+              'assessment_status': 'sufficient' if sufficient else 'insufficient',
+              'primary': None, 'start': None, 'end': None,
+              'class_distribution': {'up': 0, 'down': 0, 'flat': 0},
               'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
-              'note': '共同成熟日期比较；候选固定，未据此自动选模型。Brier改善不代表显著性或扣费收益。'}
+              'note': '共同成熟日期比较；候选固定，未据此自动选模型。Brier改善不代表显著性或扣费收益。'
+                      'n<20 时 primary 留空，逐窗指标仅作研究诊断；n>=20 也不是统计功效证明。'}
     if not n:
         return result
     result.update(start=frame.index[0].date().isoformat(), end=frame.index[-1].date().isoformat())
@@ -209,6 +232,10 @@ def compare_forecasts(bars, base, candidate, horizon, display_start, context=Non
     # P3-O 审计：主指标仍为"平盘算下跌"，另列剔除平盘的对照；不改既有数值。
     flat = frame['return'].abs() <= FLAT_RETURN_EPSILON
     nonflat = ~flat
+    result['class_distribution'] = {
+        'flat': int(flat.sum()),
+        'up': int(((target == 1) & nonflat).sum()),
+        'down': int(((target == 0) & nonflat).sum())}
     result['flat_n'] = int(flat.sum())
     result['label_policy'] = 'flat_as_down'
     result['target_version'] = 'P(R_h>0)_flat_as_down_v1'
@@ -236,6 +263,14 @@ def compare_forecasts(bars, base, candidate, horizon, display_start, context=Non
             )
         result[key] = item
     result['brier_improvement'] = result['base']['brier'] - result['candidate']['brier']
+    if sufficient:
+        result['primary'] = {
+            'brier_improvement': result['brier_improvement'],
+            'base_brier': result['base']['brier'],
+            'candidate_brier': result['candidate']['brier'],
+            'base_accuracy': result['base']['accuracy'],
+            'candidate_accuracy': result['candidate']['accuracy'],
+            'start': result['start'], 'end': result['end']}
     if context is not None:
         from market_research.market.context import market_regimes
         regimes = market_regimes(context).reindex(frame.index).fillna('unknown')
