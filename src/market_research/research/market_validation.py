@@ -111,6 +111,60 @@ def paired_evidence(bars, base, candidate, horizon, family_size, *, calendar=Non
     return result
 
 
+def frequency_baseline_evidence(bars, probabilities, training_end, horizon, family_size, *, calendar=None):
+    """用训练期已成熟标签的频率先验，与所有变体在**同一组**日期上配对比较。
+
+    正 gap 表示候选 Brier 低于频率基线。块长/种子固定，置信区间跨 0 时
+    `advantage_vs_frequency` 留空；区间未估出时同样留空，不把点估计当结论。
+    """
+    train = bars.loc[:training_end]
+    returns, _, _ = horizon_data(train.close, horizon, calendar)
+    # horizon_data 给出的是收益，训练标签仍需按 P(R_h>0) 的冻结口径二值化。
+    labels = (returns > 0).astype(float).where(returns.notna())
+    matured = labels.dropna()
+    result = {'ok': False, 'prior': None, 'training_labels': int(len(matured)),
+              'family_size': family_size, 'common_n': 0, 'start': None,
+              'end': None, 'variants': {},
+              'note': '频率先验只取训练期已成熟标签；所有变体共用同一组成熟非重叠日期。'
+                      '配对差为（频率基线 Brier − 候选 Brier）；点态块自助区间未选块长，'
+                      '区间跨 0 或不可估时不宣称优势，Bonferroni 沿用计划预登记的家族数。'}
+    if matured.empty:
+        result['reason'] = '训练期无成熟标签'
+        return result
+    prior = float(matured.mean())
+    columns = [name for name in VARIANTS if name in probabilities.columns]
+    frame = pd.DataFrame({name: probabilities[name] for name in columns}, index=bars.index)
+    actual, _, _ = horizon_data(bars.close, horizon, calendar)
+    common = actual.notna() & frame.notna().all(axis=1)
+    result.update(ok=True, prior=prior, common_n=0,
+                  common_raw_n=int(common.sum()))
+    if common.any():
+        result['start'] = bars.index[common][0].date().isoformat()
+        result['end'] = bars.index[common][-1].date().isoformat()
+    flat = pd.Series(np.nan, index=bars.index)
+    flat.loc[common] = prior
+    for name in columns:
+        evidence = paired_evidence(bars, flat, frame[name].where(common), horizon,
+                                   family_size, calendar=calendar)
+        if name == columns[0]:
+            result['common_n'] = evidence['n']   # 固定非重叠起点数，不是原始日期数
+        intervals = evidence['brier_improvement_uncertainty']['intervals']
+        estimated = [item for item in intervals if item['status'] == 'estimated']
+        advantage = None
+        if evidence['n'] >= 20 and estimated:
+            if all(item['lower'] > 0 for item in estimated):
+                advantage = True
+            elif all(item['upper'] < 0 for item in estimated):
+                advantage = False
+        result['variants'][name] = {
+            'n': evidence['n'],
+            'brier_gap': evidence['brier_improvement_uncertainty']['point_estimate'],
+            'uncertainty': evidence['brier_improvement_uncertainty'],
+            'p_bonferroni_approx': evidence['p_bonferroni_approx'],
+            'advantage_vs_frequency': advantage}
+    return result
+
+
 def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_config=None):
     bars = bars.loc[plan['start']:plan['end']]
     if bars.empty or not bars.index.is_unique or not bars.index.is_monotonic_increasing:
@@ -128,6 +182,9 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_co
         forecasts = {key: direction_forecast(bars, values, horizon, bars.index[0], training_end=cutoff,calendar=calendar)
                      for key, values in variants.items()}
         probability = pd.DataFrame({k:v['series'] for k,v in forecasts.items()}, index=bars.index)
+        frequency = frequency_baseline_evidence(bars, probability, cutoff, horizon,
+                                                family_size, calendar=calendar)
+        output.setdefault('frequency_baseline', {})[str(horizon)] = frequency
         stages = {}
         for stage, start, end in (
             ('development', plan['development_start'], cutoff),
@@ -142,6 +199,9 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_co
                 result = compare_forecasts(window, {'series': baseline}, {'series': candidate}, horizon, start, context,calendar=calendar) if len(window) else {'n': 0, 'ok': False}
                 result['variant'] = variant
                 result['evidence'] = paired_evidence(window, baseline, candidate, horizon, family_size,calendar=calendar)
+                result['frequency'] = {**{k: value for k, value in frequency.items()
+                                          if k != 'variants'},
+                                       'candidate': frequency['variants'].get(variant)}
                 result['execution'] = compare_probability_execution(window, pair['base'], pair[variant], calendar, capital_config, uncertainty=True)
                 rows.append(result)
             stages[stage] = rows
@@ -163,7 +223,10 @@ def evaluate_asset(bars, reference, plan, family_size, calendar=None, capital_co
                     row['comparison']=comparison
                 calibration_rows.append(row)
             output['calibration'][str(horizon)]=calibration_rows
-    output['note'] = '开发期滚动训练，最终测试期固定训练截止日；测试期标签及缩放统计不进入训练。各候选与基线使用各自共同成熟日期，不同候选样本可能不同，不能直接按Brier排名。'
+    output['note'] = ('开发期滚动训练，最终测试期固定训练截止日；测试期标签及缩放统计不进入训练。'
+                      '各候选与基线使用各自共同成熟日期，不同候选样本可能不同，不能直接按Brier排名。'
+                      '频率基线仅由训练期已成熟标签给出，所有变体在同一组成熟非重叠日期上比较；'
+                      '相对频率基线的 Brier 差附固定块自助区间，区间跨 0 或估不出时不宣称优势。')
     if 'calibration_start' in plan:
         output['note']+=' 启用校准时，开发评估和模型训练均截止校准开始之前；校准参数只拟合独立校准窗口，原概率/校准概率只在留出期配对，不与未启用校准的训练协议混排。'
     return output
@@ -283,7 +346,8 @@ def run_plan(plan, root, progress=None, execution_only=False):
               'planned_exposure_controls': sum('capital' not in a for a in plan['assets'])*(2*3 if execution_only else 4*2*2*3*2+(5*2*3*2 if calibration_count else 0)),
               'limitations': ['当前数据版本回放，不是时点可得数据证明。', '同一测试区间反复查看后不再是未触碰的最终测试集。',
                               'HAC正态近似及Bonferroni为探索性诊断，小样本不报p值；不能证明可交易收益。',
-                              '块自助区间是固定预测/账户路径的点态条件诊断，未做区间多重校正，不重训或重放订单；不能据此选模型或声称未来收益。',
+                              '块自助区间是固定预测/账户路径的点态条件诊断（块长与种子固定），未做区间多重校正，不重训或重放订单；不能据此选模型或声称未来收益。',
+                              '频率基线只取训练期已成熟标签，所有变体共用同一组成熟非重叠日期；相对基线 Brier 差的区间跨 0 时不宣称优势，点估计不是显著性证明。',
                               '方向周期有日历时按会话计数，目标缺报价不补标签；无日历时按有效日线且不核验请求末会话。成交缺日沿用原诊断，基准缺失另行披露。']}
     from market_research.market import technical, context, execution, capital, uncertainty, targets
     from market_research.research import calibration
