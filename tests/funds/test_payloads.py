@@ -761,6 +761,7 @@ class AssessmentCoverageTest(unittest.TestCase):
             "oos_n": oos_n, "rebalance_count": refits,
             "oos_start": idx[0].strftime("%Y-%m-%d"),
             "oos_end": idx[-1].strftime("%Y-%m-%d"),
+            "oos_gap_n": 300 - oos_n, "oos_coverage": oos_n / 300,
         })
         nav = 2.5 * np.exp(syn.cumsum())
         payload = {"pcr": model_payload(rep, nav)}
@@ -776,9 +777,27 @@ class AssessmentCoverageTest(unittest.TestCase):
         assessment = payload["pcr"]["assessment"]
         self.assertEqual(assessment["status"], "insufficient")
         self.assertEqual(assessment["oos_n"], 7)
+        self.assertEqual(assessment["oos_gap_n"], 293)
+        self.assertEqual(assessment["oos_coverage"], 0.023333)
         self.assertEqual(assessment["min_oos_sessions"], 60)
-        self.assertEqual(rank.iloc[0]["评估状态"], "不足")
-        self.assertEqual(rank.iloc[0]["有效重估"], 1)
+        row = rank.iloc[0]
+        self.assertEqual(row["评估状态"], "不足")
+        self.assertEqual(row["有效重估"], 1)
+        self.assertEqual(row["样本外起始"], assessment["oos_start"])
+        self.assertEqual(row["样本外结束"], assessment["oos_end"])
+        self.assertAlmostEqual(row["样本外覆盖率"], 7 / 300)
+        self.assertEqual(row["评估原因"], assessment["reasons"])
+
+    def test_legacy_report_with_no_coverage_evidence_is_unknown(self):
+        idx = pd.bdate_range("2021-01-04", periods=12)
+        syn = pd.Series(0.01, index=idx)
+        rep = _model_report(idx, syn)
+        rep.extra.clear()
+        assessment = model_payload(rep, np.exp(syn.cumsum()))["assessment"]
+        self.assertEqual(assessment["status"], "unknown")
+        self.assertEqual(assessment["reasons"], [])
+        for key in ("oos_n", "oos_start", "oos_end", "oos_coverage", "rebalance_count"):
+            self.assertIsNone(assessment[key])
 
     def test_insufficient_evidence_downgrades_wording(self):
         _, rank, ins = self._case("insufficient", ["样本外仅 7 个交易日"], 7, 1)

@@ -10,7 +10,7 @@ from market_research.ordering import ranked_frame
 from market_research.modeling.catalog import MODELS, ModelSpec
 from market_research.modeling.estimators import fit_window, estimate_equity, _score
 
-# B2/P3-R：评估资格下限。用于推荐门禁，**不改变排名表顺序**。
+# B2/P3-R：现行的评估下限与推荐门槛，待产品/研究确认。
 MIN_OOS_SESSIONS = 60
 MIN_REFITS = 3
 # 最小可拟合门槛：至少一个完整训练窗 + 1 个月样本外。与之匹配的是 RBSA
@@ -18,31 +18,30 @@ MIN_REFITS = 3
 MIN_FIT_EXTRA = 30
 
 
-def _coverage_summary(syn: pd.Series, diag_rows: List[dict],
-                      expected_n: Optional[int] = None) -> Dict[str, Any]:
-    """实际样本外覆盖：日数、起止、有效重估窗口数与资格结论。
-
-    `syn` 是逐日拼接的前向序列，日数不等于独立信息量；重估窗口数才是
-    真正独立的拟合样本。两者都低于工程下限时标记 ``insufficient``。
-    因必需因子缺报价被置空的日期单独计数，不能当作连续日收益。
-    """
-    oos_n = int(len(syn))
-    expected = int(expected_n) if expected_n is not None else oos_n
-    gap_n = max(0, expected - oos_n)
+def _coverage_summary(paired_dates: pd.DatetimeIndex, rebalances: int,
+                      expected_n: int, oos_r2: float, *,
+                      error: Optional[str] = None) -> Dict[str, Any]:
+    """覆盖率分母为重估限流后的样本外日期轴，含无法评分的日期。"""
+    oos_n = len(paired_dates)
     reasons: List[str] = []
-    if oos_n < MIN_OOS_SESSIONS:
-        reasons.append(f"样本外仅 {oos_n} 个交易日，低于门槛 {MIN_OOS_SESSIONS}")
-    rebalances = int(len(diag_rows))
-    if rebalances < MIN_REFITS:
-        reasons.append(f"有效重估窗口仅 {rebalances} 个，低于门槛 {MIN_REFITS}")
+    if error:
+        reasons.append(error)
+    else:
+        if oos_n < MIN_OOS_SESSIONS:
+            reasons.append(f"样本外仅 {oos_n} 个交易日，低于门槛 {MIN_OOS_SESSIONS}")
+        if rebalances < MIN_REFITS:
+            reasons.append(f"有效重估窗口仅 {rebalances} 个，低于门槛 {MIN_REFITS}")
+        if not np.isfinite(oos_r2):
+            reasons.append("样本外 R² 未定义")
     return {
         "oos_n": oos_n,
-        "oos_start": syn.index[0].strftime("%Y-%m-%d") if oos_n else None,
-        "oos_end": syn.index[-1].strftime("%Y-%m-%d") if oos_n else None,
-        "oos_gap_n": gap_n,
-        "oos_coverage": (oos_n / expected) if expected else None,
+        "oos_start": paired_dates[0].strftime("%Y-%m-%d") if oos_n else None,
+        "oos_end": paired_dates[-1].strftime("%Y-%m-%d") if oos_n else None,
+        "oos_gap_n": expected_n - oos_n,
+        "oos_coverage": oos_n / expected_n if expected_n else None,
         "rebalance_count": rebalances,
-        "assessment_status": "insufficient" if reasons else "sufficient",
+        "assessment_status": ("failed" if error else
+                              "insufficient" if reasons else "sufficient"),
         "assessment_reasons": reasons,
     }
 
@@ -80,9 +79,10 @@ def _agg_extras(extras: List[dict]) -> Dict[str, Any]:
     return agg
 
 
-def _failed_report(key: str, err: Exception) -> ModelReport:
+def _failed_report(key: str, err: Exception, expected_n: int = 0) -> ModelReport:
     """某个模型失败时返回一个占位报告，保证前端仍能渲染完整表格。"""
     spec = MODELS.get(key, ModelSpec(key, key, "unknown", ""))
+    error = f"{type(err).__name__}: {str(err)[:200]}"
     return ModelReport(
         key=key, name=spec.name, family=spec.family, desc=spec.desc,
         interpretable=spec.interpretable,
@@ -92,7 +92,8 @@ def _failed_report(key: str, err: Exception) -> ModelReport:
         fit_r2_mean=float("nan"), fit_te_mean=float("nan"),
         latest_weights=pd.Series(dtype=float), weights_last_date=None,
         weights_hist=pd.DataFrame(), syn_ret=pd.Series(dtype=float),
-        extra={"error": f"{type(err).__name__}: {str(err)[:200]}"},
+        extra={"error": error, **_coverage_summary(
+            pd.DatetimeIndex([]), 0, expected_n, float("nan"), error=error)},
         elapsed=0.0, fit_diag=pd.DataFrame(),
     )
 
@@ -104,7 +105,8 @@ def _worker(key: str, X_all, y_all, assets, dates, rebal_idx, cfg, override):
                                       list(assets), pd.DatetimeIndex(dates),
                                       list(rebal_idx), override)
     except Exception as e:                          # noqa: BLE001
-        return _failed_report(key, e)
+        expected_n = len(dates) - rebal_idx[0] if rebal_idx else 0
+        return _failed_report(key, e, expected_n)
 
 
 @dataclass
@@ -132,6 +134,8 @@ class ModelReport:
     # P1-25：样本外真实收益（与 syn_ret 同轴），用于跨模型共同日期重算。
     # 默认 None 以兼容旧检查点与测试夹具。
     oos_y: Optional[pd.Series] = None
+    # 产品/研究确认前，推荐沿用原来的预测点数和拟合窗口数。
+    recommendation_coverage_sufficient: Optional[bool] = None
 
 
 class ModelZoo:
@@ -271,6 +275,7 @@ class ModelZoo:
             rebal_idx = self._rebal_calendar(n, W, cfg["refit"], mr, dates)
         else:
             rebal_idx = self._rebal_idx(n, W, cfg["refit"], mr)
+        expected_n = n - rebal_idx[0] if rebal_idx else 0
 
         keys = list(model_keys)
         if not keys:
@@ -299,7 +304,7 @@ class ModelZoo:
                         try:
                             out[key] = fut.result()
                         except Exception as e:      # noqa: BLE001
-                            out[key] = _failed_report(key, e)
+                            out[key] = _failed_report(key, e, expected_n)
                         done += 1
                         if progress:
                             progress(key, done, len(keys), out[key].oos_r2)
@@ -319,7 +324,7 @@ class ModelZoo:
                 rep = self._run_one(key, X_all, y_all, assets, dates,
                                     rebal_idx, params.get(key))
             except Exception as e:                  # noqa: BLE001
-                rep = _failed_report(key, e)
+                rep = _failed_report(key, e, expected_n)
             out[key] = rep
             if progress:
                 progress(key, i, len(keys), rep.oos_r2)
@@ -338,6 +343,7 @@ class ModelZoo:
         rows, fit_r2s, fit_tes, extras = [], [], [], []
         diag_rows, equities = [], []
         n_fallback = 0          # 黑箱预测失败、回退成重要性权重的窗口数
+        paired_refits = 0
         syn = pd.Series(index=dates[rebal_idx[0]:], dtype=float)
         last_w = None
         last_date = None
@@ -429,6 +435,7 @@ class ModelZoo:
                 seg = X_next_clean @ w_sel
             seg[missing] = np.nan
             syn.loc[dates[i:j_end]] = seg
+            paired_refits += int((np.isfinite(seg) & np.isfinite(y_all[i:j_end])).any())
 
             rows.append({"date": dates[i - 1], **fr.weights.to_dict()})
             fit_r2s.append(fr.r2)
@@ -509,7 +516,9 @@ class ModelZoo:
 
         # B2/P3-R：覆盖元数据放在 extras 聚合之后，避免被逐窗指标覆盖。
         # 页面/API/导出据此区分"已算出"与"评估充分"。
-        agg_extra.update(_coverage_summary(syn, diag_rows, len(syn_raw)))
+        paired_dates = syn.index[np.isfinite(syn.values) & np.isfinite(y_oos.values)]
+        agg_extra.update(_coverage_summary(
+            paired_dates, paired_refits, len(syn_raw), oos_r2))
         agg_extra["oos_periods_per_year"] = float(oos_periods)
         agg_extra["te_basis"] = ("calendar_adjusted"
                                  if abs(oos_periods - 252.0) > 1e-9 else "daily")
@@ -526,6 +535,8 @@ class ModelZoo:
             weights_hist=wdf, syn_ret=syn,
             extra=agg_extra, elapsed=time.time() - t0,
             fit_diag=fit_diag, oos_y=y_oos,
+            recommendation_coverage_sufficient=(
+                len(syn) >= MIN_OOS_SESSIONS and len(diag_rows) >= MIN_REFITS),
         )
 
     # -------------------------------------------------------------- 排名
@@ -573,7 +584,10 @@ class ModelZoo:
             finite_r2 = False
         if not finite_r2:
             reasons.append("样本外 R² 未定义")
-        if r.extra.get("assessment_status") != "sufficient":
+        coverage_ok = r.recommendation_coverage_sufficient
+        if coverage_ok is None:
+            coverage_ok = r.extra.get("assessment_status") == "sufficient"
+        if not coverage_ok:
             reasons.append("样本外覆盖不足")
         fit_ok = r.extra.get("fit_ok")
         degraded = int(r.extra.get("fallback_windows") or 0) > 0
@@ -606,13 +620,18 @@ class ModelZoo:
                 "样本外R²": r.oos_r2, "样本外TE": r.oos_te,
                 "窗口内R²": r.fit_r2_mean, "窗口内TE": r.fit_te_mean,
                 "方向一致率": r.win, "隐含仓位": r.beta, "耗时": r.elapsed,
-                # 评估资格（不影响排序）：不足时页面不得称"最佳/可复制"
+                # 覆盖诊断与推荐门禁分别展示。
                 "样本外天数": r.extra.get("oos_n"),
+                "样本外起始": r.extra.get("oos_start"),
+                "样本外结束": r.extra.get("oos_end"),
+                "样本外覆盖率": r.extra.get("oos_coverage"),
                 "共同OOS天数": r.extra.get("common_oos_n"),
                 "共同OOS R²": r.extra.get("common_oos_r2"),
                 "有效重估": r.extra.get("rebalance_count"),
                 "评估状态": ("有效" if status == "sufficient" else
-                             "不足" if status == "insufficient" else "未知"),
+                             "不足" if status == "insufficient" else
+                             "失败" if status == "failed" else "未知"),
+                "评估原因": r.extra.get("assessment_reasons") or [],
                 "可推荐": "否" if blockers else "是",
                 "阻断原因": "；".join(blockers) or None,
             })

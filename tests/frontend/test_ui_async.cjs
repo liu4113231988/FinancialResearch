@@ -90,6 +90,27 @@ vm.runInContext('var API = "/api/v1";' + source.slice(source.indexOf('async func
   selContext.S.sel = null;
   selContext.renderSelected();
   assert.match(selNodes.get('selDesc').textContent, /没有可用模型/);
+  Object.assign(selContext, {
+    fmtNum: String, fmtSign: String, escapeHtml: String, mh: (_, label) => label,
+    fmtPct: (value, digits) => value == null ? '—' : `${(100 * value).toFixed(digits)}%`,
+    renderTrendPanel() {}, drawCurve() {}, drawResid() {}, drawWHist() {},
+    drawWeights() {}, renderTuner() {},
+  });
+  const ridge = selContext.S.result.models.ridge;
+  ridge.metrics = {elapsed: 0.1, oos_r2: null, fit_r2_mean: null, beta: null};
+  ridge.assessment = {
+    status: 'insufficient', oos_n: 7, oos_start: '2025-07-03', oos_end: '2025-07-11',
+    rebalance_count: 1, oos_coverage: 0.875, reasons: ['样本外交易日低于门槛'],
+  };
+  selContext.S.sel = 'ridge';
+  selContext.renderSelected();
+  const assessmentNode = selNodes.get('selAssessment');
+  assert.equal(assessmentNode.hidden, false);
+  assert.equal(assessmentNode.textContent,
+    '样本外评估不足 · 有限配对 7 日 · 2025-07-03 至 2025-07-11 · 有效重估 1 窗 · 覆盖率 87.5% · 样本外交易日低于门槛');
+  delete ridge.assessment.oos_coverage;
+  selContext.renderSelected();
+  assert.equal(assessmentNode.hidden, true);
   // 冷缓存（P1-13）：/api/corr 返回 202 + job_id → 独立轮询 corr 任务并写回。
   const corrAlerts = [];
   const corrNodes = new Map();

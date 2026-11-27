@@ -279,14 +279,16 @@
 
 **落点**：[`engine.py:318`](src/market_research/modeling/engine.py#L318)、[`engine.py:384`](src/market_research/modeling/engine.py#L384)、[`funds/payloads.py:427`](src/market_research/funds/payloads.py#L427)、[`funds/payloads.py:498`](src/market_research/funds/payloads.py#L498)、[`funds/analysis.py:289`](src/market_research/funds/analysis.py#L289)。
 
-- [ ] 分开“足够训练”“已有预测”“足够评估”“允许比较/推荐”；公开拟新增的 `oos_n/oos_start/oos_end/rebalance_count/coverage/assessment_status/reasons`，计数只含实际有限配对样本。
+- [x] 分开“足够训练”“已有预测”“足够评估”“允许比较/推荐”。基金模型结果已公开 `oos_n/oos_start/oos_end/rebalance_count/oos_coverage/assessment_status/assessment_reasons`，只统计实际有限配对样本。
 - [ ] 统一 RBSA 的 W+30、ModelZoo 的 W+60 与 `min_obs` 的语义；保留必要训练门槛，重估限流之后再检查实际OOS。用户选择max_rebal=1可以做快速拟合，但不得暗示已完成充分评估。
 - [ ] `[产品/研究口径，待确认建议]`：拟合评估的初始工程下限采用 OOS≥60 且有效重估窗口≥3；这些数字只作最低资格，不代表统计功效或策略可靠。跨模型比较使用共同OOS日期，交集不足时不产生“最佳”，同时保留各自覆盖诊断。
 - [ ] 确认后让 error、评估不足或降级的模型不参与 `rank/best/insights` 的默认推荐；原始诊断仍可查。四模型等权降级与黑箱fallback统一暴露，不能只凭有限R²判成功。全部不合格时返回“暂无可推荐模型”，不自动挑第一个。
 - [ ] 自适应仓位诊断使用逐窗实际 `equity_used`，不拿名义0.9与自适应结果直接比较；波动目标预热仓位的0.5/1.0差异单独确认后修正，不与选池补丁一起悄悄改资金曲线。仅清理确认无调用的死配置，不借机扩大重构。
-- [ ] **验收**：种子42、400行、四指数`exp(cumsum(N(0,.01)))`、基金权重[.3,.3,.2,.1]、auto_equity=False/max_rebal=1，Ridge/PCR的7个OOS点必须为评估不足；再测59/60/61点、2/3窗口、负R²、常数目标、模型失败、缺段及全部不合格。单测门槛与可展示原始诊断分开断言。
+- [x] **诊断验收**：种子42、400行、四指数`exp(cumsum(N(0,.01)))`、基金权重[.3,.3,.2,.1]、auto_equity=False/max_rebal=1，Ridge/PCR均为7个有限配对OOS点、评估不足。回归覆盖59/60/61点、2/3窗口、负R²、常数目标、模型失败、缺段及全部不合格，并分别断言诊断和现有推荐行为。
 
 **实施记录（2026-11-24，工作区改动，元数据、展示与推荐门禁）**：`engine._coverage_summary` 公开 `oos_n/oos_start/oos_end/oos_gap_n/oos_coverage/rebalance_count/assessment_status/assessment_reasons`，门槛常量 `MIN_OOS_SESSIONS=60`、`MIN_REFITS=3`。`ModelZoo.rank` 新增“样本外天数/有效重估/评估状态/可推荐/阻断原因”，**排序仍按样本外 R²**；`blocking_reasons` 将失败、R² 未定义、覆盖不足、降级拟合及“要求因果面板却未使用”列为不可推荐。`analysis` 只在 `可推荐=是` 的模型中选 best/漂移/估值基准；全部不合格时 `meta.best_model=None`、页面隐藏“区间最优”、insights 明确输出“暂无可推荐模型”，原始排名仍可查。`model_payload` 增加 `assessment` 块。新增回归覆盖 59/60 边界、单重估窗口、失败模型、非因果面板与全不合格措辞。W+30 与 W+60 已统一为 W+30（W+60 不再作为硬门槛）；自适应仓位诊断改用逐窗 `equity_used` 中位数；跨模型按共同 OOS 交集重算 R²，交集 <60 标记不可推荐，`analysis` 优先按“共同 OOS R²”排序并在 meta 记录 `ranking_basis`。**未完成**：共同 OOS 上的置信区间/块自助未实现。
+
+**实施记录（2026-11-27，有限配对覆盖）**：以预测收益与基金收益均有限的日期计算天数和起止。有效重估窗口至少贡献一个有限配对。覆盖率分母为限流后从首个保留重估点开始的样本外日期数，含缺口。诊断经分析结果、单模型重学、结果缓存和页面模型详情透传，结果缓存及阶段检查点版本升至 19。供排序与推荐使用的输入及规则沿用现行口径，默认资格阈值仍待产品/研究确认。
 
 ### M3：统一预测评分、证据强度和用户解释
 

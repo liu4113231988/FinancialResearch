@@ -1507,7 +1507,7 @@ function renderRank() {
     return;
   }
   const gap = (best['样本外R²'] ?? 0) - (worst['样本外R²'] ?? 0);
-  const insufficient = rows.filter(x => x['评估状态'] === '不足').length;
+  const incomplete = rows.filter(x => ['不足', '失败'].includes(x['评估状态'])).length;
   const noReco = !(S.result && S.result.meta && S.result.meta.best_model);
   const basis = (S.result && S.result.meta && S.result.meta.ranking_basis) || '样本外 R²';
   const bestLabel = noReco ? 'R² 最高（不可推荐）' : '最佳';
@@ -1521,10 +1521,10 @@ function renderRank() {
     + (noReco
       ? `<br/><b>本次没有模型通过推荐门禁（覆盖/降级/因果面板任一不合格），
          "R² 最高"仅是诊断，不能当作推荐。</b>`
-      : (insufficient
-        ? `<br/><b>本次有 ${insufficient} 个模型样本外覆盖不足（&lt;60 个交易日或 &lt;3 个有效重估窗口），
-           其排名仅是诊断，不可当作推荐。</b>`
-        : ''));
+      : '')
+    + (incomplete
+      ? `<br/>本次有 ${incomplete} 个模型的样本外评估不足或失败，原因见各模型详情。`
+      : '');
 }
 
 // ==================================================================== 选中模型详情
@@ -1532,6 +1532,8 @@ function renderSelected() {
   const models = (S.result && S.result.models) || {};
   const k = S.sel;
   const m = k ? models[k] : null;
+  const assessmentEl = $('selAssessment');
+  assessmentEl.hidden = true;
   if (!m) {
     // ★ 不静默：没有可渲染的模型时，详情区必须说清"本次没有结果"还是
     //   "选中的模型已不存在"，否则会留着上一次的数字，读起来像本次结果。
@@ -1553,6 +1555,21 @@ function renderSelected() {
   $('selInterp').style.color = m.interpretable ? 'var(--ok)' : 'var(--warn)';
   $('selTime').textContent = `用时 ${fmtNum(m.metrics.elapsed, 1)}s`;
   $('selDesc').textContent = m.desc;
+  const assessment = m.assessment;
+  if (assessment && Object.hasOwn(assessment, 'oos_coverage')) {
+    const status = {sufficient: '达到下限', insufficient: '不足', failed: '失败'};
+    const range = assessment.oos_start && assessment.oos_end
+      ? `${assessment.oos_start} 至 ${assessment.oos_end}` : '—';
+    assessmentEl.textContent = [
+      `样本外评估${status[assessment.status] || '未知'}`,
+      `有限配对 ${assessment.oos_n ?? '—'} 日`,
+      range,
+      `有效重估 ${assessment.rebalance_count ?? '—'} 窗`,
+      `覆盖率 ${fmtPct(assessment.oos_coverage, 1)}`,
+      ...(assessment.reasons || []),
+    ].join(' · ');
+    assessmentEl.hidden = false;
+  }
 
   // ★ 缺失不得当 0：样本外 R² 失败（null）时若按 0 计算，gap≈窗口内 R²，
   //   会被判成"过拟合明显"，与排名表 hasGap 的口径冲突。

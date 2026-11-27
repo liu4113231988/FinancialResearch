@@ -141,6 +141,64 @@ class RouteTests(unittest.TestCase):
         for route in ("analyze", "refit", "backtest", "holdings"):
             self.assertEqual(self.client.post("/api/" + route, json=[1]).status_code, 400)
 
+    def test_fund_oos_assessment_survives_job_result_refit_and_cache(self):
+        from market_research.funds import analysis as fund_analysis
+
+        dates = pd.bdate_range("2024-01-01", periods=400)
+        returns = np.random.default_rng(42).normal(0, 0.01, (len(dates), 4))
+        panel = pd.DataFrame(np.exp(np.cumsum(returns, axis=0)), index=dates,
+                             columns=["sh000300", "801120", "801080", "000905"])
+        panel["__FUND__"] = np.exp(np.cumsum(returns @ [0.3, 0.3, 0.2, 0.1]))
+        panel.attrs["causal_pool"] = panel.copy()
+        panel.attrs["forecast_nav"] = panel["__FUND__"].copy()
+
+        def job_result(route, arguments):
+            response = self.client.post(f"/api/v1/{route}", json=arguments)
+            self.assertEqual(response.status_code, 200, response.text)
+            jid = response.json()["job_id"]
+            for thread in threading.enumerate():
+                if thread.name == "job-" + jid:
+                    thread.join(timeout=5)
+            response = self.client.get(f"/api/v1/result/{jid}")
+            self.assertEqual(response.status_code, 200, response.text)
+            return response.json()["result"]
+
+        body = {"code": "110022", "max_rebal": 1, "auto_equity": False}
+        request = {**body, "models": ["ridge"]}
+        with tempfile.TemporaryDirectory(dir=C.ROOT / "output") as directory, \
+             patch.dict(os.environ, {"FIL_CHECKPOINT_DIR": str(Path(directory) / "stages")}), \
+             patch.object(web, "CACHE_DIR", Path(directory)), \
+             patch.object(web, "_record_predictions"), patch.object(web.audit, "record"), \
+             patch.object(web.sync, "register"), patch.object(D, "data_stamp", return_value="test"), \
+             patch.object(D, "load_panel", side_effect=lambda *a, **kw: panel.copy()), \
+             patch.object(fund_analysis, "JOBS", self.runner.store), \
+             patch.object(fund_analysis, "fund_forecast_payload", return_value={"available": False}):
+            analysis = job_result("analyze", request)
+            refit = job_result("refit", {**body, "model": "ridge"})
+            response = self.client.post("/api/v1/analyze", json=request)
+
+        assessment = analysis["models"]["ridge"]["assessment"]
+        self.assertEqual(assessment, {
+            "status": "insufficient",
+            "reasons": ["样本外仅 7 个交易日，低于门槛 60", "有效重估窗口仅 1 个，低于门槛 3"],
+            "oos_n": 7,
+            "oos_start": "2025-07-03",
+            "oos_end": "2025-07-11",
+            "oos_gap_n": 0,
+            "oos_coverage": 1.0,
+            "rebalance_count": 1,
+            "min_oos_sessions": 60,
+            "min_refits": 3,
+        })
+        self.assertEqual(analysis["rank"][0]["样本外覆盖率"], 1.0)
+        self.assertEqual(analysis["rank"][0]["可推荐"], "否")
+        self.assertIsNone(analysis["meta"]["best_model"])
+        self.assertEqual(refit["assessment"], assessment)
+        self.assertEqual(response.status_code, 200, response.text)
+        cached = response.json()
+        self.assertTrue(cached["cached"])
+        self.assertEqual(cached["result"]["models"]["ridge"]["assessment"], assessment)
+
     def test_correlation_cold_cache_executes_as_queue_job(self):
         # P1-13 端到端：冷缓存 → 202 + 队列任务 → worker 执行 corr → 结果可读
         rng = np.random.default_rng(7)

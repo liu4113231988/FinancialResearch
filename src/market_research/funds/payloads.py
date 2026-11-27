@@ -509,14 +509,15 @@ def model_payload(rep: ModelReport, nav_oos: pd.Series,
             if rep.latest_weights is not None else 0,
         },
         "extra": _jsafe({k: v for k, v in rep.extra.items() if v is not None}),
-        # B2/P3-R：把"已有预测"与"评估充分"分开。status 缺失时保持 unknown，
-        # 不把旧缓存或失败模型默认成已验证。
+        # B2/P3-R：评估块记录有限配对覆盖，旧报告缺少状态时标为 unknown。
         "assessment": _jsafe({
             "status": rep.extra.get("assessment_status") or "unknown",
             "reasons": list(rep.extra.get("assessment_reasons") or []),
             "oos_n": rep.extra.get("oos_n"),
             "oos_start": rep.extra.get("oos_start"),
             "oos_end": rep.extra.get("oos_end"),
+            "oos_gap_n": rep.extra.get("oos_gap_n"),
+            "oos_coverage": rep.extra.get("oos_coverage"),
             "rebalance_count": rep.extra.get("rebalance_count"),
             "min_oos_sessions": MIN_OOS_SESSIONS,
             "min_refits": MIN_REFITS,
@@ -573,29 +574,28 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
                            if r["weight"] and r["weight"] > 0.02)
         # 若最佳模型是黑箱，其权重只是重要性排序，必须降级表述
         blackbox = not bm.get("interpretable", True)
-        # B2/P3-R：评估资格不改变排名，但必须改变措辞——低于门槛时不称"成立/可复制"。
         state = str(best_row.get("评估状态") or "未知")
-        assessed = (state == "有效") and not no_reco
+        # 推荐结论沿用现行门禁，覆盖说明使用有限配对的评估结果。
+        recommended = not no_reco and ("可推荐" in rank.columns or state == "有效")
         assessment = (bm.get("assessment") or {})
-        reasons = "；".join(assessment.get("reasons") or [])
         lead = ""
         if no_reco:
             counts = (rank["评估状态"].value_counts().to_dict()
                       if "评估状态" in rank.columns else {})
             lead = (f"<b>暂无可推荐模型</b>：有效 0 个、不足 "
-                    f"{counts.get('不足', 0)} 个、未知 {counts.get('未知', 0)} 个。"
+                    f"{counts.get('不足', 0)} 个、失败 {counts.get('失败', 0)} 个、"
+                    f"未知 {counts.get('未知', 0)} 个。"
                     "样本外覆盖不足或存在降级/失败；下方数字来自排名最高的候选，"
                     "仅作诊断，不能作为推荐或复制依据。")
-        elif not assessed:
+        elif not recommended:
             lead = (f"<b>样本外覆盖不足</b>（{best_row.get('样本外天数') or '—'} 个交易日、"
                     f"{best_row.get('有效重估') or '—'} 个有效重估窗口，低于最低门槛）；"
-                    "以下数字仅作诊断，不作为模型推荐。"
-                    + (f"原因：{reasons}。" if reasons else ""))
+                    "以下数字仅作诊断，不作为模型推荐。")
         if blackbox:
             tail = ("该模型是<b>黑箱模型</b>，下面权重是特征重要性排序，"
                     "<b>不能当作真实持仓</b>；它胜出说明非线性成分重要，"
                     "但风格暴露仍应以可解释模型（线性约束类）为准。")
-        elif assessed:
+        elif recommended:
             tail = "这意味着它的收益来源高度集中，可被上述赛道指数直接复制。"
         else:
             tail = "权重可用于理解同期风格暴露，但不能据此宣称可被指数复制或预测未来收益。"
@@ -604,7 +604,7 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
                   and common_r2 is not None and pd.notna(common_r2)
                   else "样本外R²")
         out["penetration"] = {
-            "ok": assessed,
+            "ok": recommended,
             "model": best_row["模型"],
             "text": (lead +
                      f"滚动样本外拟合显示，{name} 可被少数几个指数解释："
@@ -612,16 +612,18 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
                      f"<b>{best_row[r2_col]:.3f}</b>，"
                      f"年化跟踪误差 {best_row['样本外TE']:.1%}。" + tail),
         }
+        oos_n = assessment.get("oos_n")
+        refits = assessment.get("rebalance_count")
         out["evidence"] = {
-            "warn": not assessed,
+            "warn": no_reco or state != "有效",
             "text": (
                 (f"全部 {len(rank)} 个候选均未通过推荐门槛；" if no_reco else "")
-                + f"本次样本外覆盖 <b>{best_row.get('样本外天数') or '—'}</b> 个交易日、"
-                f"有效重估窗口 <b>{best_row.get('有效重估') or '—'}</b> 个。"
-                + (f"未达最低工程门槛（{MIN_OOS_SESSIONS} 日 / {MIN_REFITS} 窗），"
-                   "结论只能当诊断；" if not assessed else
-                   f"已达到最低工程门槛（{MIN_OOS_SESSIONS} 日 / {MIN_REFITS} 窗），"
-                   "但这只是最低资格，不代表统计显著、独立验证通过或策略有效；")
+                + f"有限配对样本 <b>{oos_n if oos_n is not None else '—'}</b> 个交易日、"
+                f"有效重估窗口 <b>{refits if refits is not None else '—'}</b> 个。"
+                + (f"已达到最低工程门槛（{MIN_OOS_SESSIONS} 日 / {MIN_REFITS} 窗），"
+                   "但这只是最低资格，不代表统计显著、独立验证通过或策略有效。"
+                   if state == "有效" else
+                   f"评估{state}（工程下限为 {MIN_OOS_SESSIONS} 日 / {MIN_REFITS} 窗）。")
                 + "同一区间内比较多个模型存在选择偏差，排名不代表未来表现。"),
         }
         # 结论：低 TE = 好解释
