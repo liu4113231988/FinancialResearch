@@ -541,11 +541,17 @@ def r15():
     chk(_agg_extras([]) == {} and _agg_extras([{"ok": True}]).get("ok") is None,
         "空输入返回空字典；布尔值不参与数值聚合（置 None）")
 
-    # 端到端：降级窗口必须触发 blocking_reasons
-    bad = ModelZoo.blocking_reasons(type("R", (), {
-        "oos_r2": 0.5, "oos_te": 0.01, "te": 0.01, "fit_r2_mean": 0.5,
-        "fold_r2": [0.5, 0.5, 0.5],
-        "extra": {"assessment_status": "sufficient", "fit_ok": 0.0}})())
+    # 端到端：降级窗口必须触发 blocking_reasons（用真实 ModelReport，
+    # 避免门禁新增字段时测试夹具与实现漂移）
+    from market_research.modeling.engine import ModelReport
+    rep = ModelReport(
+        key="k", name="k", family="f", desc="", interpretable=True,
+        oos_r2=0.5, oos_te=0.01, oos_ic=0.5, win=0.5, beta=0.9, vol_ratio=1.0,
+        fit_r2_mean=0.5, fit_te_mean=0.01,
+        latest_weights=pd.Series(dtype=float), weights_last_date=None,
+        weights_hist=pd.DataFrame(), syn_ret=pd.Series(dtype=float),
+        extra={"assessment_status": "sufficient", "fit_ok": 0.0}, elapsed=0.0)
+    bad = ModelZoo.blocking_reasons(rep)
     chk(any("降级" in x for x in bad),
         f"fit_ok=0.0 的报告被标记为存在降级窗口（{bad[-1] if bad else ''}）")
 

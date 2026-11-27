@@ -295,10 +295,12 @@
 **落点**：[`market/targets.py:6`](src/market_research/market/targets.py#L6)、[`market/technical.py:83`](src/market_research/market/technical.py#L83)、[`predictions/judge.py:130`](src/market_research/predictions/judge.py#L130)、[`predictions/ledger.py:574`](src/market_research/predictions/ledger.py#L574)。
 
 - [ ] `[产品/研究口径，待确认建议]`：统一模型目标为 `P(R_h>0)`；概率Brier及对应二分类正确率的平盘标签为0，与当前训练一致。页面“上涨/下跌/平盘命中”另列，平盘可继续作为neutral，不冒充同一个分母。零收益容差、价格口径、周期时钟与规则版本显式冻结。
-- [ ] calendar_sessions 的目标会话没有报价时，不用第h+1/h+2会话收益为固定h周期评分；宽限仅用于等待目标日数据补齐。顺延收益保留为不同期限的诊断，不能混入固定周期Brier和命中率。
+- [x] calendar_sessions 的目标会话没有报价时，不用第h+1/h+2会话收益为固定h周期评分；宽限仅用于等待目标日数据补齐。顺延收益保留为不同期限的诊断，不能混入固定周期Brier和命中率。
 - [ ] 如果目标收盘可得，涨跌停/一字板/成交量0不自动剔除概率评分样本；能否成交单独记录。严格区别“方向预测正确”和“交易可以实现”。规则h=0仍只做事件收益诊断。
 - [ ] 复用已有字段并仅补必要的目标/评分版本及资格元数据，保存总体数、成熟数、有效评分数和各类排除原因。相同资产、周期、版本、数据口径的预测才允许合并；旧版/证据未知样本分组显示，不静默升级或覆盖既有判定。
 - [ ] **验收**：同一组概率/价格同时送入历史评估和台账统计，固定h目标、平盘、一字板、缺目标价、顺延价、observed_bars/calendar_sessions均得到一致的概率评分资格、标签和分母；混版本不得合并。Brier可独立手算核对。
+
+**实施记录（2026-11-27，顺延样本隔离）**：`ledger._stats` 把 `reason=grace_session` 的方向记录从命中率与 Brier 分母中剔除（`excluded_grace_rows`），其收益只以 `grace_scored_rows/grace_return_mean` 单列诊断；`brier_basis` 追加 `grace_excluded`，`scoring_version` 升至 `flat_as_down_v3`，与旧汇总不混算。判定侧的原始 label/收益与 `actual_sessions` 保持不动，不覆盖旧判定。报告预测台账表新增“顺延结算（诊断，不进分母）”一行。回归覆盖顺延样本混入与不混入两种分母、以及 `decided/hit_rate/probability_rows` 边界。**未完成**：`insufficient/no_feed` 仍无法评分；页面卡片尚未单列顺延样本（归 C3）。
 
 **实施记录（2026-11-24，工作区改动，审计与统一评分）**：`technical.direction_forecast` 与 `compare_forecasts` 新增 `label_policy=flat_as_down`、`target_version=P(R_h>0)_flat_as_down_v1`、`flat_n`、`n_excluding_flat`、`accuracy/brier_excluding_flat` 及 `neutral_epsilon=1e-9`。台账 `_stats` 的 Brier 改为与训练一致的 `P(R_h>0)` 口径（平盘目标 0，neutral 仍进入 Brier 分母），命中率继续只算 up/down 对错、剔除 neutral；新增 `brier_basis/scoring_version/neutral_scored_rows`，历史行可按已存的 `realized_return` 直接重算。新增“Brier 含平盘、命中率剔平盘”手算回归。Brier 进一步纳入目标收盘可得的 blocked（涨跌停/一字板/零成交），`scoring_version=flat_as_down_v2`，命中率仍只算 up/down；新增 blocked 评分回归。**未完成**：calendar_sessions 目标日缺价的顺延收益仍只作诊断、未与固定 h 完全隔离；`insufficient/no_feed` 仍无法评分。
 

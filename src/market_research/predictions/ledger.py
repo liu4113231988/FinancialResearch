@@ -746,11 +746,18 @@ def _stats(rows: List[dict]) -> dict:
             counts[label] += 1
     # 方向命中率与 Brier 只统计有概率的方向预测；规则买卖事件是状态记录，
     # 只单列触发后收益，不参与方向正确性判定（旧版数据也按 source 排除）。
-    direction = [row for row in rows
-                 if row.get("source") != "rule" and row.get("probability") is not None]
+    direction_all = [row for row in rows
+                     if row.get("source") != "rule" and row.get("probability") is not None]
     rules = [row for row in rows if row.get("source") == "rule"]
     # 口径修正前落库的旧规则行是 5/20 各一条；单列出来，避免跨版本汇总被误读。
     legacy = [row for row in rules if row.get("horizon") in HORIZONS]
+    # C1：宽限期顺延结算（目标会话缺报价，取 h+1/h+2 会话收盘）覆盖的不是
+    # 名义 h 周期。它保留原始 label/收益供诊断，但不得进入固定 h 的命中率与
+    # Brier 分母——否则同一个"5 日预测"里混进 6/7 日收益，分母不可比。
+    grace = [row for row in direction_all
+             if row.get("reason") == "grace_session"]
+    direction = [row for row in direction_all
+                 if row.get("reason") != "grace_session"]
     decided = sum(1 for row in direction
                   if row.get("label") in ("correct", "incorrect"))
     correct = sum(1 for row in direction if row.get("label") == "correct")
@@ -787,20 +794,26 @@ def _stats(rows: List[dict]) -> dict:
                     if row.get("realized_return") is not None]
     grace_settled = sum(1 for row in rows
                         if row.get("reason") == "grace_session")
+    grace_returns = [float(row["realized_return"]) for row in grace
+                     if row.get("realized_return") is not None]
     no_feed = sum(1 for row in rows if row.get("reason") == "no_feed")
     return {
         "total": len(rows),
         "pending": sum(1 for row in rows if row.get("status") == "pending"),
         **counts,
         "grace_settled": grace_settled,
+        "excluded_grace_rows": len(grace),
+        "grace_scored_rows": len(grace_returns),
+        "grace_return_mean": ((sum(grace_returns) / len(grace_returns))
+                              if grace_returns else None),
         "no_feed": no_feed,
         "decided": decided,
         "hit_rate": (correct / decided) if decided else None,
         "hit_rate_basis": "direction_only",
         "brier": (sum(brier_values) / len(brier_values)) if brier_values else None,
         "probability_rows": len(brier_values),
-        "brier_basis": "flat_as_down;blocked_if_target_known",
-        "scoring_version": "flat_as_down_v2",
+        "brier_basis": "flat_as_down;blocked_if_target_known;grace_excluded",
+        "scoring_version": "flat_as_down_v3",
         "neutral_scored_rows": neutral_scored,
         "blocked_scored_rows": blocked_scored,
         "rule_events": len(rules),
@@ -818,8 +831,10 @@ def _stats(rows: List[dict]) -> dict:
                 "observed/insufficient 不进入命中率或 Brier。"
                 "legacy_rows 是口径修正前的旧规则行（5/20 各一条），"
                 "current_total 已将其排除。"
-                "grace_settled 是宽限期顺延结算样本，实际会话数冻结在 "
-                "actual_sessions，仅作诊断单列，不改变默认命中率分母。"
+                "grace_settled 是宽限期顺延结算样本（实际会话数冻结在 "
+                "actual_sessions），其收益覆盖 h+1/h+2 会话而非固定 h 周期，"
+                "已全部剔出命中率与 Brier 分母（excluded_grace_rows），"
+                "只以 grace_scored_rows/grace_return_mean 单列为不同期限诊断。"
                 "blocked 按 label 计数；no_feed 按 reason 计数，代表行情末日"
                 "早于目标日、超宽限期仍确认无后续报价的终判样本。",
     }

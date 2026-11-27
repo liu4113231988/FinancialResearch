@@ -874,7 +874,12 @@ class ConsistencyTests(unittest.TestCase):
         self.assertEqual(stats["grace_settled"], 1)
         self.assertEqual(stats["no_feed"], 1)
         self.assertEqual(stats["blocked"], 1)
-        self.assertEqual(stats["decided"], 1)       # 默认命中率分母不变
+        # C1：顺延样本覆盖 h+1/h+2 会话，不进固定 h 的命中率分母
+        self.assertEqual(stats["decided"], 0)
+        self.assertIsNone(stats["hit_rate"])
+        self.assertEqual(stats["excluded_grace_rows"], 1)
+        self.assertEqual(stats["grace_scored_rows"], 1)
+        self.assertAlmostEqual(stats["grace_return_mean"], 0.02)
         self.assertIn("actual_sessions", stats["note"])
 
     def test_result_nav_basis_registers_matching_sync_asset(self):
@@ -1091,8 +1096,8 @@ class ScoredBasisTest(unittest.TestCase):
         self.assertEqual(stats["probability_rows"], 2)
         self.assertEqual(stats["blocked_scored_rows"], 1)
         self.assertEqual(stats["brier_basis"],
-                         "flat_as_down;blocked_if_target_known")
-        self.assertEqual(stats["scoring_version"], "flat_as_down_v2")
+                         "flat_as_down;blocked_if_target_known;grace_excluded")
+        self.assertEqual(stats["scoring_version"], "flat_as_down_v3")
         expected = ((0.8 - 1) ** 2 + (0.3 - 0) ** 2) / 2
         self.assertAlmostEqual(stats["brier"], expected)
 
@@ -1112,10 +1117,32 @@ class ScoredBasisTest(unittest.TestCase):
         self.assertEqual(stats["probability_rows"], 3)
         self.assertEqual(stats["neutral_scored_rows"], 1)
         self.assertEqual(stats["brier_basis"],
-                         "flat_as_down;blocked_if_target_known")
+                         "flat_as_down;blocked_if_target_known;grace_excluded")
         expected = ((0.8 - 1) ** 2 + (0.8 - 0) ** 2 + (0.3 - 0) ** 2) / 3
         self.assertAlmostEqual(stats["brier"], expected)
         self.assertIn("平盘目标为 0", stats["note"])
+
+    def test_grace_rows_do_not_enter_fixed_horizon_denominators(self):
+        """C1：顺延 6/7 日收益不得冒充固定 5 日样本进入命中率或 Brier。"""
+        rows = [
+            {"source": "direction", "probability": 0.6, "direction": "up",
+             "realized_return": 0.02, "label": "correct", "status": "settled"},
+            {"source": "direction", "probability": 0.9, "direction": "up",
+             "realized_return": -0.03, "label": "incorrect",
+             "reason": "grace_session", "actual_sessions": 6,
+             "status": "settled"},
+        ]
+        stats = ledger._stats(rows)
+        self.assertEqual(stats["decided"], 1)
+        self.assertEqual(stats["hit_rate"], 1.0)
+        # 若顺延样本混入，Brier 会变成两个误差的平均（明显更高）
+        self.assertEqual(stats["probability_rows"], 1)
+        self.assertAlmostEqual(stats["brier"], (0.6 - 1.0) ** 2)
+        # 顺延收益仍单列可见，不与固定 h 口径合并
+        self.assertEqual(stats["grace_settled"], 1)
+        self.assertEqual(stats["excluded_grace_rows"], 1)
+        self.assertAlmostEqual(stats["grace_return_mean"], -0.03)
+        self.assertEqual(stats["scoring_version"], "flat_as_down_v3")
 
 
 if __name__ == "__main__":

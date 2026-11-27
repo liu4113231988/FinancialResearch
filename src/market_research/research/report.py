@@ -292,9 +292,11 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
         _hit = _overall.get("hit_rate")
         _hit_text = "—" if _hit is None else f"{float(_hit)*100:.1f}%"
         _pred_metrics = [("当前口径记录", _overall.get("current_total")),
-                         ("方向预测已判定", _overall.get("decided")),
+                         ("方向预测已判定（固定周期）", _overall.get("decided")),
                          ("方向命中率", _hit_text),
                          ("Brier", _overall.get("brier")),
+                         ("顺延结算（诊断，不进分母）",
+                          _overall.get("excluded_grace_rows")),
                          ("规则事件", _overall.get("rule_events")),
                          ("规则事件触发后平均收益", _overall.get("rule_return_mean")),
                          ("待结算", _overall.get("pending")),

@@ -8,6 +8,9 @@
   - neutral / observed / blocked / insufficient 均不计入方向命中率；
     但目标收盘可得的 blocked（涨跌停/零成交）仍按方向进入 Brier，
     “方向是否看对”与“能否成交”分开记录。
+  - 目标会话缺报价而用宽限内后续会话结算时（reason=grace_session），收益
+    覆盖 h+1/h+2 会话而非固定 h 周期，只作为不同期限的诊断单列，不进入
+    固定 h 的命中率与 Brier 分母（评分版本 flat_as_down_v3）。
 """
 from __future__ import annotations
 
