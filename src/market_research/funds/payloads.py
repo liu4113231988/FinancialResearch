@@ -163,9 +163,11 @@ def nav_block(panel: pd.DataFrame, nav: pd.Series) -> dict:
 
 
 def fund_forecast_payload(nav: pd.Series, horizons=(5, 20),
-                          max_points: int = 400) -> dict:
+                          max_points: int = 400, *,
+                          verification_started: bool = False) -> dict:
     series = nav.astype(float).dropna()
-    result = _fund_forecast(series, horizons, max_points)
+    result = _fund_forecast(series, horizons, max_points,
+                            verification_started=verification_started)
     basis = nav.attrs.get("nav_basis")
     result["meta"] = {
         **{key: nav.attrs.get(key) for key in NAV_OBSERVATION_FIELDS},
@@ -178,7 +180,8 @@ def fund_forecast_payload(nav: pd.Series, horizons=(5, 20),
     return result
 
 
-def _fund_forecast(s: pd.Series, horizons, max_points: int) -> dict:
+def _fund_forecast(s: pd.Series, horizons, max_points: int, *,
+                   verification_started: bool = False) -> dict:
     """基金净值的方向概率。
 
     与模型详情的「趋势色带」是两件事：色带只描述已经发生的形态，
@@ -195,7 +198,7 @@ def _fund_forecast(s: pd.Series, horizons, max_points: int) -> dict:
         items = []
         sampled = None
         for h in horizons:
-            f = series_forecast(s, h)
+            f = series_forecast(s, h, verification_started=verification_started)
             ser = pd.Series(f["series"], index=s.index, dtype=float)
             sl = ser.iloc[::step]
             if len(ser) and sl.index[-1] != ser.index[-1]:
@@ -209,6 +212,12 @@ def _fund_forecast(s: pd.Series, horizons, max_points: int) -> dict:
                 "baseline": _jnum(f["baseline"], 4),
                 "training_rows": int(f["training_rows"] or 0),
                 "minimum_training_rows": int(f["minimum_training_rows"] or 0),
+                "evidence_state": f.get("evidence_state"),
+                "evidence_label": f.get("evidence_label"),
+                # C3：周期时钟与是否校准必须随卡片给出，页面不能靠猜
+                "horizon_basis": f.get("horizon_basis"),
+                "calibration": {"status": "not_calibrated",
+                                "note": "本项目未对该方向概率做概率校准，概率不是频率校准结果"},
                 "evaluation": _jsafe(ev),
                 "advantage": bool(ev.get("advantage", False)),
                 "reason": f["reason"],
@@ -217,6 +226,7 @@ def _fund_forecast(s: pd.Series, horizons, max_points: int) -> dict:
         return {
             "basis": "fund_nav",
             "available": any(i["ok"] for i in items),
+            "verification_started": bool(verification_started),
             "as_of": s.index[-1].strftime("%Y-%m-%d"),
             "dates": _dates(sampled.index) if sampled is not None else [],
             "horizons": items,
@@ -468,11 +478,13 @@ def _alpha_stats(fund_line: pd.Series, syn_line: pd.Series) -> dict:
 
 
 def model_payload(rep: ModelReport, nav_oos: pd.Series,
-                  max_points: int = 400) -> dict:
+                  max_points: int = 400, *,
+                  verification_started: bool = False) -> dict:
     """单个模型的完整可视化数据。"""
     assess_status = rep.extra.get("assessment_status") or "unknown"
     ev_state = evidence_state(computable=assess_status != "failed",
-                              assessment_status=assess_status)
+                              assessment_status=assess_status,
+                              verification_started=verification_started)
     syn = rep.syn_ret.dropna()
     syn_nav = np.exp(syn.cumsum())
     # 把基金净值与合成基准都归一到起点=1，才能在同一坐标轴上比较形状。
@@ -527,6 +539,10 @@ def model_payload(rep: ModelReport, nav_oos: pd.Series,
             "rebalance_count": rep.extra.get("rebalance_count"),
             "min_oos_sessions": MIN_OOS_SESSIONS,
             "min_refits": MIN_REFITS,
+            # B2：共同 OOS 上的配对块自助区间；跨 0 时不得宣称更优
+            "common_oos_n": rep.extra.get("common_oos_n"),
+            "common_oos_r2": rep.extra.get("common_oos_r2"),
+            "common_oos_uncertainty": rep.extra.get("common_oos_uncertainty"),
         }),
         "selection": _selection_payload(rep),
         "latest_weights": _weights_payload(rep.latest_weights),

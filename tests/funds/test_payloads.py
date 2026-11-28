@@ -15,6 +15,7 @@ import pandas as pd
 
 import market_research.config as C
 import market_research.funds.holdings as H
+from market_research.market.technical import EVIDENCE_STATES
 from market_research.funds.payloads import build_insights, holdings_payload, model_payload
 from market_research.modeling.engine import ModelReport, ModelZoo
 from market_research.research.report import timing_comparison
@@ -863,6 +864,53 @@ class AssessmentCoverageTest(unittest.TestCase):
         self.assertIn("可被上述赛道指数直接复制", ins["penetration"]["text"])
         self.assertFalse(ins["evidence"]["warn"])
         self.assertIn("不代表统计显著", ins["evidence"]["text"])
+
+
+    def test_verification_started_promotes_sufficient_assessment_only(self):
+        idx = pd.bdate_range("2021-01-04", periods=300)
+        rng = np.random.default_rng(3)
+        syn = pd.Series(rng.normal(0, 0.01, len(idx)), index=idx)
+        nav = 2.5 * np.exp(syn.cumsum())
+        ok = _model_report(idx, syn)
+        ok.extra.update({"assessment_status": "sufficient", "oos_n": 300,
+                         "rebalance_count": 10})
+        pending = model_payload(ok, nav, verification_started=True)["assessment"]
+        self.assertEqual(pending["evidence_state"], "independent_verification_pending")
+        self.assertEqual(pending["evidence_label"], "独立验证待完成")
+        # 台账未开始时仍是历史诊断，不得提前挂"待验证"
+        self.assertEqual(model_payload(ok, nav)["assessment"]["evidence_state"],
+                         "historical_diagnostic")
+        weak = _model_report(idx, syn)
+        weak.extra.update({"assessment_status": "insufficient", "oos_n": 7,
+                           "rebalance_count": 1})
+        weak_assessment = model_payload(weak, nav, verification_started=True)["assessment"]
+        self.assertEqual(weak_assessment["evidence_state"], "insufficient")
+
+
+class FundForecastEvidenceTest(unittest.TestCase):
+    """基金方向卡：验收状态由台账驱动，且卡片自带证据标签。"""
+
+    @staticmethod
+    def _nav(n=1100, seed=5):
+        rng = np.random.default_rng(seed)
+        idx = pd.bdate_range("2020-01-01", periods=n)
+        return pd.Series(1 + np.cumsum(rng.normal(.0004, .01, n)), index=idx)
+
+    def test_card_reports_state_and_matches_cached_flag(self):
+        from market_research.funds.payloads import fund_forecast_payload
+        nav = self._nav()
+        plain = fund_forecast_payload(nav)
+        self.assertFalse(plain["verification_started"])
+        for item in plain["horizons"]:
+            self.assertIn(item["evidence_state"], EVIDENCE_STATES)
+            self.assertEqual(item["evaluation"]["evidence_state"], item["evidence_state"])
+            self.assertNotEqual(item["evidence_state"], "independent_verification_pending")
+        pending = fund_forecast_payload(nav, verification_started=True)
+        self.assertTrue(pending["verification_started"])
+        for item in pending["horizons"]:
+            self.assertEqual(item["evaluation"]["evidence_state"], item["evidence_state"])
+            self.assertIn(item["evidence_state"],
+                          {"insufficient", "independent_verification_pending"})
 
 
 if __name__ == "__main__":

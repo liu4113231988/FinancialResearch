@@ -108,7 +108,8 @@ def features_for(bars, ind):
     return features.replace([np.inf, -np.inf], np.nan)
 
 
-def direction_forecast(bars, features, horizon, display_start, training_end=None, *, calendar=None):
+def direction_forecast(bars, features, horizon, display_start, training_end=None, *, calendar=None,
+                       verification_started: bool = False):
     """Fixed model; train labels must have matured by each prediction close.
 
     Scaler is fitted only on training rows. No shuffled CV or full-sample tuning.
@@ -205,11 +206,15 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
             )
     latest = probability.iloc[-1]
     computable = bool(pd.notna(latest))
+    # 证据状态同时写在顶层与 evaluation 内：页面/导出读哪一层都得到同一结论。
+    state = evidence_state(computable=computable,
+                           assessment_status=evaluation["assessment_status"],
+                           verification_started=verification_started)
+    evaluation["evidence_state"] = state
+    evaluation["evidence_label"] = EVIDENCE_LABELS[state]
     return {"horizon": horizon, 'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
             "ok": computable, "computable": computable,
-            "evidence_state": evidence_state(
-                computable=computable,
-                assessment_status=evaluation["assessment_status"]),
+            "evidence_state": state, "evidence_label": EVIDENCE_LABELS[state],
             "probability": latest,
             "baseline": baseline.iloc[-1],
             "training_rows": training_rows, "minimum_training_rows": MIN_TRAIN,
@@ -217,7 +222,8 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
             "reason": "至少需要 252 个已成熟训练样本及约 65 日指标预热；单一涨跌类别无法训练。" if pd.isna(latest) else None}
 
 
-def series_forecast(nav, horizon, display_start=None, *, calendar=None):
+def series_forecast(nav, horizon, display_start=None, *, calendar=None,
+                    verification_started: bool = False):
     """把只有净值/收盘价的序列当作退化 OHLC 喂给 `direction_forecast`。
 
     基金净值没有开高低收，用同一个收盘价填满 OHLC 后，ATR/布林/均线等
@@ -230,10 +236,12 @@ def series_forecast(nav, horizon, display_start=None, *, calendar=None):
     ind = indicators(bars)
     features = features_for(bars, ind)
     return direction_forecast(bars, features, horizon,
-                              display_start or nav.index[0], calendar=calendar)
+                              display_start or nav.index[0], calendar=calendar,
+                              verification_started=verification_started)
 
 
-def compare_forecasts(bars, base, candidate, horizon, display_start, context=None, *, calendar=None):
+def compare_forecasts(bars, base, candidate, horizon, display_start, context=None, *, calendar=None,
+                      verification_started: bool = False):
     """Compare fixed candidates on identical mature non-overlapping observations."""
     prices = bars.close.loc[display_start:]
     actual,clock,_ = horizon_data(prices,horizon,calendar)
@@ -247,11 +255,14 @@ def compare_forecasts(bars, base, candidate, horizon, display_start, context=Non
     frame = frame.iloc[keep]
     n = len(frame)
     sufficient = n >= 20
+    comparison_state = evidence_state(
+        computable=bool(n),
+        assessment_status='sufficient' if sufficient else 'insufficient',
+        verification_started=verification_started)
     result = {'n': n, 'ok': sufficient,
               'assessment_status': 'sufficient' if sufficient else 'insufficient',
-              'evidence_state': evidence_state(
-                  computable=bool(n),
-                  assessment_status='sufficient' if sufficient else 'insufficient'),
+              'evidence_state': comparison_state,
+              'evidence_label': EVIDENCE_LABELS[comparison_state],
               'primary': None, 'start': None, 'end': None,
               'class_distribution': {'up': 0, 'down': 0, 'flat': 0},
               'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
@@ -320,7 +331,8 @@ def compare_forecasts(bars, base, candidate, horizon, display_start, context=Non
     return result
 
 
-def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, benchmark="", calendar=None, calendar_info=None):
+def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, benchmark="", calendar=None, calendar_info=None,
+                      verification_started: bool = False):
     display_start = display_start or bars.index[0]
     # Bound CPU and memory while keeping ~5 years for rolling model warm-up.
     truncated = len(bars) > 1500
@@ -387,10 +399,18 @@ def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, be
     else:
         notices.append("价位按前复权坐标显示；历史截止日分析时尤其需核对真实报价后再考虑执行。")
     stop = close - 2 * latest.atr if pd.notna(latest.atr) else np.nan
-    forecasts = [direction_forecast(bars, features, h, display_start,calendar=forecast_calendar) for h in (5, 20)]
+    forecasts = [direction_forecast(bars, features, h, display_start,
+                                    calendar=forecast_calendar,
+                                    verification_started=verification_started)
+                 for h in (5, 20)]
     for forecast in forecasts:
-        candidate = direction_forecast(bars, expanded, forecast['horizon'], display_start,calendar=forecast_calendar) if available else None
-        forecast['comparison'] = (compare_forecasts(bars, forecast, candidate, forecast['horizon'], display_start, extra,calendar=forecast_calendar)
+        candidate = (direction_forecast(bars, expanded, forecast['horizon'], display_start,
+                                        calendar=forecast_calendar,
+                                        verification_started=verification_started)
+                     if available else None)
+        forecast['comparison'] = (compare_forecasts(bars, forecast, candidate, forecast['horizon'], display_start, extra,
+                                                    calendar=forecast_calendar,
+                                                    verification_started=verification_started)
                                   if candidate else {'n': 0, 'ok': False, 'note': '新增特征覆盖不足，保留原模型。'})
         forecast['candidate'] = ({'ok': candidate['ok'], 'probability': candidate['probability'],
                                   'features': available} if candidate else None)

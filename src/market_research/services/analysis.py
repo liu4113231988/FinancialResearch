@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import market_research.audit as audit
 import market_research.config as C
+from market_research import status
 from market_research.research.runinfo import config_hash, result_provenance
 from market_research.security import current_identity
 import market_research.data.marketdata as D
@@ -293,6 +294,8 @@ def _record_predictions(operation, params, result, *, jid=None):
                    "detail": f"{type(exc).__name__}: {str(exc)[:160]}"}
     if isinstance(result, dict):
         result.setdefault("meta", {})["registration"] = outcome
+        # 入账状态是结果层的一部分：写台账后刷新，避免页面显示旧值。
+        status.refresh(result)
     return outcome
 
 

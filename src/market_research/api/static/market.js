@@ -329,9 +329,17 @@ window.MarketApp = (() => {
     el('marketMeta').textContent = `${m.start} — ${m.end} · ${m.n_days} 个交易日 · ${kind === 'stock' ? basis : '价格指数'} · ${m.source || '历史日线'}`;
     const resultStatus = el('marketResultStatus');
     const missing = data.completeness?.missing || [];
-    resultStatus.hidden = data.status !== 'partial';
-    resultStatus.textContent = resultStatus.hidden ? '' : '部分可用 · ' +
-      missing.map(item => item.item + '：' + item.reason).join('；');
+    const layers = data.status_layers || {};
+    resultStatus.hidden = data.status !== 'partial' && !layers.summary;
+    resultStatus.textContent = resultStatus.hidden ? '' : [
+      data.status === 'partial' ? '部分可用' : null,
+      // C3：计算/数据/证据分开写，避免"任务完成"被读成"预测有效"
+      layers.computation ? `计算 ${layers.computation}` : null,
+      layers.data_quality ? `数据 ${layers.data_quality}` : null,
+      layers.assessment ? `证据 ${layers.assessment}` : null,
+      layers.registration ? `入账 ${layers.registration}` : null,
+      missing.length ? missing.map(item => item.item + '：' + item.reason).join('；') : null,
+    ].filter(Boolean).join(' · ');
     if (data.quality) {
       const q = data.quality;
       el('marketMeta').textContent += ` · 请求 ${q.requested_start} — ${q.requested_end}`;
@@ -380,9 +388,13 @@ window.MarketApp = (() => {
     el('marketRefresh').onclick = () => result && submit(result.code, true);
     el('marketExportQuality').onclick = () => {
       if (!result?.quality) return;
-      const {kind, code, status, completeness, quality, meta, cross_correlation} = result;
-      downloadJson({kind, code, status, completeness, quality, cross_correlation,
-        adjust: meta.adjust, benchmark: meta.benchmark, provenance: meta.provenance},
+      const {kind, code, status, completeness, status_layers, quality, meta, cross_correlation} = result;
+      downloadJson({kind, code, status, completeness, status_layers: status_layers || null,
+        quality, cross_correlation, adjust: meta.adjust, benchmark: meta.benchmark,
+        provenance: meta.provenance, evidence: (result.technical?.forecasts || []).map(f => ({
+          horizon: f.horizon, evidence_state: f.evidence_state,
+          evidence_label: f.evidence_label, n: f.evaluation?.n,
+          horizon_basis: f.horizon_basis}))},
       `market_quality_${code}_${quality.actual_end}.json`);
     };
     el('marketFilters').onchange = () => {if (result) status('区间或口径已更改，点击「应用区间」更新结果。');};

@@ -11,6 +11,7 @@ import pandas as pd
 
 import market_research.audit as audit
 import market_research.config as C
+from market_research import status
 from market_research.ordering import ranked_series
 import market_research.data.marketdata as D
 from market_research.modeling.backtest import run_backtest, score_to_position
@@ -216,6 +217,8 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
     completeness = _completeness(res)
     res.update(status=completeness["status"], ok=completeness["ok"],
                completeness=completeness)
+    # C3：CLI/报告与 Web 用同一套分层状态，导出时不再各说各话。
+    status.refresh(res)
     # P2-26：CLI/报告链路同样留审计轨迹（只写状态与缺失项，不写行情数值）
     audit.record("analysis.run", ok=completeness["ok"],
                  subject=f"fund:{code}",
@@ -255,6 +258,12 @@ def save_result(res: dict, outdir: Optional[Path] = None) -> Path:
         "离场线": C.SIGNAL["health_exit"],
         "数据质量": res.get("data_quality") or {},
         "完整性": res.get("completeness") or {},
+        # C3：导出必须能区分计算/数据/证据/入账各层，避免只看到一个 status
+        "状态分层": res.get("status_layers") or {},
+        "有效样本数": (res.get("completeness") or {}).get("sections", {}).get("models"),
+        "分析版本": {"cache_version": C.CACHE_VERSION,
+                     "data_basis": (res.get("meta") or {}).get("data_basis"),
+                     "nav_basis": (res.get("meta") or {}).get("nav_basis")},
     }
     (outdir / "meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

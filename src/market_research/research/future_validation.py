@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from datetime import date, datetime
+from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
@@ -150,6 +151,60 @@ def validate_execution(plan: dict, execution: dict,
 
 def load_plan(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+
+
+# 台账里只有这两种状态表示"评估已真的开始"；`registered_not_executed`
+# 仅代表协议已登记，不能据此把结果标成"已进入独立验证"。
+VERIFICATION_STARTED_STATUSES = frozenset({"in_progress", "evaluating"})
+
+
+def _project_root() -> Path:
+    from market_research import config as _config
+    return Path(_config.ROOT)
+
+
+@lru_cache(maxsize=8)
+def _verification_flag(plan_path: str, ledger_path: str, as_of: str,
+                       plan_mtime: float, ledger_mtime: float) -> bool:
+    """带 mtime 的缓存实现；文件改动后 key 变化，自动重新读取。"""
+    try:
+        plan = load_plan(plan_path)
+        execution = load_execution(ledger_path)
+        if execution.get("protocol_sha256") != _plan_hash(plan):
+            return False
+        status = str(execution.get("status") or "").strip()
+        if status not in VERIFICATION_STARTED_STATUSES:
+            return False
+        day = _day(as_of, "as_of")
+        start = _day(plan.get("holdout_start"), "holdout_start")
+        end = _day(plan.get("evaluation_date"), "evaluation_date")
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
+    return start <= day <= end
+
+
+def verification_started(as_of: str | date | None = None, *,
+                         plan_path: str | Path | None = None,
+                         ledger_path: str | Path | None = None) -> bool:
+    """该时点的结果是否已进入预注册验收、且尚无结论（C2/P3-P）。
+
+    只有同时满足才返回 True：执行台账状态为 `in_progress/evaluating`、
+    协议指纹与冻结协议一致、`as_of` 落在留出区间内。任何缺失、解析失败或
+    指纹不匹配一律返回 False —— 证据缺失不得反向冒充"已进入验证"，也不因
+    协议标记完成就宣称"已验证"（四态里没有该状态，结论须由人工报告叙述）。
+    """
+    root = _project_root()
+    plan_file = Path(plan_path) if plan_path else root / "docs" / "future-validation-plan.json"
+    ledger_file = (Path(ledger_path) if ledger_path
+                   else root / "docs" / "future-validation-execution.json")
+    try:
+        day = (_day(as_of, "as_of") if as_of is not None else date.today())
+        plan_mtime = plan_file.stat().st_mtime
+        ledger_mtime = ledger_file.stat().st_mtime
+    except (OSError, ValueError):
+        return False
+    return _verification_flag(str(plan_file), str(ledger_file), day.isoformat(),
+                              plan_mtime, ledger_mtime)
 
 
 def load_execution(path: str | Path) -> dict:

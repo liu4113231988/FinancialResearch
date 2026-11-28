@@ -247,5 +247,68 @@ class RealTradesTests(unittest.TestCase):
         self.assertEqual(report["trades"]["status"], "ok")
 
 
+class VerificationStartedTests(unittest.TestCase):
+    """C2/P3-P：验收状态由台账驱动，缺证据一律回到"未开始"。"""
+
+    def _files(self, tmp, *, status="in_progress", sha=None,
+               holdout="2026-11-11", evaluate="2027-05-10"):
+        plan = {"holdout_start": holdout, "evaluation_date": evaluate}
+        plan_path = Path(tmp) / "plan.json"
+        plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+        ledger = {"status": status,
+                  "protocol_sha256": sha if sha is not None else _plan_hash(plan)}
+        ledger_path = Path(tmp) / "ledger.json"
+        ledger_path.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+        return plan_path, ledger_path
+
+    def test_started_only_inside_holdout_with_matching_protocol(self):
+        from market_research.research.future_validation import verification_started
+        with tempfile.TemporaryDirectory() as tmp:
+            plan, ledger = self._files(tmp)
+            self.assertTrue(verification_started("2026-11-11", plan_path=plan,
+                                                ledger_path=ledger))
+            self.assertTrue(verification_started("2027-05-10", plan_path=plan,
+                                                 ledger_path=ledger))
+            # 留出期之前/评估日之后都不是"待验证"，而是历史诊断
+            self.assertFalse(verification_started("2026-11-10", plan_path=plan,
+                                                  ledger_path=ledger))
+            self.assertFalse(verification_started("2027-05-11", plan_path=plan,
+                                                  ledger_path=ledger))
+
+    def test_registered_but_not_started_is_not_pending(self):
+        from market_research.research.future_validation import verification_started
+        with tempfile.TemporaryDirectory() as tmp:
+            plan, ledger = self._files(tmp, status="registered_not_executed")
+            self.assertFalse(verification_started("2026-12-01", plan_path=plan,
+                                                  ledger_path=ledger))
+
+    def test_protocol_fingerprint_mismatch_fails_closed(self):
+        from market_research.research.future_validation import verification_started
+        with tempfile.TemporaryDirectory() as tmp:
+            plan, ledger = self._files(tmp, sha="0" * 64)
+            self.assertFalse(verification_started("2026-12-01", plan_path=plan,
+                                                  ledger_path=ledger))
+
+    def test_missing_or_malformed_files_fail_closed(self):
+        from market_research.research.future_validation import verification_started
+        with tempfile.TemporaryDirectory() as tmp:
+            plan, ledger = self._files(tmp)
+            self.assertFalse(verification_started(
+                "2026-12-01", plan_path=Path(tmp) / "absent.json",
+                ledger_path=ledger))
+            broken = Path(tmp) / "broken.json"
+            broken.write_text("{not json", encoding="utf-8")
+            self.assertFalse(verification_started("2026-12-01", plan_path=plan,
+                                                  ledger_path=broken))
+            self.assertFalse(verification_started("not-a-date", plan_path=plan,
+                                                  ledger_path=ledger))
+
+    def test_repository_ledger_is_registered_not_started(self):
+        """仓库现状：协议已登记、评估未开始，因此现阶段不得标"待验证"。"""
+        from market_research.research.future_validation import verification_started
+        self.assertFalse(verification_started("2026-11-28"))
+        self.assertFalse(verification_started("2027-01-01"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import market_research.config as C
 import market_research.data.marketdata as D
+from market_research import status as status_layers
 from market_research.modeling.backtest import perf_metrics
 from market_research.serialization import _jsafe
 from market_research.validation.window import parse_window
@@ -245,9 +246,11 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
                 overlap = cached_reference.index.intersection(reference.index)
                 if len(overlap) == len(reference) and np.allclose(cached_reference.loc[overlap, 'close'], reference.loc[overlap]):
                     reference_context = cached_reference.close
+        from market_research.research.future_validation import verification_started
         technical = analyze_technical(context, display_start=bars.index[0], adjust=adjust,
                                       reference=reference_context, benchmark=benchmark,
-                                      calendar=calendar, calendar_info=calendar_info)
+                                      calendar=calendar, calendar_info=calendar_info,
+                                      verification_started=verification_started(as_of=end))
         if kind == 'index':
             technical['notices'] = [n for n in technical['notices'] if '复权' not in n]
             technical['notices'].append('指数为价格指数；技术条件未在实际ETF成交、费用与跟踪偏差上验证。')
@@ -300,6 +303,8 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
     if technical is not None:
         payload["technical"] = _jsafe(technical)
     payload["meta"]["analysis_generated_at"] = datetime.now(SHANGHAI).isoformat()
+    # C3：计算/数据/证据分层，避免把"行情部分可用"读成"预测有效"。
+    status_layers.refresh(payload)
     return _jsafe(payload)
 
 

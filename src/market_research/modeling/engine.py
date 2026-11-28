@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import market_research.config as C
 from market_research.ordering import ranked_frame
+from market_research.market.uncertainty import block_intervals
 from market_research.modeling.catalog import MODELS, ModelSpec
 from market_research.modeling.estimators import fit_window, estimate_equity, _score
 
@@ -561,6 +562,7 @@ class ModelZoo:
             r.extra["common_oos_n"] = n
             r.extra["common_oos_r2"] = None
             r.extra["common_oos_te"] = None
+            r.extra["common_oos_uncertainty"] = None
             if not n:
                 continue
             r.extra["common_oos_start"] = common[0].strftime("%Y-%m-%d")
@@ -571,6 +573,65 @@ class ModelZoo:
                                 y.reindex(common).values)
                 r.extra["common_oos_r2"] = r2
                 r.extra["common_oos_te"] = te
+        ModelZoo._attach_common_uncertainty(reports, common)
+
+    @staticmethod
+    def _attach_common_uncertainty(reports: Dict[str, "ModelReport"],
+                                   common: pd.DatetimeIndex) -> None:
+        """共同 OOS 日期上的配对块自助：模型差距是否跨 0。
+
+        以共同样本里 R² 最高的模型（仅对可评分模型而言）为参照，对每个模型
+        计算逐日平方误差差 `(候选-实际)²-(参照-实际)²` 的配对移动块自助区间。
+        块长/种子沿用 `market.uncertainty` 的固定值，不按结果挑参；区间跨 0
+        或估不出时 `distinguishable=None`，不允许据此宣称更优或更差。
+        """
+        scored = {key: rep for key, rep in reports.items()
+                  if isinstance(rep.extra.get("common_oos_r2"), (int, float))
+                  and np.isfinite(float(rep.extra["common_oos_r2"]))
+                  and isinstance(rep.syn_ret, pd.Series)
+                  and isinstance(getattr(rep, "oos_y", None), pd.Series)}
+        if len(scored) < 2 or len(common) < 20:
+            return
+        reference_key = max(scored, key=lambda key: float(
+            scored[key].extra["common_oos_r2"]))
+        reference = scored[reference_key]
+        actual = reference.oos_y.reindex(common).to_numpy(dtype=float)
+        base_error = (reference.syn_ret.reindex(common).to_numpy(dtype=float)
+                      - actual) ** 2
+        for key, rep in scored.items():
+            if key == reference_key:
+                rep.extra["common_oos_uncertainty"] = {
+                    "reference": reference_key, "n": int(len(common)),
+                    "point_estimate": 0.0, "intervals": [],
+                    "distinguishable": None,
+                    "note": "本模型即共同样本内 R² 最高的参照模型，不做自身比较。"}
+                continue
+            error = (rep.syn_ret.reindex(common).to_numpy(dtype=float)
+                     - actual) ** 2
+            difference = error - base_error
+            if not np.isfinite(difference).all():
+                rep.extra["common_oos_uncertainty"] = {
+                    "reference": reference_key, "n": int(len(common)),
+                    "point_estimate": None, "intervals": [],
+                    "distinguishable": None,
+                    "note": "共同样本内存在非有限值，本口径不出区间。"}
+                continue
+            intervals = block_intervals(difference)
+            estimated = [item for item in intervals["intervals"]
+                         if item["status"] == "estimated"]
+            distinguishable = None
+            if estimated:
+                if all(item["lower"] > 0 for item in estimated):
+                    distinguishable = False     # 候选误差更大 → 显著更差
+                elif all(item["upper"] < 0 for item in estimated):
+                    distinguishable = True      # 候选误差更小 → 显著更好
+            rep.extra["common_oos_uncertainty"] = {
+                "reference": reference_key, "n": int(len(common)),
+                "point_estimate": intervals["point_estimate"],
+                "intervals": intervals["intervals"],
+                "distinguishable": distinguishable,
+                "note": "配对移动块自助（块长 1/3/5，种子固定）；"
+                        "区间跨 0 或未估出时不得宣称更优或更差。"}
 
     @staticmethod
     def blocking_reasons(r: ModelReport) -> List[str]:

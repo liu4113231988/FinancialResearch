@@ -670,6 +670,20 @@ function exportResult() {
       n_days: m.n_days,
       from_cache: m.from_cache || false,
       registration: m.registration || null,
+      // C3：导出的结论必须自带分层状态与有效样本数，复算时不必回看页面
+      status_layers: r.status_layers || null,
+      effective_samples: {
+        oos_n: (r.completeness && r.completeness.sections
+                && r.completeness.sections.models) || null,
+        models: Object.fromEntries(Object.entries(r.models || {}).map(([k, v]) => [k, {
+          assessment: (v.assessment || {}).status || null,
+          evidence_state: (v.assessment || {}).evidence_state || null,
+          oos_n: (v.assessment || {}).oos_n ?? null,
+        }])),
+      },
+      versions: {cache_version: (m.cache_version || null),
+                 data_basis: m.data_basis || null, nav_basis: m.nav_basis || null,
+                 nav_data_version: m.nav_data_version || null},
     },
     result: r,
     ...(S.holdings ? {holdings: S.holdings} : {}),
@@ -1310,6 +1324,20 @@ function renderHead() {
     cbadge.title = (comp.reasons || []).join('\n') || '完整性信息缺失';
     $('fundMeta').appendChild(cbadge);
   }
+  // C3：计算/数据/证据/入账各说各的，别用一个 status 混指
+  const layers = r.status_layers || {};
+  if (layers.summary) {
+    const lbadge = document.createElement('span');
+    lbadge.className = layers.summary.status === 'ok' ? 'meta-note' : 'meta-warn';
+    const names = {computation: '计算', data_quality: '数据',
+      assessment: '证据', registration: '入账', execution: '成交'};
+    lbadge.textContent = ' · ' + Object.keys(names)
+      .filter(k => layers[k])
+      .map(k => `${names[k]} ${layers[k]}`).join(' · ');
+    lbadge.title = (layers.note || '') +
+      ((layers.summary.reasons || []).length ? '\n' + layers.summary.reasons.join('\n') : '');
+    $('fundMeta').appendChild(lbadge);
+  }
 
   const bm = r.models[S.best];
   const kpi = [
@@ -1524,6 +1552,9 @@ function renderRank() {
       : '')
     + (incomplete
       ? `<br/>本次有 ${incomplete} 个模型的样本外评估不足或失败，原因见各模型详情。`
+      : '')
+    + ((S.result && S.result.status_layers && S.result.status_layers.assessment === 'insufficient')
+      ? `<br/><b>证据层为"评估不足"：样本量不够下结论，本页不显示"最佳/更可靠"类推荐措辞。</b>`
       : '');
 }
 
@@ -1567,6 +1598,19 @@ function renderSelected() {
       `有效重估 ${assessment.rebalance_count ?? '—'} 窗`,
       `覆盖率 ${fmtPct(assessment.oos_coverage, 1)}`,
       ...(assessment.reasons || []),
+      // B2：共同 OOS 上与其他模型的差异必须给区间，跨 0 就不下结论
+      ...(assessment.common_oos_uncertainty
+        ? [(() => {
+            const u = assessment.common_oos_uncertainty;
+            if (u.distinguishable === true) {
+              return `与参照模型（${u.reference}）差异区间不含 0：更贴合`;
+            }
+            if (u.distinguishable === false) {
+              return `与参照模型（${u.reference}）差异区间不含 0：更差`;
+            }
+            return `与参照模型（${u.reference}）的差异区间跨 0 或未估出，不宣称优劣`;
+          })()]
+        : []),
     ].join(' · ');
     assessmentEl.hidden = false;
   }
@@ -2066,19 +2110,27 @@ function renderFundForecast() {
     const p = (h.ok && h.probability != null)
       ? (h.probability * 100).toFixed(1) + '%' : '不可用';
     const ev = h.evaluation || {};
+    const clock = h.horizon_basis === 'calendar_sessions' ? '交易日历' : '有效净值日';
     const evTxt = (ev.ok && ev.n)
       ? `历史滚动验证准确率 ${((ev.accuracy ?? 0) * 100).toFixed(1)}% · 基准 ${((ev.baseline_accuracy ?? 0) * 100).toFixed(1)}% · n=${ev.n}`
       : '历史滚动验证样本不足';
+    // C3：证据状态/样本/时钟/校准逐项展示；未校准就写未校准，不给"可靠性"数字
+    const stateTxt = h.evidence_label
+      ? `证据：${h.evidence_label}` : '证据：未知';
+    const calTxt = (h.calibration && h.calibration.status === 'not_calibrated')
+      ? '未校准' : '—';
     const cls = !h.ok ? 'bad' : (h.advantage ? 'good' : 'warn');
     return `<div class="kpi ${cls}">
       <div class="lb">未来 ${h.horizon} 日上涨概率</div>
       <div class="vl">${p}</div>
-      <div class="sb">历史上涨基准 ${h.baseline != null ? (h.baseline * 100).toFixed(1) + '%' : '—'}<br>${escapeHtml(evTxt)}</div>
+      <div class="sb">${escapeHtml(stateTxt)} · 周期时钟 ${clock} · 校准 ${calTxt}<br>` +
+      `历史上涨基准 ${h.baseline != null ? (h.baseline * 100).toFixed(1) + '%' : '—'}<br>${escapeHtml(evTxt)}</div>
     </div>`;
   }).join('');
   if (note) note.innerHTML =
     `${escapeHtml(f.disclaimer || '')} 上方趋势色带只描述<b>已经发生</b>的形态；本区块才是方向概率，` +
-    '预测周期按有效净值日计数；两者都不构成买卖建议。';
+    `截止 ${escapeHtml(f.as_of || '—')}，周期按${f.horizons && f.horizons[0] && f.horizons[0].horizon_basis === 'calendar_sessions' ? '交易日历' : '有效净值日'}计数；` +
+    '概率未做校准，证据状态只说明样本是否足够，不等于已验证；两者都不构成买卖建议。';
 }
 
 function drawMonthly(monthly, years) {

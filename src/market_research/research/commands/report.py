@@ -21,6 +21,7 @@ import pandas as pd
 
 import market_research.audit as audit
 import market_research.config as C
+from market_research import status
 from market_research.ordering import ranked_frame
 from market_research.research.charts import build_all
 from market_research.funds.pipeline import run_fund
@@ -257,6 +258,9 @@ def main(argv=None, *, prog=None):
         "data_quality": main_res.get("data_quality") or {},
         # P2-31：完整性契约（完成/部分/失败 + 缺失项 + 原因）
         "completeness": main_res.get("completeness") or {},
+        # C3：计算/数据/证据/入账/成交分层，报告与页面同源
+        "status_layers": (main_res.get("status_layers")
+                          or status.from_result(main_res)),
         # P1-20：净值口径必须与 meta.data_basis 一致地出现在报告顶部
         "data_basis": (main_res.get("meta") or {}).get("data_basis"),
         "nav_basis": (main_res.get("meta") or {}).get("nav_basis"),

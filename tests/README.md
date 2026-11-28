@@ -1,6 +1,6 @@
 # 测试说明
 
-核对日期：2026-11-28（Python 3.14.10）。最新全量回归：661 项 unittest 通过，三套前端脚本通过。先在项目根目录运行 `uv sync --locked`。下列命令使用可安装的 `market_research` 包及当前测试目录；无需修改 `PYTHONPATH`。
+核对日期：2026-11-28（Python 3.14.10）。最新全量回归：695 项 unittest 通过，四套前端脚本通过。先在项目根目录运行 `uv sync --locked`。下列命令使用可安装的 `market_research` 包及当前测试目录；无需修改 `PYTHONPATH`。
 
 | 目录 | 内容 |
 | --- | --- |
@@ -72,6 +72,8 @@ uv build
 wheel 检查应在独立虚拟环境安装构建产物，在源码目录之外验证控制台命令、静态资源和 SQL 可读取；源码兼容脚本不是安装包用户的调用方式。
 
 ## 已有验证记录
+
+证据与状态链路一轮（2026-11-28）：台账驱动 `verification_started`（四态中"独立验证待完成"只在台账 `in_progress/evaluating` 且结果落在留出区间时出现）+ 第6条验收场景；新增 `market_research/status.py` 五层状态并由基金/市场/CLI/入账后统一刷新，`status_layers` 进入页面徽标、JSON/CSV/HTML 导出与报告；基金方向卡补 `horizon_basis`/`calibration`/证据标签；`ModelZoo._attach_common_oos` 增加共同 OOS 配对块自助区间（跨 0 不宣称优劣）。**695 项 unittest、两套脚本回归、四套前端回归与 `compileall` 通过**（CPython 3.14.10）；隔离服务实测 `POST /api/v1/market/analyze`（600519）结果信封含 `status_layers`（计算 ok / 数据 ok / 证据 sufficient / 入账 not_recorded），两条 5/20 日预测返回 `historical_diagnostic` 与 n=124/30、`calendar_sessions`。**未跑**浏览器 CDP 交互验收与真实基金 11 模型全量分析。
 
 Python 3.14 升级一轮（2026-11-28）：解释器从 3.13.14 升到 **3.14.10**，`requires-python` 收紧为 `>=3.14,<3.15`，容器基镜像与 uv 同步升级，依赖升级到 akshare 1.20.70 / pandas 3.1.1 / numpy 2.5.5 / duckdb 2.0.1 / fastapi 0.165.0 / uvicorn 0.54.0 / pydantic 2.14.4 / requests 2.34.2，开发依赖改 `httpx2`（starlette 1.10 的 TestClient 不再用 httpx）。AkShare 1.20 的批量改名已在代码侧迁移（估值 csindex、A 股日线、指数日线、美股指数），随包日历从 `file_fold/calendar.json` 迁到 `data/calendar.json`，逐调用 `timeout=` 改由全局/请求层超时兜底。**661 项 unittest、两套脚本式回归、三套前端回归、`compileall`、`uv build` 全部通过**（本机 Windows + CPython 3.14.10）；修复了一处未随"四态证据状态"更新的 `tests/api/test_routes.py` 断言。另在同一环境做了联网冒烟（合成/真实公开接口，隔离 `FIL_DATA_DIR`）：随包交易日历、`index_zh_daily_sina`、`index_us_daily_sina`、`index_value_csindex`、`stock_zh_a_hist_em`（含简称回填）、分析路径指数日线、`fund_open_fund_info_em`、`index_hist_sw` 共 8 条生产取数路径全部成功；隔离服务 `/api/v1/health`、`/api/v1/ready`、`/api/v1/disclosure` 与静态首页均 200（ready 的 storage/worker/jobs/limits 检查全 ok）；`POST /api/v1/market/analyze`（600519，2023-01-01~2026-11-27）经 worker 队列 16 秒完成，`/api/v1/result` 返回 200 且 `analysis.run` 审计为 `ok/completeness=ok`。**未重跑**浏览器 CDP 检查、Docker 镜像构建与真实基金分析。
 

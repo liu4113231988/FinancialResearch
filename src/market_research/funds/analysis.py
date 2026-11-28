@@ -119,6 +119,7 @@ def result_completeness(*, payload: dict, correlation: dict, forecast: dict,
 
 
 # 兼容现有脚本导入；实现按职责放在独立模块。
+from market_research import status
 from market_research.tasks.jobs import JOBS, JobStore
 from market_research.validation.parameters import _finite, _parse_max_rebal, _parse_auto_equity, _check_params, _parse_window
 from market_research.funds.payloads import _jnum, _jsafe, _dates, correlation_block, nav_block, model_payload, build_insights, _backtest_payload, _weights_payload, _weights_hist_payload, _alpha_stats, fund_forecast_payload
@@ -155,6 +156,18 @@ def _n_rebal(reps: dict) -> int:
     """
     return next((len(r.weights_hist) for r in reps.values()
                  if not r.weights_hist.empty), 0)
+
+
+def _verification_flag(as_of) -> bool:
+    """结果是否已进入预注册验收且尚无结论（见 research.future_validation）。
+
+    取数/台账任何异常都按"未开始"处理：证据缺失不得反向冒充已进入验证。
+    """
+    try:
+        from market_research.research.future_validation import verification_started
+        return bool(verification_started(as_of=as_of))
+    except Exception:                                        # noqa: BLE001
+        return False
 
 
 # ====================================================================== 主流程
@@ -205,9 +218,12 @@ def analyze(code: str, models: Optional[List[str]] = None,
         cp.save("nav", navb)
     # 方向概率：与趋势色带（形态描述）分开发布，样本不足时 available=False
     prog("估计净值方向概率", 0.26)
+    verify = _verification_flag(nav.index[-1])
     forecast = cp.load("forecast")
-    if forecast is None:
-        forecast = fund_forecast_payload(forecast_nav)
+    # 检查点可能带着上一轮的证据状态；台账状态变化后必须重建，否则页面标签会过期。
+    if forecast is None or forecast.get("verification_started") != verify:
+        forecast = fund_forecast_payload(forecast_nav,
+                                         verification_started=verify)
         cp.save("forecast", forecast)
 
     # ---------- 2. 相关性
@@ -244,7 +260,8 @@ def analyze(code: str, models: Optional[List[str]] = None,
     # P1-25：模型样本外序列基于因果面板（可能含因必需因子缺数的空档），
     # 净值不按对齐面板的行号切，直接交给 model_payload 按共同日期重索引。
     nav_oos = nav
-    payload = {k: model_payload(r, nav_oos) for k, r in reps.items()}
+    payload = {k: model_payload(r, nav_oos, verification_started=verify)
+               for k, r in reps.items()}
     # B2/P3-R：优先按"共同样本外日期"重算的可比 R² 排序；交集不足的模型
     # 会在 blocking_reasons 中被标记。旧检查点没有共同口径时退回各自 R²。
     comparison_key = ("共同OOS R²"
@@ -388,6 +405,8 @@ def analyze(code: str, models: Optional[List[str]] = None,
             "fetch_start": D.fetch_start_for(win_start or C.START_DATE),
         },
     }
+    # C3：任务完成、数据达标、证据充分、是否入账是四件事，分开表达。
+    status.refresh(result)
     prog("完成", 1.0)
     return result
 
@@ -513,7 +532,8 @@ def refit_single(code: str, model_key: str,
     causal = panel.attrs.get("causal_pool") if hasattr(panel, "attrs") else None
     nav_oos = (causal["__FUND__"] if isinstance(causal, pd.DataFrame)
                and "__FUND__" in causal.columns else panel["__FUND__"])
-    return model_payload(rep, nav_oos)
+    return model_payload(rep, nav_oos,
+                         verification_started=_verification_flag(nav_oos.index[-1]))
 
 
 # ====================================================================== 买卖决策回测

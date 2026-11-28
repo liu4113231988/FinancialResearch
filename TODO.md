@@ -290,6 +290,8 @@
 
 **实施记录（2026-11-27，有限配对覆盖）**：以预测收益与基金收益均有限的日期计算天数和起止。有效重估窗口至少贡献一个有限配对。覆盖率分母为限流后从首个保留重估点开始的样本外日期数，含缺口。诊断经分析结果、单模型重学、结果缓存和页面模型详情透传，结果缓存及阶段检查点版本升至 19。供排序与推荐使用的输入及规则沿用现行口径，默认资格阈值仍待产品/研究确认。
 
+**实施记录（2026-11-28，共同 OOS 置信区间）**：`ModelZoo._attach_common_oos` 在共同样本外日期上补充配对移动块自助：以共同样本内 R² 最高的可评分模型为参照，对每个模型计算 `(候选-实际)²-(参照-实际)²` 的逐日差，块长(1,3,5)、种子与重复数沿用 `market.uncertainty` 固定值，不按结果挑参；只有全部已估出区间同号时才给 `distinguishable`（True=更贴合，False=更差），区间跨 0、退化（差值为常数）或含非有限值一律 `None` 且注明不得宣称优劣。结果进入 `assessment.common_oos_uncertainty`，模型详情显示"与参照模型的差异区间是否跨 0"。回归覆盖同分并列、系统性偏差、共同样本不足 20、非有限差值、以及 payload 透传。**未完成**：默认资格阈值（OOS≥60/重估≥3）与"失败/不足模型退出推荐"仍待产品/研究确认；`experiments.py:93` 的波动率目标预热仍按 1.0 补齐，而生产回测路径按中性 0.5，两者差异需单独确认后再改（会改动研究数值，须升版本重放）。
+
 ### M3：统一预测评分、证据强度和用户解释
 
 #### C1 / P3-O：冻结目标定义，分开概率质量与成交限制
@@ -315,7 +317,7 @@
 - [x] 复用现有配对移动块自助/HAC诊断，补齐模型相对频率基线的Brier差及预定比较家族；明确点态区间、家族校正、重叠标签相关性和固定预测路径的条件性限制。置信区间跨0时不宣称优势；不得按结果挑块长、阈值或显著资产。
 - [ ] 扩展到基金方向评估时使用基金独立净值轴及分类样本清单；按基金类型/市场环境披露结果，缺行情、清算/退市、单类别和训练失败均列入覆盖清单，不从总体中消失。
 - [x] 证据状态使用可核实描述：不可计算、评估不足、历史诊断可用、独立验证待完成；只有预注册验收完成后才能描述已验证的范围。不得把启发式分数汇成没有统计依据的“可靠性百分比”。
-- [ ] **验收**：种子99、800行固定OHLC、展示最后252行，20日模型可计算但只有12个非重叠样本，主评估必须不足；覆盖n=0/19/20、常数/极端概率、两类不足、日期交集变化、相关与独立合成序列、固定种子复现。额外用无信号随机输入做负对照，但不把单次随机输赢当统计保证。
+- [x] **验收**：种子99、800行固定OHLC、展示最后252行，20日模型可计算但只有12个非重叠样本，主评估必须不足；覆盖n=0/19/20、常数/极端概率、两类不足、日期交集变化、相关与独立合成序列、固定种子复现。额外用无信号随机输入做负对照，但不把单次随机输赢当统计保证。
 
 **实施记录（2026-11-27，可计算与评估充分分离）**：`direction_forecast` 顶层新增 `computable`（与旧 `ok` 同义保留兼容），`evaluation` 新增 `assessment_status`、`class_distribution`（up/down/flat）、`primary`；`compare_forecasts` 同样给出 `assessment_status/class_distribution/primary`。固定非重叠起点与训练行数、日期范围、平盘审计沿用原口径；n<20 时 `primary=None`、`advantage=None`，逐窗 accuracy/brier/brier_improvement 仅作研究诊断保留，不据此宣称优势；n≥20 也不代表统计功效。新增回归用种子99/800行/最后252行/20日确认 n=12、可计算但评估不足、主指标留空，并覆盖 n=0 与比较视图的充分/不足两种分支。**未完成**：频率基线配对 Brier 差与家族校正、基金分类样本清单与覆盖清单、跨0不宣称优势的页面展示、本条验收中的极端概率/日期交集/负对照等扩展场景。
 
@@ -323,15 +325,19 @@
 
 **实施记录（2026-11-28，四态证据状态）**：`market.technical.evidence_state` 定义 `not_computable/insufficient/historical_diagnostic/independent_verification_pending` 四态及中文标签；`direction_forecast`/`compare_forecasts` 新增 `evidence_state`，基金 `assessment` 块透传 `evidence_state/evidence_label`，前端优先读新字段并保留旧文案回退。旧报告缺状态保守落为"评估不足"；进入预注册验收也只标"独立验证待完成"，代码不输出任何"已验证"措辞，也未把健康分/规则分包装成可靠性百分比。**未完成**：`verification_started` 尚未由预注册验收台账（`docs/future-validation-execution.json`）自动驱动，当前四态中"独立验证待完成"需上层显式传参才会出现；第6条扩展验收场景仍待补。
 
+**实施记录（2026-11-28，台账驱动证据状态与第6条扩展验收）**：`research/future_validation.verification_started` 改由台账驱动：仅当执行台账状态为 `in_progress/evaluating`、`protocol_sha256` 与冻结协议一致、结果 `as_of` 落在 `[holdout_start, evaluation_date]` 内才返回 True；文件缺失、解析失败、指纹不匹配、日期非法一律返回 False，仍处 `registered_not_executed` 期间保持"历史诊断可用"，协议标记完成也不输出"已验证"。市场 `analyze_technical` 与基金 `model_payload`/`fund_forecast_payload` 由调用方传入该标记，顶层与 `evaluation` 内层同时给出 `evidence_state/evidence_label`（此前页面读 `evaluation` 取不到状态）；基金检查点在台账状态变化时重建方向卡，避免缓存标签过期。第6条扩展验收补齐：n=19/20 门槛翻转（19 主评估不足且主指标留空，20 转有效）、常数价格输入、0/1 极端概率可手算（配对差 +0.25/−0.75）、日期交集缺日只缩分母不补值、固定种子复现、相关序列块自助区间宽于独立序列、随机负对照只在区间排除 0 时宣称优势。**未完成**：基金按类型/市场环境分组与覆盖清单（第4条）、页面跨 0 不宣称优势的展示（归 C3）。
+
 #### C3 / P2-31、P2-32：API、页面与导出展示同一套结论
 
 **落点**：[`funds/analysis.py:294`](src/market_research/funds/analysis.py#L294)、[`market/analysis.py:246`](src/market_research/market/analysis.py#L246)、[`funds/payloads.py:427`](src/market_research/funds/payloads.py#L427)、[`services/analysis.py:271`](src/market_research/services/analysis.py#L271)，以及既有 `src/market_research/api/static/app.js`、`market.js`、`ledger.js` 与报告渲染路径。
 
-- [ ] 将 computation（计算）、data_quality（数据）、assessment（证据）、registration（入账）、execution（成交）分开表达，再汇总部分失败状态；任务done不等于预测有效，未入账不等于计算失败。
-- [ ] 预测卡片展示截止时点、5/20周期的实际时钟、样本数、频率基线、是否校准、证据状态及未入账原因。基金高R²注明“同期收益解释”，黑箱重要性不称真实持仓，指数不直接给出可执行报价。
-- [ ] 少样本/失败/降级时不显示“最佳”“更可靠”等推荐措辞；空值不补0.5或0。保留当前已修的持仓切换、窗口指纹、取消和过期响应拦截。
-- [ ] API、CSV、HTML报告、CLI读取同一资格/评分契约；导出包含样本窗口、模型/数据/评估版本和有效样本数。新研究报告使用新文件名和输入指纹，禁止覆盖原证据。
+- [x] 将 computation（计算）、data_quality（数据）、assessment（证据）、registration（入账）、execution（成交）分开表达，再汇总部分失败状态；任务done不等于预测有效，未入账不等于计算失败。
+- [x] 预测卡片展示截止时点、5/20周期的实际时钟、样本数、频率基线、是否校准、证据状态及未入账原因。基金高R²注明“同期收益解释”，黑箱重要性不称真实持仓，指数不直接给出可执行报价。
+- [x] 少样本/失败/降级时不显示“最佳”“更可靠”等推荐措辞；空值不补0.5或0。保留当前已修的持仓切换、窗口指纹、取消和过期响应拦截。
+- [x] API、CSV、HTML报告、CLI读取同一资格/评分契约；导出包含样本窗口、模型/数据/评估版本和有效样本数。新研究报告使用新文件名和输入指纹，禁止覆盖原证据。
 - [ ] **验收**：启动隔离服务并实际浏览器验证股票/指数/基金的正常、少样本、全部失败、部分降级、未入账、旧版本和无成交状态；覆盖390px与桌面宽度、基金切换、窗口变更、刷新/取消/重入；检查网络请求、控制台、前端回归及报告快照。浏览器只用明确夹具，不自动写真实预测库。
+
+**实施记录（2026-11-28，分层状态与导出同源）**：新增 `market_research/status.py`：`computation/data_quality/assessment/registration/execution` 五层取值校验 + `summary`（`blocking` 仅取计算失败；`degraded_layers` 列降级项；`not_recorded/not_evaluated` 只进 `advisory_layers`，不把历史区间"未入账"判成部分失败）。基金 `analyze`/`refit`、市场 `analyze_market`、CLI `run_fund` 与入账后的 `services._record_predictions` 都调用同一个 `status.refresh`，结果信封新增 `status_layers`；基金/市场页面徽标、市场质量导出、基金 JSON 导出（新增 `status_layers`、`effective_samples`、`versions`）、CSV `meta.json`（新增状态分层/有效样本数/分析版本）与 HTML 报告 `extra_meta` 全部读同一块。基金方向卡新增 `horizon_basis`（交易日历/有效净值日）、`calibration{status:not_calibrated}`，页面显示证据标签、样本数、基准、时钟与"未校准"；证据层为"评估不足"时排名解读追加禁用"最佳/更可靠"措辞的说明。**未完成**：C3 浏览器验收（390px/桌面、六种状态、切换与重入）本轮未跑，只用离线单测、Node 前端回归与隔离服务 API 实测（`600519` 结果信封 `status_layers` 与两条 5/20 日证据状态均正确返回）。
 
 ### M4：在可靠评估基础上优化算法与交易诊断
 

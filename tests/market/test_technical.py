@@ -219,4 +219,167 @@ class C2EvaluationContractTests(unittest.TestCase):
                                out['brier_improvement'])
 
 
+class C2AcceptanceExtensionTests(unittest.TestCase):
+    """C2/P3-P 第6条验收：台账驱动、极端概率、日期交集、负对照与固定种子。"""
+
+    @staticmethod
+    def _frame(n=800, seed=99):
+        rng = np.random.default_rng(seed)
+        close = 100 * np.exp(np.cumsum(rng.normal(.0002, .012, n)))
+        return pd.DataFrame({"open": close * .999, "high": close * 1.01,
+                             "low": close * .99, "close": close, "volume": 1000.},
+                            index=pd.bdate_range('2020-01-01', periods=n))
+
+    def test_verification_flag_promotes_label_in_both_layers(self):
+        frame = self._frame()
+        ind = indicators(frame)
+        feats = features_for(frame, ind)
+        plain = direction_forecast(frame, feats, 5, frame.index[0])
+        self.assertNotEqual(plain['evidence_state'], 'independent_verification_pending')
+        self.assertEqual(plain['evaluation']['evidence_state'], plain['evidence_state'])
+        pending = direction_forecast(frame, feats, 5, frame.index[0],
+                                     verification_started=True)
+        expected = evidence_state(computable=pending['computable'],
+                                  assessment_status=pending['evaluation']['assessment_status'],
+                                  verification_started=True)
+        self.assertEqual(pending['evidence_state'], expected)
+        self.assertEqual(pending['evidence_label'], EVIDENCE_LABELS[expected])
+        # 页面读 evaluation、导出读顶层，两层必须是同一结论
+        self.assertEqual(pending['evaluation']['evidence_state'], pending['evidence_state'])
+        self.assertEqual(pending['evaluation']['evidence_label'],
+                         pending['evidence_label'])
+        self.assertEqual(expected, 'independent_verification_pending'
+                         if pending['evaluation']['assessment_status'] == 'sufficient'
+                         else 'insufficient')
+
+    def test_verification_flag_never_upgrades_insufficient_samples(self):
+        frame = self._frame()
+        out = direction_forecast(frame, features_for(frame, indicators(frame)),
+                                 20, frame.index[-252], verification_started=True)
+        self.assertEqual(out['evaluation']['assessment_status'], 'insufficient')
+        self.assertEqual(out['evidence_state'], 'insufficient')
+
+    def test_extreme_probabilities_keep_brier_finite_and_hand_checkable(self):
+        from market_research.research.market_validation import paired_evidence
+        frame = self._frame(n=400)
+        forward = frame.close.shift(-5) / frame.close - 1
+        target = (forward > 0).astype(float).where(forward.notna())
+        flat = pd.Series(0.5, index=frame.index)
+        perfect = target.copy()          # 概率取 0/1 端点
+        inverted = 1.0 - target
+        good = paired_evidence(frame, flat, perfect, 5, 4)
+        bad = paired_evidence(frame, flat, inverted, 5, 4)
+        self.assertGreater(good['n'], 20)
+        self.assertAlmostEqual(good['brier_improvement_uncertainty']['point_estimate'],
+                               0.25, places=6)
+        # 完全取反的 0/1 概率：平方误差由 0.25 升到 1.00，配对差 -0.75
+        self.assertAlmostEqual(bad['brier_improvement_uncertainty']['point_estimate'],
+                               -0.75, places=6)
+        self.assertEqual(good['n'], bad['n'])
+
+    def test_date_intersection_change_drops_rows_instead_of_filling(self):
+        from market_research.research.market_validation import paired_evidence
+        frame = self._frame(n=400)
+        forward = frame.close.shift(-5) / frame.close - 1
+        target = (forward > 0).astype(float).where(forward.notna())
+        flat = pd.Series(0.5, index=frame.index)
+        full = paired_evidence(frame, flat, target.copy(), 5, 4)
+        # 候选缺 60 个日期：应改用交集，而不是补 0.5 或沿用旧分母
+        gapped = target.copy()
+        gapped.iloc[100:160] = np.nan
+        reduced = paired_evidence(frame, flat, gapped, 5, 4)
+        self.assertLess(reduced['n'], full['n'])
+        self.assertIsNotNone(reduced['n'])
+        self.assertAlmostEqual(
+            reduced['brier_improvement_uncertainty']['point_estimate'], 0.25, places=6)
+
+    def test_fixed_seed_reproduces_forecast_and_intervals(self):
+        from market_research.research.market_validation import paired_evidence
+        frame = self._frame()
+        feats = features_for(frame, indicators(frame))
+        first = direction_forecast(frame, feats, 5, frame.index[0])
+        second = direction_forecast(frame, feats, 5, frame.index[0])
+        for key in ('probability', 'baseline', 'evidence_state', 'training_rows'):
+            self.assertEqual(first[key], second[key])
+        np.testing.assert_allclose(first['series'], second['series'], equal_nan=True)
+        flat = pd.Series(0.5, index=frame.index)
+        candidate = pd.Series(np.random.default_rng(7).uniform(.2, .8, len(frame)),
+                              index=frame.index)
+        a = paired_evidence(frame, flat, candidate, 5, 4)
+        b = paired_evidence(frame, flat, candidate, 5, 4)
+        self.assertEqual(a['n'], b['n'])
+        self.assertEqual(a['brier_improvement_uncertainty'], b['brier_improvement_uncertainty'])
+
+    def test_constant_price_input_stays_finite(self):
+        frame = self._frame(n=200)
+        frame[['open', 'high', 'low', 'close']] = 100.0
+        out = direction_forecast(frame, features_for(frame, indicators(frame)), 5,
+                                 frame.index[0], verification_started=True)
+        self.assertIn(out['evidence_state'], EVIDENCE_STATES)
+        if out['computable']:
+            self.assertTrue(np.isfinite(out['probability']))
+            self.assertGreaterEqual(out['probability'], 0.0)
+            self.assertLessEqual(out['probability'], 1.0)
+
+    def test_assessment_threshold_flips_at_twenty_starts(self):
+        frame = self._frame()
+        base = direction_forecast(frame, features_for(frame, indicators(frame)),
+                                  5, frame.index[0])
+        length, last = len(base['series']), len(base['series']) - 6
+        seen = {}
+        for size in range(80, 120):
+            start = last - size
+            series = [0.5 if start <= i < last else None for i in range(length)]
+            out = compare_forecasts(frame, base, {'series': series}, 5,
+                                    frame.index[0])
+            if out['n'] in (19, 20) and out['n'] not in seen:
+                seen[out['n']] = (out['assessment_status'], out['primary'])
+            if len(seen) == 2:
+                break
+        self.assertEqual(seen.get(19, (None,))[0], 'insufficient')
+        self.assertIsNone(seen[19][1])
+        self.assertEqual(seen[20][0], 'sufficient')
+        self.assertIsNotNone(seen[20][1])
+
+    def test_block_intervals_widen_for_correlated_series(self):
+        from market_research.market.uncertainty import block_intervals
+        rng = np.random.default_rng(5)
+        n = 240
+        independent = rng.normal(0.01, 0.05, n)
+        noise = rng.normal(0, 0.03, n)
+        correlated = np.zeros(n)
+        for i in range(1, n):
+            correlated[i] = .8 * correlated[i - 1] + noise[i]
+        correlated += 0.01
+        iid = block_intervals(independent)
+        ar = block_intervals(correlated)
+        iid5 = next(i for i in iid['intervals'] if i['block'] == 5)
+        ar5 = next(i for i in ar['intervals'] if i['block'] == 5)
+        self.assertEqual(iid5['status'], 'estimated')
+        self.assertEqual(ar5['status'], 'estimated')
+        self.assertGreater(ar5['upper'] - ar5['lower'], iid5['upper'] - iid5['lower'])
+
+    def test_negative_control_only_claims_advantage_when_interval_excludes_zero(self):
+        from market_research.research.market_validation import frequency_baseline_evidence
+        frame = self._frame()
+        cutoff = frame.index[-300].date().isoformat()
+        for seed in (7, 11, 13):
+            probs = pd.DataFrame({'base': np.random.default_rng(seed).uniform(0., 1., len(frame))},
+                                 index=frame.index)
+            result = frequency_baseline_evidence(frame, probs, cutoff, 5, 4)
+            self.assertTrue(result['ok'])
+            block = result['variants']['base']
+            advantage = block['advantage_vs_frequency']
+            estimated = [i for i in block['uncertainty']['intervals']
+                         if i['status'] == 'estimated']
+            if advantage is True:
+                self.assertTrue(estimated)
+                self.assertTrue(all(i['lower'] > 0 for i in estimated))
+            elif advantage is False:
+                self.assertTrue(estimated)
+                self.assertTrue(all(i['upper'] < 0 for i in estimated))
+            else:
+                self.assertIsNone(advantage)
+
+
 if __name__=='__main__':unittest.main()

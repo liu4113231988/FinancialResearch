@@ -191,6 +191,9 @@ class RouteTests(unittest.TestCase):
             "rebalance_count": 1,
             "min_oos_sessions": 60,
             "min_refits": 3,
+            "common_oos_n": 7,
+            "common_oos_r2": 1.0,
+            "common_oos_uncertainty": None,
         })
         self.assertEqual(analysis["rank"][0]["样本外覆盖率"], 1.0)
         self.assertEqual(analysis["rank"][0]["可推荐"], "否")
