@@ -115,9 +115,10 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
         "仅趋势通道": score_to_position(sig["trend_score"]),
         "仅相对偏离通道": score_to_position(sig["dev_score"]),
         "拟合健康决策": dec_pos,
-        # P3-R：预热期缺失仓位交给 run_backtest 统一按中性 0.5 处理，
-        # 不再单独 fillna(1.0)；否则同一"缺失仓位"在不同变体里含义不同。
-        "波动率目标": vt["vol_target_pos"].reindex(nav_oos.index).ffill(),
+        # 预热按配置的中性口径补齐（0.5），与研究/消融路径同一常量；
+        # hi=1.0 由 vol_target_channel 内部截断，这里不再放大。
+        "波动率目标": vt["vol_target_pos"].reindex(nav_oos.index).ffill()
+        .fillna(C.SIGNAL["vol_target_warmup"]),
     }
     if valuation.get("available") and sig["val_score"].notna().any():
         variants["仅赛道估值通道"] = score_to_position(sig["val_score"])

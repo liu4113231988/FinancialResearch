@@ -1,6 +1,6 @@
 # 测试说明
 
-核对日期：2026-11-28（Python 3.14.10）。最新全量回归：700 项 unittest 通过，四套前端脚本通过。先在项目根目录运行 `uv sync --locked`。下列命令使用可安装的 `market_research` 包及当前测试目录；无需修改 `PYTHONPATH`。
+核对日期：2026-11-28（Python 3.14.10）。最新全量回归：705 项 unittest 通过，四套前端脚本通过。先在项目根目录运行 `uv sync --locked`。下列命令使用可安装的 `market_research` 包及当前测试目录；无需修改 `PYTHONPATH`。
 
 | 目录 | 内容 |
 | --- | --- |
@@ -72,6 +72,8 @@ uv build
 wheel 检查应在独立虚拟环境安装构建产物，在源码目录之外验证控制台命令、静态资源和 SQL 可读取；源码兼容脚本不是安装包用户的调用方式。
 
 ## 已有验证记录
+
+波动率目标预热口径（2026-11-28）：`C.SIGNAL["vol_target_warmup"]=0.5` 成为唯一常量，`vol_target_channel` 预热按 0.5 补齐、就绪后按 [0.30, 1.00] 缩放（上限 1.0 只降不放大）；生产 `run_fund` 变体与 `experiments` 消融表都读同一值，`CACHE_VERSION` 升至 20。回归覆盖预热段、就绪区间、reindex 与两路径一致性。
 
 基金分类样本与覆盖清单（2026-11-28）：`fund_forecast_payload` 输出 `coverage`（基金独立净值轴、基金类型、缺行情、停更/清算退市、逐周期训练/标签类别/评估样本/失败原因）与 `groups`（基金类型 + 基准 strong/weak/mixed/unknown 环境，每组 n/ok），缺项一律留在清单里；`direction_forecast` 新增可选 `regimes` 分组；页面方向卡在可用/不可用两种状态都显示覆盖清单。回归覆盖中间缺日、停更疑似、健康基金不误判、常数净值单类别、分组人数一致、无日历/基准显式 unknown。
 

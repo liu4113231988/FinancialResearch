@@ -90,7 +90,9 @@ def channel_ablation(sig: pd.DataFrame, nav: pd.Series,
     # 波动率目标：风险归一化，不需要信号，适合放在消融表里对照
     if syn_nav is not None:
         vt = SignalEngine().vol_target_channel(syn_nav)
-        variants["波动率目标"] = vt["vol_target_pos"].reindex(nav.index).ffill().fillna(1.0)
+        # 与研究/生产同一预热口径（0.5）：旧实现此处填 1.0，与 pipeline 不一致
+        variants["波动率目标"] = (vt["vol_target_pos"].reindex(nav.index).ffill()
+                                .fillna(C.SIGNAL["vol_target_warmup"]))
     bt = run_backtest(nav, sig, cfg=cfg, variants=variants)
     m = bt["metrics"].copy()
     # ★ 每个方案减自己的恒定仓位对照（平均仓位一致才可比）。

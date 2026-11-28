@@ -273,6 +273,10 @@ class SignalEngine:
         tgt = float(c.get("vol_target", 0.15))
         lo = float(c.get("vol_target_min", 0.30))
         hi = float(c.get("vol_target_max", 1.00))
+        # 预热口径（0.5/1.0）：未就绪用中性 0.5；就绪后按 [lo, hi] 缩放，
+        # hi=1.0 表示只降不放大。必须是显式常数，不用 bfill 回填未来波动率。
+        warmup = float(c.get("vol_target_warmup", 0.5))
+        warmup = min(max(warmup, lo), hi)
         mode = str(c.get("vol_target_mode", "target"))
 
         r = np.log(syn_nav).diff()
@@ -291,10 +295,10 @@ class SignalEngine:
             pos = raw.where(pd.Series(mask, index=raw.index)).ffill()
         else:
             pos = raw
-        # 中性值 1.0 = 波动率目标尚未就绪时不主动降仓（等价于不调整）
-        pos = pos.fillna(1.0)
+        # 预热期用中性 0.5（不假设满仓、也不清仓），与"缺失仓位=中性"一致
+        pos = pos.fillna(warmup)
         if idx is not None:
-            pos = pos.reindex(idx, method="ffill").fillna(1.0)
+            pos = pos.reindex(idx, method="ffill").fillna(warmup)
         return pd.DataFrame({"rv": rv, "vol_target_pos": pos})
 
     # -------------------------------------------------- 融合

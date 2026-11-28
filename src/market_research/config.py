@@ -54,7 +54,8 @@ for _d in (DATA_DIR, FIG_DIR, RES_DIR):
 #      fit_diag 结构扩展。旧结果缺少这些字段，必须重算。
 # 18 = 基金快照、预测输入指纹与生成时点随结果缓存保留。
 # 19 = 基金模型评估覆盖改用有限配对收益，结果与阶段检查点需重新计算。
-CACHE_VERSION = 19
+# 20 = 波动率目标预热统一为中性 0.5（旧实现 1.0），波动率目标曲线需重算。
+CACHE_VERSION = 20
 
 # 数据缓存版本：修改 align_prices / 覆盖率阈值 / 候选池等取数口径后 +1，
 # 旧版 output/data/panel_*.csv 会被自动判为过期并重新抓取；
@@ -339,7 +340,12 @@ SIGNAL = dict(
     vol_target=0.15,     # 目标年化波动（inverse 模式下用作归一化中枢）
     vol_target_win=60,   # 已实现波动的观测窗口
     vol_target_min=0.30, # 仓位下限（不因波动极低而满仓）
-    vol_target_max=1.00, # 仓位上限
+    vol_target_max=1.00, # 仓位上限（只降不放大，超过满仓的部分截断）
+    # 预热口径（0.5/1.0）：波动率估计尚未就绪时用中性 0.5，与项目内其他
+    # "缺失仓位=中性"的口径一致；就绪后在 [vol_target_min, vol_target_max]
+    # 内缩放，上限 1.0 表示不放大超过满仓。旧实现预热用 1.0（等于满仓押注
+    # 一段还没有波动率估计的区间），与研究路径不一致，CACHE_VERSION 已+1。
+    vol_target_warmup=0.5,
     vol_target_rebalance=60,  # 调仓周期（交易日）
     smooth=5,            # 目标仓位 EMA 平滑
     rebalance_band=0.08, # 调仓死区
