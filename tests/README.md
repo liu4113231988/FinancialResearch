@@ -1,6 +1,6 @@
 # 测试说明
 
-核对日期：2026-11-24。最新全量回归：618 项 unittest 通过，三套前端脚本通过。先在项目根目录运行 `uv sync --locked`。下列命令使用可安装的 `market_research` 包及当前测试目录；无需修改 `PYTHONPATH`。
+核对日期：2026-11-28（Python 3.14.10）。最新全量回归：661 项 unittest 通过，三套前端脚本通过。先在项目根目录运行 `uv sync --locked`。下列命令使用可安装的 `market_research` 包及当前测试目录；无需修改 `PYTHONPATH`。
 
 | 目录 | 内容 |
 | --- | --- |
@@ -72,6 +72,8 @@ uv build
 wheel 检查应在独立虚拟环境安装构建产物，在源码目录之外验证控制台命令、静态资源和 SQL 可读取；源码兼容脚本不是安装包用户的调用方式。
 
 ## 已有验证记录
+
+Python 3.14 升级一轮（2026-11-28）：解释器从 3.13.14 升到 **3.14.10**，`requires-python` 收紧为 `>=3.14,<3.15`，容器基镜像与 uv 同步升级，依赖升级到 akshare 1.20.70 / pandas 3.1.1 / numpy 2.5.5 / duckdb 2.0.1 / fastapi 0.165.0 / uvicorn 0.54.0 / pydantic 2.14.4 / requests 2.34.2，开发依赖改 `httpx2`（starlette 1.10 的 TestClient 不再用 httpx）。AkShare 1.20 的批量改名已在代码侧迁移（估值 csindex、A 股日线、指数日线、美股指数），随包日历从 `file_fold/calendar.json` 迁到 `data/calendar.json`，逐调用 `timeout=` 改由全局/请求层超时兜底。**661 项 unittest、两套脚本式回归、三套前端回归、`compileall`、`uv build` 全部通过**（本机 Windows + CPython 3.14.10）；修复了一处未随"四态证据状态"更新的 `tests/api/test_routes.py` 断言。未重跑浏览器 CDP 检查与真实行情联网研究。
 
 回查修复一轮（2026-11-06）：完整 **366 项** unittest 通过（约 120 秒）。新增/补强断言：`meta.provenance.data_stamp` 在数据变化后变化且基金窗口只跟踪自身依赖（`tests/api/test_provenance.py`）、`StorageBusy` 返回 503 与可读错误体（`tests/api/test_routes.py`）、研究 CLI 估值通道不可用时不生成 NaN 曲线（`tests/funds/test_pipeline_valuation.py`）、CLI/报告净值口径（`tests/funds/test_pipeline_valuation.py`、`tests/research/test_report_render.py`）、持仓 payload 与报告 3.6 实际渲染（`tests/funds/test_payloads.py`、`tests/research/test_report_render.py`）。未重跑真实数据研究、浏览器检查与 `uv build`。
 

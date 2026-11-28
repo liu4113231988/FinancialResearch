@@ -6,7 +6,7 @@
 
 ## 安装与启动
 
-需要 uv；项目使用 Python 3.13，验证版本由 `.python-version` 固定为 3.13.14，依赖由 `uv.lock` 锁定。在项目根目录运行：
+需要 uv；项目使用 Python 3.14，验证版本由 `.python-version` 固定为 3.14.10，依赖由 `uv.lock` 锁定。在项目根目录运行：
 
 ```powershell
 uv sync --locked
@@ -50,7 +50,7 @@ docker build -t market-research:local .
 docker run -d --init --name market-research -p 127.0.0.1:8877:8877 -v market-research-data:/data market-research:local
 ```
 
-访问 `http://127.0.0.1:8877/`。镜像使用 Python 3.13，通过 `uv.lock` 安装运行依赖和非 editable 项目包；最终镜像只复制安装环境，包含前端和 SQL 包资源，以 UID/GID 10001 运行。`.dockerignore` 采用允许列表，本机 `.venv`、行情、结果、Git、Node 依赖及测试产物不进入构建上下文。
+访问 `http://127.0.0.1:8877/`。镜像使用 Python 3.14，通过 `uv.lock` 安装运行依赖和非 editable 项目包；最终镜像只复制安装环境，包含前端和 SQL 包资源，以 UID/GID 10001 运行。`.dockerignore` 采用允许列表，本机 `.venv`、行情、结果、Git、Node 依赖及测试产物不进入构建上下文。
 
 > **安全边界**：默认以单用户模式运行（`FIL_ACCESS_CONTROL=off`，无登录/鉴权）。设置 `FIL_ACCESS_CONTROL=token` 并配置 `FIL_API_TOKENS` 后，业务接口要求 `Authorization: Bearer <token>` 或 `X-API-Key`；`/`、`/api/v1/health`、`/api/v1/ready`、`/api/v1/disclosure` 与静态资源始终公开（旧 `/api/*` 等价路径同样公开）。令牌模式是最小认证，尚无注册/登录、租户数据分区与按用户配额。无论是否开启认证，`-p 8877:8877` 都会把 API 发布到所有网卡；只在本机使用时请写 `-p 127.0.0.1:8877:8877`，确需局域网或公网访问时仍应放在带鉴权的反向代理之后。
 

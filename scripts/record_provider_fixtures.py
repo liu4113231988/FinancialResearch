@@ -37,11 +37,11 @@ LIVE_CALLS = {
         symbol="110022", indicator="单位净值走势"),
     "fund_cum_return": lambda ak: ak.fund_open_fund_info_em(
         symbol="110022", indicator="累计收益率走势"),
-    "index_sina": lambda ak: ak.stock_zh_index_daily(symbol="sh000300"),
+    "index_sina": lambda ak: ak.index_zh_daily_sina(symbol="sh000300"),
     "index_sw": lambda ak: ak.index_hist_sw(symbol="801010", period="day"),
-    "index_us_sina": lambda ak: ak.index_us_stock_sina(symbol=".INX"),
-    "csindex_pe": lambda ak: ak.stock_zh_index_value_csindex(symbol="000300"),
-    "csindex_dividend": lambda ak: ak.stock_zh_index_value_csindex(
+    "index_us_sina": lambda ak: ak.index_us_daily_sina(symbol=".INX"),
+    "csindex_pe": lambda ak: ak.index_value_csindex(symbol="000300"),
+    "csindex_dividend": lambda ak: ak.index_value_csindex(
         symbol="000300"),
 }
 

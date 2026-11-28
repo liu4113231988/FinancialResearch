@@ -61,16 +61,16 @@ probe("sw_index_second_info", "sw_index_second_info")
 
 # 2. 中证官方指数估值（csindex）：字段规范（含股息率1/2），
 #    但覆盖的是中证指数 —— 只能匹配宽基腿与部分中证行业，不能直接覆盖申万行业
-probe("stock_zh_index_value_csindex(000300)",
-      "stock_zh_index_value_csindex", "000300")
+probe("index_value_csindex(000300)",
+      "index_value_csindex", "000300")
 
 # 3. 全收益指数行情通道尝试：
 #    - 中证红利全收益（H00922 → sh000922 或 H30269 等）
-probe("stock_zh_index_daily(sh000922 红利全收益)",
-      "stock_zh_index_daily", symbol="sh000922")
+probe("index_zh_daily_sina(sh000922 红利全收益)",
+      "index_zh_daily_sina", symbol="sh000922")
 #    - 申万全收益指数（801xxx 的全收益代码段 851xxx，通道未必存在）
-probe("stock_zh_index_daily(sw 851120 猜测)",
-      "stock_zh_index_daily", symbol="sw851120")
+probe("index_zh_daily_sina(sw 851120 猜测)",
+      "index_zh_daily_sina", symbol="sw851120")
 
 # 4. 个股分红明细：可以自建逐行业股息率（成分股股息 / 市值），
 #    数据量大但完全可推导 —— 这是"无现成行业口径"时的兜底路线

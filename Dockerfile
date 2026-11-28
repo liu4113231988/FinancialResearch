@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
-ARG PYTHON_IMAGE=python:3.13-slim-bookworm
-ARG UV_VERSION=0.12.17
+ARG PYTHON_IMAGE=python:3.14-slim-bookworm
+ARG UV_VERSION=0.13.10
 
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 

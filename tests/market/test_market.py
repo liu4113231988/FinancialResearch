@@ -95,7 +95,7 @@ class MarketTests(unittest.TestCase):
         import akshare as ak
         with tempfile.TemporaryDirectory(dir=C.ROOT / "output") as directory, patch.object(C, "DATA_DIR", Path(directory)):
             raw = bars().reset_index()
-            with patch.object(ak, "stock_zh_a_hist", return_value=raw) as fetch:
+            with patch.object(ak, "stock_zh_a_hist_em", return_value=raw) as fetch:
                 first = load_bars("stock", "sh600519", "2024-01-01", "2025-01-01")
                 second = load_bars("stock", "sh600519", "2024-01-01", "2025-01-01")
                 pd.testing.assert_frame_equal(first, second, check_freq=False)
@@ -103,7 +103,7 @@ class MarketTests(unittest.TestCase):
                 load_bars("stock", "sh600519", "2024-01-01", "2025-01-01", adjust="")
                 self.assertEqual(fetch.call_count, 2)
                 self.assertTrue((Path(directory) / "market.duckdb").exists())
-            with patch.object(ak, "stock_zh_a_hist", side_effect=RuntimeError("offline")), patch.object(ak, "stock_zh_a_hist_tx", side_effect=RuntimeError("offline")):
+            with patch.object(ak, "stock_zh_a_hist_em", side_effect=RuntimeError("offline")), patch.object(ak, "stock_zh_a_hist_tx", side_effect=RuntimeError("offline")):
                 # P2-27：刷新失败但本地同口径缓存可用时回退旧数据并标记，而不是让整个请求失败
                 stale = load_bars("stock", "sh600519", "2024-01-01", "2025-01-01", refresh=True)
             self.assertTrue(stale.attrs.get("stale"))
@@ -122,7 +122,7 @@ class MarketTests(unittest.TestCase):
             storage.write(name, original, {"through": end,
                                            "info": {"data_end": end}})
             revised = original * 2
-            with patch.object(ak, "stock_zh_a_hist",
+            with patch.object(ak, "stock_zh_a_hist_em",
                               return_value=revised.reset_index()) as fetch:
                 refreshed = load_bars("stock", "sh600519", "2024-01-01",
                                       end, refresh=True)
@@ -135,7 +135,7 @@ class MarketTests(unittest.TestCase):
         import akshare as ak
         with tempfile.TemporaryDirectory(dir=C.ROOT / "output") as directory, patch.object(C, "DATA_DIR", Path(directory)):
             raw = bars().reset_index()
-            with patch.object(ak, "stock_zh_a_hist", side_effect=RuntimeError("primary unavailable")), patch.object(ak, "stock_zh_a_hist_tx", return_value=raw):
+            with patch.object(ak, "stock_zh_a_hist_em", side_effect=RuntimeError("primary unavailable")), patch.object(ak, "stock_zh_a_hist_tx", return_value=raw):
                 frame = load_bars("stock", "sh600519", "2024-01-01", "2025-01-01")
             self.assertEqual(frame.volume.iloc[0], raw.volume.iloc[0])
             self.assertEqual(frame.attrs["source"], "AKShare / 腾讯证券")

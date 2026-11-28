@@ -40,12 +40,12 @@ for code, name in [("801010", "农林牧渔"), ("801120", "食品饮料"), ("801
 
 print("\n--- 申万一级行业完整清单 ---")
 try:
-    info = ak.sw_index_first_info()
+    info = ak.index_first_info_sw()
     print(info.to_string())
 except Exception as e:
-    print("sw_index_first_info FAIL:", type(e).__name__, str(e)[:80])
+    print("index_first_info_sw FAIL:", type(e).__name__, str(e)[:80])
     try:
-        info = ak.sw_index_third_info()
+        info = ak.index_third_info_sw()
         print(info.head(5).to_string())
     except Exception as e2:
-        print("sw_index_third_info FAIL:", type(e2).__name__, str(e2)[:80])
+        print("index_third_info_sw FAIL:", type(e2).__name__, str(e2)[:80])

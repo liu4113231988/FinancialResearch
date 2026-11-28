@@ -120,11 +120,11 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
         info["request_started_at"] = datetime.now(SHANGHAI).isoformat()
         if kind == "stock":
             try:
-                raw = ak.stock_zh_a_hist(symbol=code[2:], period="daily", start_date=start.replace("-", ""), end_date=end.replace("-", ""), adjust=adjust, timeout=12)
+                raw = ak.stock_zh_a_hist_em(symbol=code[2:], period="daily", start_date=start.replace("-", ""), end_date=end.replace("-", ""), adjust=adjust)
                 result = clean_bars(raw, start, end, "lots", allow_nonpositive=_fetch_only and adjust == "qfq")
             except Exception as primary:
                 try:
-                    raw = ak.stock_zh_a_hist_tx(symbol=code, start_date=start, end_date=end, adjust=adjust, timeout=12)
+                    raw = ak.stock_zh_a_hist_tx(symbol=code, start_date=start, end_date=end, adjust=adjust)
                     result = clean_bars(raw, start, end, allow_nonpositive=_fetch_only and adjust == "qfq")
                 except Exception as fallback:
                     # 只留异常类名无法区分网络超时、空数据、列名变更与代码错误；
@@ -142,7 +142,7 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
             info["name"] = STOCKS.get(code)
             if not info["name"]:
                 try:
-                    profile = ak.stock_individual_info_em(symbol=code[2:], timeout=6)
+                    profile = ak.stock_individual_info_em(symbol=code[2:])
                     names = profile.loc[profile["item"] == "股票简称", "value"]
                     if len(names):
                         info["name"] = str(names.iloc[0])[:60]
@@ -150,7 +150,7 @@ def load_bars(kind, code, start, end, adjust="qfq", refresh=False, _fetch_only=F
                     pass
             return result
         info["source"] = "AKShare / 新浪指数"
-        result = clean_bars(D._retry(ak.stock_zh_index_daily, tries=2, symbol=code), start, end)
+        result = clean_bars(D._retry(ak.index_zh_daily_sina, tries=2, symbol=code), start, end)
         info["observed_at"] = datetime.now(SHANGHAI).isoformat()
         info["observed_data_start"] = result.index[0].date().isoformat()
         info["observed_data_end"] = result.index[-1].date().isoformat()

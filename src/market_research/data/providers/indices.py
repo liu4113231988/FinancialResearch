@@ -13,7 +13,7 @@ def fetch_index_sina(code: str, start: Optional[str] = None) -> pd.Series:
     """新浪指数日线收盘价。code 形如 sh000300 / sz399006。"""
     import akshare as ak
 
-    df = _retry(ak.stock_zh_index_daily, symbol=code, source="index_sina")
+    df = _retry(ak.index_zh_daily_sina, symbol=code, source="index_sina")
     provenance.require_columns(df, ["date", "close"], "index_sina")
     df["date"] = pd.to_datetime(df["date"])
     s = df.set_index("date")["close"].astype(float).sort_index()
@@ -46,7 +46,7 @@ def fetch_us_index_sina(code: str, start: Optional[str] = None) -> pd.Series:
     if code not in C.US_INDEX_SYMBOL:
         raise ValueError(f"未知美股指数：{code}")
     symbol = C.US_INDEX_SYMBOL[code]
-    df = _retry(ak.index_us_stock_sina, symbol=symbol, source="index_us_sina")
+    df = _retry(ak.index_us_daily_sina, symbol=symbol, source="index_us_sina")
     provenance.require_columns(df, ["date", "close"], "index_us_sina")
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"])

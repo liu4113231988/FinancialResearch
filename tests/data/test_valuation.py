@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """估值/股息面板（csindex 取数）的回归：列名契约、分位口径与覆盖边界。
 
-取数源统一为 `stock_zh_index_value_csindex`（中证官方，日频）；旧乐咕
+取数源统一为中证官方估值接口（akshare 1.20 起名为 `index_value_csindex`，
+旧名 `stock_zh_index_value_csindex`，日频）；旧乐咕
 `stock_index_pe_lg` 在当前 akshare 版本已缺失。全部离线 mock，不联网。
 """
 import unittest
@@ -51,7 +52,7 @@ class ValuationPanelTests(unittest.TestCase):
         # fetch_pe_panel 返回**原始 PE**（分位由 load_pe_panel 在累积后重算）。
         n = 250 * 9                          # 9 年
         vals = list(np.linspace(8.0, 30.0, n))
-        with patch.object(ak, "stock_zh_index_value_csindex",
+        with patch.object(ak, "index_value_csindex",
                           side_effect=_mock_csindex(vals)):
             df = fetch_pe_panel(["沪深300", "不存在的标的"], verbose=False)
         self.assertIn("沪深300", df.columns)
@@ -62,7 +63,7 @@ class ValuationPanelTests(unittest.TestCase):
         self.assertAlmostEqual(float(raw.iloc[0]), 8.0, places=10)
 
     def test_dividend_panel_converts_percent_to_decimal(self):
-        with patch.object(ak, "stock_zh_index_value_csindex",
+        with patch.object(ak, "index_value_csindex",
                           side_effect=_mock_csindex([10.0] * 30)):
             df = fetch_dividend_panel(["沪深300"], verbose=False)
         # csindex 股息率2 以 % 为单位 → 年化小数

@@ -149,7 +149,7 @@ class DisclosureAndErrorTests(unittest.TestCase):
         from market_research.market.analysis import load_bars
         with tempfile.TemporaryDirectory() as folder, \
              patch.object(C, "DATA_DIR", Path(folder)):
-            with patch.object(ak, "stock_zh_a_hist",
+            with patch.object(ak, "stock_zh_a_hist_em",
                               side_effect=RuntimeError("primary timeout")), \
                  patch.object(ak, "stock_zh_a_hist_tx",
                               side_effect=ValueError("fallback empty")):

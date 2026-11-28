@@ -6,7 +6,8 @@ from market_research.data.http import _retry
 from market_research.errors import ProviderContractError
 
 # 估值面板列名（= PE_SYMBOL 的值）→ 中证官网（csindex）指数代码。
-# ★ 取数源（2026-11-01）：统一只用 `stock_zh_index_value_csindex`（中证官方）。
+# ★ 取数源（2026-11-01）：统一只用中证官方估值接口；akshare 1.20 将其从
+#   `stock_zh_index_value_csindex` 更名为 `index_value_csindex`（列名不变）。
 #   旧实现走乐咕 `stock_index_pe_lg`（月度），当前 akshare 版本已无该接口，
 #   pe_panel 实际处于损坏状态；csindex 是官方日频口径且字段规范。
 #   覆盖边界：csindex 只收录中证/上证系指数 —— 申万行业（801xxx）与
@@ -45,7 +46,7 @@ def _fetch_csindex(symbol_code: str, column: str,
                    lookback_years: float = 8.0) -> Optional[pd.Series]:
     import akshare as ak
     source = "csindex_dividend" if "股息" in column else "csindex_pe"
-    df = _retry(ak.stock_zh_index_value_csindex, tries=2, wait=1.0,
+    df = _retry(ak.index_value_csindex, tries=2, wait=1.0,
                 symbol=symbol_code, source=source)
     s = _csindex_value(df, column)
     if s.empty:

@@ -41,7 +41,7 @@ import market_research.config as C
 from market_research.ordering import rows_order
 
 # 候选指数 → 估值/股息面板列名。取数源为 csindex 官方接口
-# （`stock_zh_index_value_csindex`，日频），列名→代码映射见
+# （akshare 1.20 起名为 `index_value_csindex`，日频），列名→代码映射见
 # `data/providers/valuation.py:CSINDEX_CODE`。
 # ★ 覆盖边界：csindex 只收录中证/上证系指数，估值/股息通道因此只映射这
 #   6 个宽基；申万行业（801xxx）与国证系列（399xxx）不在覆盖范围。

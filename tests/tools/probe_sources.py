@@ -28,17 +28,17 @@ probe("ak.fund_open_fund_info_em(累计净值)",
       lambda: ak.fund_open_fund_info_em(symbol="000001", indicator="累计净值走势"))
 
 # ---------- 指数行情 ----------
-probe("ak.index_zh_a_hist(000300)",
-      lambda: ak.index_zh_a_hist(symbol="000300", period="daily",
-                                 start_date="20230101", end_date="20240110"))
-probe("ak.stock_zh_index_daily_em(sh000300)",
-      lambda: ak.stock_zh_index_daily_em(symbol="sh000300"))
-probe("ak.stock_zh_index_daily(sh000300)",
-      lambda: ak.stock_zh_index_daily(symbol="sh000300"))
-probe("ak.stock_zh_index_daily(sz399006)",
-      lambda: ak.stock_zh_index_daily(symbol="sz399006"))
-probe("ak.stock_zh_index_spot_em",
-      lambda: ak.stock_zh_index_spot_em(symbol="沪深重要指数"))
+probe("ak.index_zh_hist_em(000300)",
+      lambda: ak.index_zh_hist_em(symbol="000300", period="daily",
+                                  start_date="20230101", end_date="20240110"))
+probe("ak.index_zh_daily_em(sh000300)",
+      lambda: ak.index_zh_daily_em(symbol="sh000300"))
+probe("ak.index_zh_daily_sina(sh000300)",
+      lambda: ak.index_zh_daily_sina(symbol="sh000300"))
+probe("ak.index_zh_daily_sina(sz399006)",
+      lambda: ak.index_zh_daily_sina(symbol="sz399006"))
+probe("ak.index_zh_spot_em",
+      lambda: ak.index_zh_spot_em(symbol="沪深重要指数"))
 probe("ak.index_stock_info",
       lambda: ak.index_stock_info())
 

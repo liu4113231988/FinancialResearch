@@ -11,6 +11,11 @@ import threading
 import time
 
 # 供应商契约的机器可读镜像；完整说明见 docs/数据源供应商契约.md。
+# ★ endpoint 记录的是契约订立时的 akshare 函数名：akshare 1.20 起批量改名
+#   （stock_zh_index_daily→index_zh_daily_sina、index_us_stock_sina→index_us_daily_sina、
+#   stock_zh_index_value_csindex→index_value_csindex），字段契约未变。
+#   该字符串同时被 tests/fixtures/providers/contracts.json 与冻结证据引用，
+#   因此保留旧名不随改名漂移；生产调用点已改用新函数名。
 CONTRACTS = {
     "fund_nav": {
         "endpoint": "akshare fund_open_fund_info_em(累计净值走势)",

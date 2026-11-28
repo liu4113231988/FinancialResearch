@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""候选指数池可用性探针（主力通道：新浪 stock_zh_index_daily）。"""
+"""候选指数池可用性探针（主力通道：新浪 index_zh_daily_sina）。"""
 import warnings
 warnings.filterwarnings("ignore")
 import akshare as ak
@@ -32,7 +32,7 @@ for grp, d in POOL.items():
     print(f"\n--- {grp} ---")
     for code, name in d.items():
         try:
-            df = ak.stock_zh_index_daily(symbol=code)
+            df = ak.index_zh_daily_sina(symbol=code)
             print(f"  [OK  ] {code} {name:8s} rows={len(df):5d} "
                   f"{df['date'].iloc[0]} ~ {df['date'].iloc[-1]}")
             ok.append(code)
