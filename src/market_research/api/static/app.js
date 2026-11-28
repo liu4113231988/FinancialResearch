@@ -1561,7 +1561,7 @@ function renderSelected() {
     const range = assessment.oos_start && assessment.oos_end
       ? `${assessment.oos_start} 至 ${assessment.oos_end}` : '—';
     assessmentEl.textContent = [
-      `样本外评估${status[assessment.status] || '未知'}`,
+      `样本外评估${assessment.evidence_label || status[assessment.status] || '未知'}`,
       `有限配对 ${assessment.oos_n ?? '—'} 日`,
       range,
       `有效重估 ${assessment.rebalance_count ?? '—'} 窗`,

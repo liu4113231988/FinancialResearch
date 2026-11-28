@@ -776,6 +776,8 @@ class AssessmentCoverageTest(unittest.TestCase):
                                       7, 1)
         assessment = payload["pcr"]["assessment"]
         self.assertEqual(assessment["status"], "insufficient")
+        self.assertEqual(assessment["evidence_state"], "insufficient")
+        self.assertEqual(assessment["evidence_label"], "评估不足")
         self.assertEqual(assessment["oos_n"], 7)
         self.assertEqual(assessment["oos_gap_n"], 293)
         self.assertEqual(assessment["oos_coverage"], 0.023333)
@@ -795,6 +797,8 @@ class AssessmentCoverageTest(unittest.TestCase):
         rep.extra.clear()
         assessment = model_payload(rep, np.exp(syn.cumsum()))["assessment"]
         self.assertEqual(assessment["status"], "unknown")
+        # 旧报告缺状态不得冒充已验证，落回"评估不足"
+        self.assertEqual(assessment["evidence_state"], "insufficient")
         self.assertEqual(assessment["reasons"], [])
         for key in ("oos_n", "oos_start", "oos_end", "oos_coverage", "rebalance_count"):
             self.assertIsNone(assessment[key])
@@ -849,7 +853,11 @@ class AssessmentCoverageTest(unittest.TestCase):
         self.assertIn("30%", ins["exposure_gap"]["text"])
 
     def test_sufficient_evidence_keeps_replication_wording_with_caveat(self):
-        _, rank, ins = self._case("sufficient", [], 300, 10)
+        payload, rank, ins = self._case("sufficient", [], 300, 10)
+        self.assertEqual(payload["pcr"]["assessment"]["evidence_state"],
+                         "historical_diagnostic")
+        self.assertEqual(payload["pcr"]["assessment"]["evidence_label"],
+                         "历史诊断可用")
         self.assertEqual(rank.iloc[0]["评估状态"], "有效")
         self.assertTrue(ins["penetration"]["ok"])
         self.assertIn("可被上述赛道指数直接复制", ins["penetration"]["text"])

@@ -5,7 +5,9 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from market_research.market.technical import indicators, wilder, features_for, direction_forecast, compare_forecasts, analyze_technical
+from market_research.market.technical import (indicators, wilder, features_for,
+    direction_forecast, compare_forecasts, analyze_technical,
+    evidence_state, EVIDENCE_STATES, EVIDENCE_LABELS)
 from market_research.funds.payloads import _jsafe
 
 
@@ -129,6 +131,25 @@ class TechnicalTests(unittest.TestCase):
 class C2EvaluationContractTests(unittest.TestCase):
     """C2/P3-P：可计算 != 评估充分；少样本主指标留空，诊断字段保留。"""
 
+    def test_evidence_states_never_claim_verified(self):
+        self.assertEqual(len(EVIDENCE_STATES), 4)
+        self.assertEqual(set(EVIDENCE_LABELS), set(EVIDENCE_STATES))
+        self.assertEqual(evidence_state(computable=False,
+                                        assessment_status='sufficient'),
+                         'not_computable')
+        self.assertEqual(evidence_state(computable=True,
+                                        assessment_status='insufficient'),
+                         'insufficient')
+        self.assertEqual(evidence_state(computable=True,
+                                        assessment_status='sufficient'),
+                         'historical_diagnostic')
+        # 进入预注册验收也不输出"已验证"，只是独立验证待完成
+        self.assertEqual(evidence_state(computable=True,
+                                        assessment_status='sufficient',
+                                        verification_started=True),
+                         'independent_verification_pending')
+        self.assertNotIn('verified', ' '.join(EVIDENCE_STATES))
+
     @staticmethod
     def _seed99_frame(n=800):
         rng = np.random.default_rng(99)
@@ -146,6 +167,7 @@ class C2EvaluationContractTests(unittest.TestCase):
         self.assertEqual(out['ok'], out['computable'])
         self.assertEqual(ev['n'], 12)          # 252 展示窗内只有 12 个非重叠起点
         self.assertEqual(ev['assessment_status'], 'insufficient')
+        self.assertEqual(out['evidence_state'], 'insufficient')
         self.assertIsNone(ev['primary'])
         self.assertIsNone(ev['advantage'])
         self.assertGreater(out['training_rows'], 0)
@@ -162,6 +184,7 @@ class C2EvaluationContractTests(unittest.TestCase):
         ev = out['evaluation']
         self.assertEqual(ev['n'], 0)
         self.assertEqual(ev['assessment_status'], 'insufficient')
+        self.assertEqual(out['evidence_state'], 'not_computable')
         self.assertIsNone(ev['primary'])
         self.assertIsNone(ev['advantage'])
         self.assertEqual(ev['class_distribution'], {'up': 0, 'down': 0, 'flat': 0})
@@ -175,6 +198,7 @@ class C2EvaluationContractTests(unittest.TestCase):
         out = compare_forecasts(frame, base, candidate, 20, frame.index[-252])
         self.assertEqual(out['n'], 12)
         self.assertEqual(out['assessment_status'], 'insufficient')
+        self.assertEqual(out['evidence_state'], 'insufficient')
         self.assertIsNone(out['primary'])
         self.assertEqual(sum(out['class_distribution'].values()), out['n'])
         # 兼容字段仍给出，供研究诊断；不得据此宣称优势
@@ -189,6 +213,7 @@ class C2EvaluationContractTests(unittest.TestCase):
         out = compare_forecasts(frame, base, candidate, 5, frame.index[0])
         self.assertGreater(out['n'], 20)
         self.assertEqual(out['assessment_status'], 'sufficient')
+        self.assertEqual(out['evidence_state'], 'historical_diagnostic')
         self.assertIsNotNone(out['primary'])
         self.assertAlmostEqual(out['primary']['brier_improvement'],
                                out['brier_improvement'])

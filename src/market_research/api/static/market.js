@@ -280,7 +280,10 @@ window.MarketApp = (() => {
       if(!f.ok){box.append(part('strong','样本不足'),part('p',f.reason+' 可等待数据中心补齐历史后重试。'));return box;}
       const e=f.evaluation;
       box.append(part('strong',pct(f.probability)),part('p','模型估计上涨概率 · 当前收盘至未来收盘'));
-      box.append(part('span',!e.ok?'验证样本不足':e.advantage?'历史 Brier 优于频率基准':'历史 Brier 未优于频率基准','forecast-verdict'));
+      const evidenceText={not_computable:'不可计算',insufficient:'评估不足',
+        historical_diagnostic:'历史诊断可用',independent_verification_pending:'独立验证待完成'};
+      box.append(part('span',evidenceText[e.evidence_state] ||
+        (!e.ok?'验证样本不足':e.advantage?'历史 Brier 优于频率基准':'历史 Brier 未优于频率基准'),'forecast-verdict'));
       if(e.n){box.append(part('p',`历史 ${e.n} 笔非重叠评估 · 方向准确率 ${pct(e.accuracy)} / 基准 ${pct(e.baseline_accuracy)}`),part('p',`Brier ${e.brier.toFixed(3)} / 基准 ${e.baseline_brier.toFixed(3)} · 越小越好`),part('small',`${e.start} — ${e.end}`));}
       else box.append(part('p','所选区间尚无成熟评估标签。'));
       box.append(part('small',`训练 ${f.training_rows} 个已成熟样本；概率未单独校准。`)); return box;

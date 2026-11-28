@@ -12,7 +12,8 @@ from market_research.modeling.models import MODELS, ModelReport
 from market_research.modeling.engine import MIN_OOS_SESSIONS, MIN_REFITS
 from market_research.modeling.signals import health_stats
 from market_research.modeling.trends import trend_payload
-from market_research.market.technical import series_forecast, MIN_TRAIN
+from market_research.market.technical import (series_forecast, MIN_TRAIN,
+    evidence_state, EVIDENCE_LABELS)
 from market_research.data.providers.funds import NAV_OBSERVATION_FIELDS, nav_series_version
 
 
@@ -469,6 +470,9 @@ def _alpha_stats(fund_line: pd.Series, syn_line: pd.Series) -> dict:
 def model_payload(rep: ModelReport, nav_oos: pd.Series,
                   max_points: int = 400) -> dict:
     """单个模型的完整可视化数据。"""
+    assess_status = rep.extra.get("assessment_status") or "unknown"
+    ev_state = evidence_state(computable=assess_status != "failed",
+                              assessment_status=assess_status)
     syn = rep.syn_ret.dropna()
     syn_nav = np.exp(syn.cumsum())
     # 把基金净值与合成基准都归一到起点=1，才能在同一坐标轴上比较形状。
@@ -511,7 +515,9 @@ def model_payload(rep: ModelReport, nav_oos: pd.Series,
         "extra": _jsafe({k: v for k, v in rep.extra.items() if v is not None}),
         # B2/P3-R：评估块记录有限配对覆盖，旧报告缺少状态时标为 unknown。
         "assessment": _jsafe({
-            "status": rep.extra.get("assessment_status") or "unknown",
+            "status": assess_status,
+            "evidence_state": ev_state,
+            "evidence_label": EVIDENCE_LABELS[ev_state],
             "reasons": list(rep.extra.get("assessment_reasons") or []),
             "oos_n": rep.extra.get("oos_n"),
             "oos_start": rep.extra.get("oos_start"),

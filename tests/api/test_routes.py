@@ -180,6 +180,8 @@ class RouteTests(unittest.TestCase):
         assessment = analysis["models"]["ridge"]["assessment"]
         self.assertEqual(assessment, {
             "status": "insufficient",
+            "evidence_state": "insufficient",
+            "evidence_label": "评估不足",
             "reasons": ["样本外仅 7 个交易日，低于门槛 60", "有效重估窗口仅 1 个，低于门槛 3"],
             "oos_n": 7,
             "oos_start": "2025-07-03",

@@ -18,6 +18,31 @@ REFIT = 21
 # 仅用于**并列展示**"平盘算下跌"与"剔除平盘"两种评分，不改变训练标签。
 FLAT_RETURN_EPSILON = 1e-9
 
+# C2/P3-P：证据强度只用可核实描述，不把启发式分数汇成"可靠性百分比"。
+EVIDENCE_STATES = ("not_computable", "insufficient", "historical_diagnostic",
+                   "independent_verification_pending")
+EVIDENCE_LABELS = {
+    "not_computable": "不可计算",
+    "insufficient": "评估不足",
+    "historical_diagnostic": "历史诊断可用",
+    "independent_verification_pending": "独立验证待完成",
+}
+
+
+def evidence_state(*, computable: bool, assessment_status: str,
+                   verification_started: bool = False) -> str:
+    """四态证据状态；预注册验收未完成前不得声称"已验证"。
+
+    `verification_started` 仅表示该结果已进入预注册验收流程且尚无结论；
+    即便进入，状态也只是"独立验证待完成"，历史回放本身不构成验证。
+    """
+    if not computable:
+        return "not_computable"
+    if assessment_status != "sufficient":
+        return "insufficient"
+    return ("independent_verification_pending" if verification_started
+            else "historical_diagnostic")
+
 
 def wilder(series, period=14):
     """Wilder smoothing seeded by the first complete arithmetic average."""
@@ -181,7 +206,11 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
     latest = probability.iloc[-1]
     computable = bool(pd.notna(latest))
     return {"horizon": horizon, 'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
-            "ok": computable, "computable": computable, "probability": latest,
+            "ok": computable, "computable": computable,
+            "evidence_state": evidence_state(
+                computable=computable,
+                assessment_status=evaluation["assessment_status"]),
+            "probability": latest,
             "baseline": baseline.iloc[-1],
             "training_rows": training_rows, "minimum_training_rows": MIN_TRAIN,
             "evaluation": evaluation, "series": probability.loc[display_start:].tolist(),
@@ -220,6 +249,9 @@ def compare_forecasts(bars, base, candidate, horizon, display_start, context=Non
     sufficient = n >= 20
     result = {'n': n, 'ok': sufficient,
               'assessment_status': 'sufficient' if sufficient else 'insufficient',
+              'evidence_state': evidence_state(
+                  computable=bool(n),
+                  assessment_status='sufficient' if sufficient else 'insufficient'),
               'primary': None, 'start': None, 'end': None,
               'class_distribution': {'up': 0, 'down': 0, 'flat': 0},
               'horizon_basis':'calendar_sessions' if calendar is not None else 'observed_bars',
