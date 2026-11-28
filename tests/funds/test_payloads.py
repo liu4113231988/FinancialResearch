@@ -913,5 +913,97 @@ class FundForecastEvidenceTest(unittest.TestCase):
                           {"insufficient", "independent_verification_pending"})
 
 
+class FundForecastCoverageTest(unittest.TestCase):
+    """C2 第4条：覆盖清单与类型/环境分组，缺项不从总体中消失。"""
+
+    @staticmethod
+    def _nav(n=1100, seed=5):
+        rng = np.random.default_rng(seed)
+        idx = pd.bdate_range("2020-01-01", periods=n)
+        return pd.Series(1 + np.cumsum(rng.normal(.0004, .01, n)), index=idx)
+
+    @staticmethod
+    def _calendar(start, end):
+        return pd.bdate_range(start, end)
+
+    def test_missing_quotes_and_suspected_stop_are_listed(self):
+        from market_research.funds.payloads import fund_forecast_payload
+        nav = self._nav()
+        nav = nav.drop(nav.index[600])            # 中间缺一天
+        calendar = self._calendar(nav.index[0], nav.index[-1] + pd.Timedelta(days=30))
+        cov = fund_forecast_payload(nav, fund_type="股票型-普通",
+                                    calendar=calendar)["coverage"]
+        items = {item["item"]: item for item in cov["items"]}
+        self.assertEqual(items["缺行情"]["status"], "present")
+        self.assertEqual(items["缺行情"]["count"], 1)
+        self.assertEqual(items["停更/清算退市"]["status"], "suspected")
+        self.assertEqual(items["基金类型"]["status"], "known")
+        self.assertEqual(items["基金类型"]["detail"], "股票型-普通")
+        self.assertEqual(cov["groups"][0]["name"], "股票型-普通")
+
+    def test_constant_nav_reports_single_class_and_training_failure(self):
+        from market_research.funds.payloads import fund_forecast_payload
+        idx = pd.bdate_range("2020-01-01", periods=600)
+        flat = pd.Series(1.0, index=idx)
+        result = fund_forecast_payload(flat, fund_type=None)
+        self.assertFalse(result["available"])
+        items = {item["item"]: item for item in result["coverage"]["items"]}
+        self.assertEqual(items["基金类型"]["status"], "unknown")
+        self.assertIn("未提供类型", items["基金类型"]["detail"])
+        # 单类别/训练失败必须留在清单里，而不是因为不可用就消失
+        klass = [item for item in result["coverage"]["items"]
+                 if item["kind"] == "class"]
+        self.assertTrue(klass)
+        self.assertTrue(all(item["status"] in {"single_class", "both",
+                                               "insufficient"} for item in klass))
+        self.assertTrue(any(item["status"] == "single_class" for item in klass))
+        failures = [item for item in result["coverage"]["items"]
+                    if item["kind"] == "failure"]
+        self.assertTrue(failures)
+        self.assertTrue(all(("不可用" in item["detail"])
+                            or ("样本" in item["detail"]) for item in failures))
+
+    def test_benchmark_splits_evaluation_by_regime(self):
+        from market_research.funds.payloads import fund_forecast_payload
+        nav = self._nav()
+        benchmark = pd.Series(
+            100 * np.exp(np.cumsum(np.random.default_rng(11).normal(.0003, .012,
+                                                                    len(nav)))),
+            index=nav.index)
+        result = fund_forecast_payload(nav, fund_type="混合型-偏股",
+                                       benchmark=benchmark)
+        coverage = result["coverage"]
+        regimes = [g for g in coverage["groups"] if g["kind"] == "market_regime"]
+        self.assertTrue(regimes)
+        self.assertEqual(sum(g["n"] for g in regimes),
+                         sum((item["evaluation"] or {}).get("n") or 0
+                             for item in result["horizons"]))
+        horizon_0 = result["horizons"][0]["evaluation"]["regimes"]
+        self.assertEqual([row["regime"] for row in horizon_0],
+                         ["strong", "weak", "mixed", "unknown"])
+        self.assertTrue(all(row["ok"] == (row["n"] >= 20) for row in horizon_0))
+
+    def test_recent_nav_is_not_flagged_as_inactive(self):
+        from market_research.funds.payloads import fund_forecast_payload
+        nav = self._nav(n=400)
+        nav.index = pd.bdate_range(end=pd.Timestamp.today().normalize(),
+                                   periods=400)
+        calendar = pd.bdate_range(nav.index[0],
+                                  nav.index[-1] + pd.Timedelta(days=60))
+        cov = fund_forecast_payload(nav, calendar=calendar)["coverage"]
+        items = {item["item"]: item for item in cov["items"]}
+        # 日历覆盖到未来，不能因此把最新净值判成停更
+        self.assertEqual(items["停更/清算退市"]["status"], "none")
+        self.assertEqual(items["缺行情"]["status"], "none")
+
+    def test_calendar_absence_is_explicit_not_silent(self):
+        from market_research.funds.payloads import fund_forecast_payload
+        cov = fund_forecast_payload(self._nav(), calendar=None)["coverage"]
+        items = {item["item"]: item for item in cov["items"]}
+        self.assertEqual(items["缺行情"]["status"], "unknown")
+        self.assertEqual(items["停更/清算退市"]["status"], "unknown")
+        self.assertEqual(items["市场环境基准"]["status"], "unknown")
+
+
 if __name__ == "__main__":
     unittest.main()

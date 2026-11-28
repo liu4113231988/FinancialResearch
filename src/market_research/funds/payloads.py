@@ -164,10 +164,20 @@ def nav_block(panel: pd.DataFrame, nav: pd.Series) -> dict:
 
 def fund_forecast_payload(nav: pd.Series, horizons=(5, 20),
                           max_points: int = 400, *,
-                          verification_started: bool = False) -> dict:
+                          verification_started: bool = False,
+                          fund_type: Optional[str] = None,
+                          benchmark: Optional[pd.Series] = None,
+                          calendar: Optional[pd.DatetimeIndex] = None) -> dict:
     series = nav.astype(float).dropna()
+    regimes = _benchmark_regimes(benchmark)
     result = _fund_forecast(series, horizons, max_points,
-                            verification_started=verification_started)
+                            verification_started=verification_started,
+                            regimes=regimes)
+    result["coverage"] = _fund_forecast_coverage(
+        series=series, items=result.get("horizons") or [],
+        fund_type=fund_type, benchmark=benchmark, calendar=calendar,
+        regime_available=regimes is not None,
+        failure=result.get("reason"))
     basis = nav.attrs.get("nav_basis")
     result["meta"] = {
         **{key: nav.attrs.get(key) for key in NAV_OBSERVATION_FIELDS},
@@ -180,8 +190,129 @@ def fund_forecast_payload(nav: pd.Series, horizons=(5, 20),
     return result
 
 
+def _benchmark_regimes(benchmark: Optional[pd.Series]) -> Optional[pd.Series]:
+    """用基准收盘价给出强/弱/分歧/未知的环境标签（与股票技术卡同一口径）。"""
+    if benchmark is None:
+        return None
+    try:
+        ref = pd.Series(benchmark).astype(float).dropna().sort_index()
+        ref = ref[ref > 0]
+    except Exception:                                        # noqa: BLE001
+        return None
+    if len(ref) < 80:
+        return None
+    from market_research.market.context import market_regimes
+    gap = ref / ref.rolling(60).mean() - 1
+    momentum = ref.pct_change(20, fill_method=None)
+    return market_regimes(pd.DataFrame({"benchmark_gap60": gap,
+                                        "benchmark_return20": momentum}))
+
+
+def _fund_forecast_coverage(*, series: pd.Series, items, fund_type=None,
+                            benchmark=None, calendar=None,
+                            regime_available: bool = False,
+                            failure: Optional[str] = None) -> dict:
+    """基金方向评估的覆盖清单：每类样本要么可用，要么写明为什么不可用。
+
+    缺行情、停更/清算退市、单类别、训练失败都必须出现在清单里，不能因为
+    "没通过"就从总体中消失；分组只按可核实字段（基金类型/市场环境），不猜。
+    """
+    entries = []
+
+    def add(kind, item, status, detail=None, **extra):
+        entries.append({"kind": kind, "item": item, "status": status,
+                        "detail": detail, **extra})
+
+    add("nav_axis", "基金独立净值轴", "present",
+        f"{len(series)} 个净值日 {series.index[0].date()}~{series.index[-1].date()}；"
+        "不与候选指数对齐，指数缺日不改写基金日期" if len(series) else "净值序列为空")
+    add("fund_type", "基金类型",
+        "known" if fund_type else "unknown",
+        fund_type or "目录/基本信息接口未提供类型，无法按类型分组")
+    if calendar is not None and len(series):
+        # 供应商日历覆盖到未来（含未发生的交易日）：一律按"今天"截断，
+        # 否则任何基金的净值都会显得"停在未来之前"，被判成疑似停更。
+        today = pd.Timestamp.today().normalize()
+        sessions = calendar[(calendar >= series.index[0])
+                            & (calendar <= min(series.index[-1], today))]
+        missing = sessions.difference(series.index)
+        tail = calendar[(calendar > series.index[-1]) & (calendar <= today)]
+        add("missing_quotes", "缺行情",
+            "present" if len(missing) else "none",
+            f"{len(missing)} 个交易日无净值；保留原样不补值" if len(missing)
+            else "区间内每个交易日都有净值",
+            count=int(len(missing)))
+        add("inactive", "停更/清算退市",
+            "suspected" if len(tail) >= 10 else "none",
+            (f"最新净值停在 {series.index[-1].date()}，其后已有 {len(tail)} 个交易日无净值；"
+             "仅凭停更无法区分清算、合并或数据源延迟，需人工核对")
+            if len(tail) >= 10 else "最新净值覆盖到区间末端",
+            count=int(len(tail)))
+    else:
+        add("missing_quotes", "缺行情", "unknown", "未核对供应商交易日历")
+        add("inactive", "停更/清算退市", "unknown", "未核对供应商交易日历")
+    add("benchmark", "市场环境基准",
+        "present" if regime_available else "unknown",
+        "以基准收盘价相对 MA60 与 20 日动量分组（strong/weak/mixed/unknown）"
+        if regime_available else
+        ("基准序列不足 80 个交易日，环境分组留空" if benchmark is not None
+         else "本次未取基准行情，环境分组留空"))
+    for item in items:
+        horizon = item.get("horizon")
+        evaluation = item.get("evaluation") or {}
+        distribution = evaluation.get("class_distribution") or {}
+        total_class = sum(int(distribution.get(key) or 0) for key in ("up", "down", "flat"))
+        add("training", f"{horizon} 日训练样本",
+            "present" if item.get("training_rows") else "insufficient",
+            f"{item.get('training_rows') or 0} 个成熟训练行（下限 "
+            f"{item.get('minimum_training_rows') or 0}）")
+        classes = item.get("training_classes")
+        if classes == 1:
+            add("class", f"{horizon} 日标签类别", "single_class",
+                "训练窗口只有单一涨/跌类别，模型无法拟合")
+        elif total_class:
+            single = max(int(distribution.get(key) or 0) for key in ("up", "down", "flat"))
+            add("class", f"{horizon} 日标签类别",
+                "single_class" if single == total_class and total_class > 0 else "both",
+                f"up={distribution.get('up')} down={distribution.get('down')} "
+                f"flat={distribution.get('flat')}")
+        else:
+            add("class", f"{horizon} 日标签类别", "insufficient",
+                "尚无成熟评估标签，类别分布未知")
+        add("evaluation", f"{horizon} 日评估样本",
+            "sufficient" if evaluation.get("ok") else "insufficient",
+            f"{evaluation.get('n') or 0} 个非重叠成熟样本（展示下限 20）")
+        if not item.get("ok"):
+            add("failure", f"{horizon} 日模型不可用", "present",
+                item.get("reason") or evaluation.get("assessment_status") or "未给出原因")
+    if failure:
+        add("failure", "方向模型整体不可用", "present", failure)
+
+    groups = [{"kind": "fund_type", "name": fund_type or "unknown",
+               "ok": bool(fund_type), "n_horizons": len(items)}]
+    regime_rows: dict[str, dict] = {}
+    for item in items:
+        for row in (item.get("evaluation") or {}).get("regimes") or []:
+            slot = regime_rows.setdefault(row["regime"], {
+                "kind": "market_regime", "name": row["regime"], "n": 0,
+                "ok": False, "horizons": []})
+            slot["n"] += int(row.get("n") or 0)
+            slot["horizons"].append({"horizon": item.get("horizon"),
+                                     "n": row.get("n"), "ok": row.get("ok")})
+    for row in regime_rows.values():
+        per = [entry["n"] or 0 for entry in row["horizons"]]
+        row["ok"] = bool(per) and all(n >= 20 for n in per)
+    groups.extend(regime_rows.values())
+    return {"basis": "基金独立净值轴",
+            "items": entries, "groups": groups,
+            "note": "覆盖清单逐项保留缺行情、停更/清算退市、单类别与训练失败，"
+                    "不从总体中删除；分组只按可核实的基金类型与基准环境，"
+                    "小样本组不宣称优劣。"}
+
+
 def _fund_forecast(s: pd.Series, horizons, max_points: int, *,
-                   verification_started: bool = False) -> dict:
+                   verification_started: bool = False,
+                   regimes: Optional[pd.Series] = None) -> dict:
     """基金净值的方向概率。
 
     与模型详情的「趋势色带」是两件事：色带只描述已经发生的形态，
@@ -198,7 +329,8 @@ def _fund_forecast(s: pd.Series, horizons, max_points: int, *,
         items = []
         sampled = None
         for h in horizons:
-            f = series_forecast(s, h, verification_started=verification_started)
+            f = series_forecast(s, h, verification_started=verification_started,
+                                regimes=regimes)
             ser = pd.Series(f["series"], index=s.index, dtype=float)
             sl = ser.iloc[::step]
             if len(ser) and sl.index[-1] != ser.index[-1]:
@@ -212,6 +344,7 @@ def _fund_forecast(s: pd.Series, horizons, max_points: int, *,
                 "baseline": _jnum(f["baseline"], 4),
                 "training_rows": int(f["training_rows"] or 0),
                 "minimum_training_rows": int(f["minimum_training_rows"] or 0),
+                "training_classes": f.get("training_classes"),
                 "evidence_state": f.get("evidence_state"),
                 "evidence_label": f.get("evidence_label"),
                 # C3：周期时钟与是否校准必须随卡片给出，页面不能靠猜

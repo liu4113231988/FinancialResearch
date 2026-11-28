@@ -23,6 +23,26 @@ def nav_series_version(series: pd.Series, basis: str) -> str:
     return hashlib.sha256(basis.encode() + dates.tobytes() + values.tobytes()).hexdigest()
 
 
+def fund_type(code: str) -> Optional[str]:
+    """基金类型（如"股票型-普通"），用于方向评估按类型分组。
+
+    取不到就返回 None，由调用方在覆盖清单里写"类型未知"；绝不按名称猜类型。
+    """
+    import akshare as ak
+    try:
+        frame = _retry(ak.fund_individual_basic_info_xq,
+                       symbol=str(code).zfill(6), source="fund_info")
+    except ProviderContractError:
+        raise
+    except Exception:                                        # noqa: BLE001
+        return None
+    if frame is None or frame.empty or not {"item", "value"} <= set(frame.columns):
+        return None
+    pairs = dict(zip(frame["item"].astype(str), frame["value"].astype(str)))
+    value = (pairs.get("基金类型") or "").strip()
+    return value or None
+
+
 def _observed_nav(series: pd.Series, basis: str, observed_at: datetime) -> pd.Series:
     if not series.empty:
         series.attrs.update(

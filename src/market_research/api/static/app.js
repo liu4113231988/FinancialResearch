@@ -2098,12 +2098,25 @@ function renderFundForecast() {
   const f = S.result && S.result.forecast;
   const el = $('fundForecast'), note = $('fundForecastNote');
   if (!el) return;
+  // C2 第4条：覆盖清单与分组必须始终可见，缺样本/停更/单类别/训练失败不许消失
+  const cov = (f && f.coverage) || {};
+  const okStates = ['none', 'known', 'present', 'sufficient', 'both'];
+  const issues = (cov.items || []).filter(i => okStates.indexOf(i.status) < 0);
+  const groups = (cov.groups || []).map(g => g.kind === 'fund_type'
+    ? `类型 ${g.name}`
+    : `环境 ${g.name} ${g.n} 笔${g.ok ? '' : '（样本不足）'}`).join(' · ');
+  const covHtml =
+    (cov.items ? `<br/>覆盖清单：<b>${issues.length
+      ? issues.map(i => `${i.item}：${i.detail}`).join('；')
+      : '无缺项'}</b>` : '') +
+    (groups ? `<br/>分组：${escapeHtml(groups)}` : '');
   if (!f || !f.available) {
     const why = (f && f.reason) || '净值样本不足，方向概率不可用';
     el.innerHTML =
       `<div class="kpi bad"><div class="lb">方向概率</div>` +
       `<div class="vl">不可用</div><div class="sb">${escapeHtml(why)}</div></div>`;
-    if (note) note.innerHTML = '方向模型未通过可用性检查，因此<b>不显示任何概率</b>，避免被误读成正常值。';
+    if (note) note.innerHTML =
+      '方向模型未通过可用性检查，因此<b>不显示任何概率</b>，避免被误读成正常值。' + covHtml;
     return;
   }
   el.innerHTML = f.horizons.map(h => {
@@ -2130,7 +2143,7 @@ function renderFundForecast() {
   if (note) note.innerHTML =
     `${escapeHtml(f.disclaimer || '')} 上方趋势色带只描述<b>已经发生</b>的形态；本区块才是方向概率，` +
     `截止 ${escapeHtml(f.as_of || '—')}，周期按${f.horizons && f.horizons[0] && f.horizons[0].horizon_basis === 'calendar_sessions' ? '交易日历' : '有效净值日'}计数；` +
-    '概率未做校准，证据状态只说明样本是否足够，不等于已验证；两者都不构成买卖建议。';
+    '概率未做校准，证据状态只说明样本是否足够，不等于已验证；两者都不构成买卖建议。' + covHtml;
 }
 
 function drawMonthly(monthly, years) {

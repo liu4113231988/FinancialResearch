@@ -1,6 +1,6 @@
 # 测试说明
 
-核对日期：2026-11-28（Python 3.14.10）。最新全量回归：695 项 unittest 通过，四套前端脚本通过。先在项目根目录运行 `uv sync --locked`。下列命令使用可安装的 `market_research` 包及当前测试目录；无需修改 `PYTHONPATH`。
+核对日期：2026-11-28（Python 3.14.10）。最新全量回归：700 项 unittest 通过，四套前端脚本通过。先在项目根目录运行 `uv sync --locked`。下列命令使用可安装的 `market_research` 包及当前测试目录；无需修改 `PYTHONPATH`。
 
 | 目录 | 内容 |
 | --- | --- |
@@ -72,6 +72,8 @@ uv build
 wheel 检查应在独立虚拟环境安装构建产物，在源码目录之外验证控制台命令、静态资源和 SQL 可读取；源码兼容脚本不是安装包用户的调用方式。
 
 ## 已有验证记录
+
+基金分类样本与覆盖清单（2026-11-28）：`fund_forecast_payload` 输出 `coverage`（基金独立净值轴、基金类型、缺行情、停更/清算退市、逐周期训练/标签类别/评估样本/失败原因）与 `groups`（基金类型 + 基准 strong/weak/mixed/unknown 环境，每组 n/ok），缺项一律留在清单里；`direction_forecast` 新增可选 `regimes` 分组；页面方向卡在可用/不可用两种状态都显示覆盖清单。回归覆盖中间缺日、停更疑似、健康基金不误判、常数净值单类别、分组人数一致、无日历/基准显式 unknown。
 
 证据与状态链路一轮（2026-11-28）：台账驱动 `verification_started`（四态中"独立验证待完成"只在台账 `in_progress/evaluating` 且结果落在留出区间时出现）+ 第6条验收场景；新增 `market_research/status.py` 五层状态并由基金/市场/CLI/入账后统一刷新，`status_layers` 进入页面徽标、JSON/CSV/HTML 导出与报告；基金方向卡补 `horizon_basis`/`calibration`/证据标签；`ModelZoo._attach_common_oos` 增加共同 OOS 配对块自助区间（跨 0 不宣称优劣）。**695 项 unittest、两套脚本回归、四套前端回归与 `compileall` 通过**（CPython 3.14.10）；隔离服务实测 `POST /api/v1/market/analyze`（600519）结果信封含 `status_layers`（计算 ok / 数据 ok / 证据 sufficient / 入账 not_recorded），两条 5/20 日预测返回 `historical_diagnostic` 与 n=124/30、`calendar_sessions`。**未跑**浏览器 CDP 交互验收与真实基金 11 模型全量分析。
 

@@ -109,7 +109,7 @@ def features_for(bars, ind):
 
 
 def direction_forecast(bars, features, horizon, display_start, training_end=None, *, calendar=None,
-                       verification_started: bool = False):
+                       verification_started: bool = False, regimes=None):
     """Fixed model; train labels must have matured by each prediction close.
 
     Scaler is fitted only on training rows. No shuffled CV or full-sample tuning.
@@ -120,6 +120,8 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
     probability = pd.Series(np.nan, index=bars.index)
     baseline = probability.copy()
     model, fitted_at, training_rows = None, -REFIT, 0
+    # 训练标签类别数：1 表示只有单一涨/跌类别（模型无法拟合），供覆盖清单写明原因。
+    training_classes = None
     cutoff = axis.searchsorted(pd.Timestamp(training_end), side='right') - 1 if training_end else None
     last_train_end = None
     for i in range(len(bars)):
@@ -139,6 +141,7 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
                     model.fit(train, target)
                 else:
                     model = None
+                training_classes = int(target.nunique())
                 prior = float(target.mean())
                 fitted_at = positions[i]
                 last_train_end = train_end
@@ -170,6 +173,10 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
                   "neutral_epsilon": FLAT_RETURN_EPSILON,
                   "primary": None, "advantage": None,
                   "class_distribution": {"up": 0, "down": 0, "flat": 0}}
+    if regimes is not None:
+        # C2 第4条：按市场环境分组披露，分组人数不参与"是否充分"的总判定，
+        # 每组各自给 ok（≥20 才可展示结论），小样本组不得宣称优劣。
+        evaluation["regimes"] = []
     if n:
         actual = evaluated.actual
         evaluation.update(accuracy=float(((evaluated.probability >= .5) == actual).mean()),
@@ -182,6 +189,23 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
             "flat": int(flat.sum()),
             "up": int(((actual == 1) & ~flat).sum()),
             "down": int(((actual == 0) & ~flat).sum())}
+        if regimes is not None:
+            labels_regime = regimes.reindex(evaluated.index).fillna("unknown")
+            rows = []
+            for name in ("strong", "weak", "mixed", "unknown"):
+                mask = (labels_regime == name).to_numpy()
+                count = int(mask.sum())
+                item = {"regime": name, "n": count, "ok": count >= 20}
+                if count:
+                    prob = evaluated.probability.to_numpy()[mask]
+                    base = evaluated.baseline.to_numpy()[mask]
+                    target = actual.to_numpy()[mask]
+                    item.update(
+                        accuracy=float(((prob >= .5) == target).mean()),
+                        brier=float(((prob - target) ** 2).mean()),
+                        baseline_brier=float(((base - target) ** 2).mean()))
+                rows.append(item)
+            evaluation["regimes"] = rows
         if sufficient:
             evaluation["primary"] = {
                 "accuracy": evaluation["accuracy"], "brier": evaluation["brier"],
@@ -218,12 +242,13 @@ def direction_forecast(bars, features, horizon, display_start, training_end=None
             "probability": latest,
             "baseline": baseline.iloc[-1],
             "training_rows": training_rows, "minimum_training_rows": MIN_TRAIN,
+            "training_classes": training_classes,
             "evaluation": evaluation, "series": probability.loc[display_start:].tolist(),
             "reason": "至少需要 252 个已成熟训练样本及约 65 日指标预热；单一涨跌类别无法训练。" if pd.isna(latest) else None}
 
 
 def series_forecast(nav, horizon, display_start=None, *, calendar=None,
-                    verification_started: bool = False):
+                    verification_started: bool = False, regimes=None):
     """把只有净值/收盘价的序列当作退化 OHLC 喂给 `direction_forecast`。
 
     基金净值没有开高低收，用同一个收盘价填满 OHLC 后，ATR/布林/均线等
@@ -237,7 +262,8 @@ def series_forecast(nav, horizon, display_start=None, *, calendar=None,
     features = features_for(bars, ind)
     return direction_forecast(bars, features, horizon,
                               display_start or nav.index[0], calendar=calendar,
-                              verification_started=verification_started)
+                              verification_started=verification_started,
+                              regimes=regimes)
 
 
 def compare_forecasts(bars, base, candidate, horizon, display_start, context=None, *, calendar=None,

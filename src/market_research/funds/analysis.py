@@ -158,6 +158,42 @@ def _n_rebal(reps: dict) -> int:
                  if not r.weights_hist.empty), 0)
 
 
+def _fund_type(code: str) -> Optional[str]:
+    """基金类型（目录口径）。只读缓存优先；取不到就返回 None，不猜类型。"""
+    cached = _cache_load(code, "ftype")
+    if isinstance(cached, dict) and "type" in cached:
+        return cached["type"]
+    try:
+        from market_research.data.providers.funds import fund_type
+        value = fund_type(code)
+    except Exception:                                        # noqa: BLE001
+        value = None
+    _cache_save(code, "ftype", {"type": value})
+    return value
+
+
+def _forecast_benchmark(panel: pd.DataFrame) -> Optional[pd.Series]:
+    """方向评估的市场环境基准取沪深300；缺这一列就不分组，不拿别的指数顶替。"""
+    for key in ("sh000300", "000300"):
+        if key in panel.columns:
+            series = panel[key].dropna()
+            return series if len(series) else None
+    return None
+
+
+def _forecast_calendar(start, end) -> Optional[pd.DatetimeIndex]:
+    """供应商交易日历（随包文件，不联网）；不可用时返回 None 让覆盖清单写明未核对。"""
+    try:
+        from market_research.data.providers.calendar import bundled_calendar
+        # bundled_calendar 只按 ISO 字符串裁剪；传 Timestamp 会拿到全量日历。
+        sessions, _info = bundled_calendar(
+            pd.Timestamp(start).date().isoformat(),
+            pd.Timestamp(end).date().isoformat())
+        return sessions
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
 def _verification_flag(as_of) -> bool:
     """结果是否已进入预注册验收且尚无结论（见 research.future_validation）。
 
@@ -221,9 +257,13 @@ def analyze(code: str, models: Optional[List[str]] = None,
     verify = _verification_flag(nav.index[-1])
     forecast = cp.load("forecast")
     # 检查点可能带着上一轮的证据状态；台账状态变化后必须重建，否则页面标签会过期。
-    if forecast is None or forecast.get("verification_started") != verify:
-        forecast = fund_forecast_payload(forecast_nav,
-                                         verification_started=verify)
+    # 旧检查点没有 coverage（基金类型/环境分组）时同样重建，避免字段静默缺失。
+    if (forecast is None or forecast.get("verification_started") != verify
+            or "coverage" not in forecast):
+        forecast = fund_forecast_payload(
+            forecast_nav, verification_started=verify,
+            fund_type=_fund_type(code), benchmark=_forecast_benchmark(panel),
+            calendar=_forecast_calendar(nav.index[0], nav.index[-1]))
         cp.save("forecast", forecast)
 
     # ---------- 2. 相关性
